@@ -3,8 +3,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
 
+use super::super::*;
 pub use super::stripe_metadata_manager::{StripeMetadataManger, StripeStatus, StripeStatusVec};
-use super::{BlockDevice, IoChannel, SharedBuffer};
 use crate::Result;
 use log::{debug, error, info};
 use vmm_sys_util::eventfd::EventFd;

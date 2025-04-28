@@ -1,4 +1,4 @@
-use std::{cell::RefCell, ptr::copy_nonoverlapping, rc::Rc};
+use std::{cell::RefCell, mem::MaybeUninit, ptr::copy_nonoverlapping, rc::Rc};
 
 use super::super::*;
 use crate::Result;
@@ -73,6 +73,13 @@ pub struct UbiMetadata {
     pub stripe_headers: [[u8; 2]; UBI_MAX_STRIPES],
 }
 
+impl UbiMetadata {
+    #[cfg(test)]
+    pub fn stripe_headers_offset(&self, stripe_id: usize) -> usize {
+        stripe_id * std::mem::size_of::<u16>() + UBI_MAGIC_SIZE + 5
+    }
+}
+
 pub struct StripeMetadataManger {
     channel: Box<dyn IoChannel>,
     metadata: Box<UbiMetadata>,
@@ -81,16 +88,16 @@ pub struct StripeMetadataManger {
 }
 
 impl StripeMetadataManger {
-    pub fn new(source: &dyn BlockDevice, target: &dyn BlockDevice) -> Result<Self> {
+    pub fn new(source: &dyn BlockDevice, target: &dyn BlockDevice) -> Result<Box<Self>> {
         let mut channel = target.create_channel()?;
         let metadata = Self::load_metadata(&mut channel);
         let stripe_status_vec = Self::create_stripe_status_vec(&metadata, source.size());
-        Ok(StripeMetadataManger {
+        Ok(Box::new(StripeMetadataManger {
             channel,
             metadata,
             stripe_status_vec,
             metadata_buf: Rc::new(RefCell::new(vec![0u8; UBI_METADATA_SIZE])),
-        })
+        }))
     }
 
     pub fn metadata_size(&self) -> usize {
@@ -108,7 +115,7 @@ impl StripeMetadataManger {
                 self.metadata.stripe_headers[stripe_id] = [0, 0];
             }
             StripeStatus::Fetched => {
-                self.metadata.stripe_headers[stripe_id] = [3, 0];
+                self.metadata.stripe_headers[stripe_id] = [1, 0];
             }
             _ => {}
         }
@@ -198,19 +205,17 @@ impl StripeMetadataManger {
             panic!("Failed to read metadata");
         }
 
-        let mut metadata = Box::new(UbiMetadata {
-            magic: [0; UBI_MAGIC_SIZE],
-            version_major: [0; 2],
-            version_minor: [0; 2],
-            reserved: 0,
-            stripe_headers: [[0; 2]; UBI_MAX_STRIPES],
-        });
+        let mut metadata: Box<MaybeUninit<UbiMetadata>> = Box::new_uninit();
 
         unsafe {
-            let src = buf.borrow().as_ptr();
-            let dst = &mut *metadata as *mut UbiMetadata as *mut u8;
-            copy_nonoverlapping(src, dst, std::mem::size_of::<UbiMetadata>());
+            copy_nonoverlapping(
+                buf.borrow().as_ptr(),
+                metadata.as_mut_ptr() as *mut u8,
+                std::mem::size_of::<UbiMetadata>(),
+            );
         }
+
+        let mut metadata: Box<UbiMetadata> = unsafe { metadata.assume_init() };
 
         if metadata.magic != *UBI_MAGIC {
             info!("Metadata magic mismatch, assuming new device");
@@ -247,5 +252,70 @@ impl StripeMetadataManger {
             device_size,
             stripe_count,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_device::bdev_test::TestBlockDevice;
+
+    #[test]
+    fn test_stripe_metadata_manager() -> Result<()> {
+        let source = TestBlockDevice::new(29 * 1024 * 1024 + 3 * 1024);
+        let target = TestBlockDevice::new(40 * 1024 * 1024);
+        let mut manager = StripeMetadataManger::new(&source, &target)?;
+
+        assert_eq!(manager.metadata_size(), UBI_METADATA_SIZE);
+        assert_eq!(manager.stripe_status(0), StripeStatus::NotFetched);
+        assert_eq!(manager.stripe_source_offset(0), 0);
+        assert_eq!(manager.stripe_target_offset(0), UBI_METADATA_SIZE as u64);
+
+        let stripes_to_fetch = vec![0, 3, 7, 8];
+
+        for stripe_id in stripes_to_fetch.iter() {
+            assert_eq!(manager.stripe_status(*stripe_id), StripeStatus::NotFetched);
+
+            manager.set_stripe_status(*stripe_id, StripeStatus::Queued);
+            assert_eq!(manager.stripe_status(*stripe_id), StripeStatus::Queued);
+
+            manager.set_stripe_status(*stripe_id, StripeStatus::Fetching);
+            assert_eq!(manager.stripe_status(*stripe_id), StripeStatus::Fetching);
+
+            manager.set_stripe_status(*stripe_id, StripeStatus::Fetched);
+            assert_eq!(manager.stripe_status(*stripe_id), StripeStatus::Fetched);
+        }
+
+        let stripe_status_vec = manager.stripe_status_vec();
+        assert_eq!(stripe_status_vec.stripe_count, 30);
+
+        for stripe_id in 0..30 {
+            let expected_size = if stripe_id == 29 {
+                3 * 1024
+            } else {
+                STRIPE_SIZE
+            };
+            assert_eq!(manager.stripe_size(stripe_id), expected_size);
+        }
+
+        assert_eq!(target.flushes(), 0);
+        manager.start_flush().unwrap();
+        assert_eq!(manager.poll_flush(), None);
+        assert_eq!(manager.poll_flush(), Some(true));
+        assert_eq!(target.flushes(), 1);
+
+        for i in 0..UBI_MAX_STRIPES {
+            let offset = manager.metadata.stripe_headers_offset(i);
+            let mut header_buf = [0u8; 2];
+            target.read(offset, &mut header_buf, 2);
+            let expected_header = if stripes_to_fetch.contains(&i) {
+                [1, 0]
+            } else {
+                [0, 0]
+            };
+            assert_eq!(header_buf, expected_header);
+        }
+
+        Ok(())
     }
 }

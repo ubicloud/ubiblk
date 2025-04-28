@@ -57,7 +57,7 @@ impl StripeFetcher {
     ) -> Result<Self> {
         let fetch_source_channel = source.create_channel()?;
         let fetch_target_channel = target.create_channel()?;
-        let metadata_manager = Box::new(StripeMetadataManger::new(source, target)?);
+        let metadata_manager = StripeMetadataManger::new(source, target)?;
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,

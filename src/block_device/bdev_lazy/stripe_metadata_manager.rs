@@ -1,6 +1,6 @@
 use std::{cell::RefCell, ptr::copy_nonoverlapping, rc::Rc};
 
-use super::{BlockDevice, IoChannel, SharedBuffer};
+use super::super::*;
 use crate::Result;
 use log::{error, info};
 

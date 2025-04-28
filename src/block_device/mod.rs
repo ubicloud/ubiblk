@@ -22,11 +22,9 @@ mod bdev_crypt;
 mod bdev_lazy;
 mod bdev_sync;
 mod bdev_uring;
-mod stripe_fetcher;
-mod stripe_metadata_manager;
 
 pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_lazy::LazyBlockDevice;
+pub use bdev_lazy::StripeFetcher;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;
-pub use stripe_fetcher::StripeFetcher;

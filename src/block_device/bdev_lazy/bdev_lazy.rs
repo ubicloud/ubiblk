@@ -3,14 +3,11 @@ use std::{
     sync::mpsc::{Receiver, Sender},
 };
 
-use super::{
-    stripe_fetcher::{
-        SharedStripeFetcher, StripeFetcherRequest, StripeFetcherResponse, StripeStatus,
-        StripeStatusVec,
-    },
-    *,
+use super::super::*;
+use super::stripe_fetcher::{
+    SharedStripeFetcher, StripeFetcherRequest, StripeFetcherResponse, StripeStatus, StripeStatusVec,
 };
-use crate::Result;
+use crate::{block_device::SharedBuffer, Result};
 use log::error;
 
 #[derive(Debug)]

@@ -80,19 +80,19 @@ impl UbiMetadata {
     }
 }
 
-pub struct StripeMetadataManger {
+pub struct StripeMetadataManager {
     channel: Box<dyn IoChannel>,
     metadata: Box<UbiMetadata>,
     stripe_status_vec: StripeStatusVec,
     metadata_buf: SharedBuffer,
 }
 
-impl StripeMetadataManger {
+impl StripeMetadataManager {
     pub fn new(source: &dyn BlockDevice, target: &dyn BlockDevice) -> Result<Box<Self>> {
         let mut channel = target.create_channel()?;
         let metadata = Self::load_metadata(&mut channel);
         let stripe_status_vec = Self::create_stripe_status_vec(&metadata, source.size());
-        Ok(Box::new(StripeMetadataManger {
+        Ok(Box::new(StripeMetadataManager {
             channel,
             metadata,
             stripe_status_vec,
@@ -264,7 +264,7 @@ mod tests {
     fn test_stripe_metadata_manager() -> Result<()> {
         let source = TestBlockDevice::new(29 * 1024 * 1024 + 3 * 1024);
         let target = TestBlockDevice::new(40 * 1024 * 1024);
-        let mut manager = StripeMetadataManger::new(&source, &target)?;
+        let mut manager = StripeMetadataManager::new(&source, &target)?;
 
         assert_eq!(manager.metadata_size(), UBI_METADATA_SIZE);
         assert_eq!(manager.stripe_status(0), StripeStatus::NotFetched);

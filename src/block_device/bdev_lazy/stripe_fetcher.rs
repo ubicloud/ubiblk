@@ -254,38 +254,41 @@ impl StripeFetcher {
         }
     }
 
-    pub fn run(&mut self) {
-        loop {
-            self.receive_requests();
+    pub fn update(&mut self) {
+        self.receive_requests();
 
-            let mut completed_fetches = self.start_fetches();
-            completed_fetches.append(&mut self.poll_fetches());
+        let mut completed_fetches = self.start_fetches();
+        completed_fetches.append(&mut self.poll_fetches());
 
-            for (stripe_id, success) in completed_fetches {
-                if let Some(requesters) = self.stripe_requesters.remove(&stripe_id) {
-                    for requester in requesters {
-                        if let Err(e) =
-                            requester.send(StripeFetcherResponse::Fetch(stripe_id, success))
-                        {
-                            error!("Failed to send response for stripe {}: {:?}", stripe_id, e);
-                        }
+        for (stripe_id, success) in completed_fetches {
+            if let Some(requesters) = self.stripe_requesters.remove(&stripe_id) {
+                for requester in requesters {
+                    if let Err(e) = requester.send(StripeFetcherResponse::Fetch(stripe_id, success))
+                    {
+                        error!("Failed to send response for stripe {}: {:?}", stripe_id, e);
                     }
                 }
             }
+        }
 
-            if let Some(success) = self.metadata_manager.poll_flush() {
-                self.finish_flush(success);
+        if let Some(success) = self.metadata_manager.poll_flush() {
+            self.finish_flush(success);
+        }
+
+        if self.pending_flush_requests.len() > 0 && self.inprogress_flush_requests.is_empty() {
+            self.inprogress_flush_requests = self.pending_flush_requests.clone();
+            self.pending_flush_requests.clear();
+
+            if let Err(e) = self.metadata_manager.start_flush() {
+                error!("Failed to start flush: {:?}", e);
+                self.finish_flush(false);
             }
+        }
+    }
 
-            if self.pending_flush_requests.len() > 0 && self.inprogress_flush_requests.is_empty() {
-                self.inprogress_flush_requests = self.pending_flush_requests.clone();
-                self.pending_flush_requests.clear();
-
-                if let Err(e) = self.metadata_manager.start_flush() {
-                    error!("Failed to start flush: {:?}", e);
-                    self.finish_flush(false);
-                }
-            }
+    pub fn run(&mut self) {
+        loop {
+            self.update();
 
             if self.killfd.read().is_ok() {
                 info!("Received kill signal, shutting down");
@@ -307,3 +310,96 @@ impl StripeFetcher {
 
 unsafe impl Send for StripeFetcher {}
 unsafe impl Sync for StripeFetcher {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_device::bdev_test::TestBlockDevice;
+
+    #[test]
+    fn test_stripe_fetcher() {
+        let source = TestBlockDevice::new(29 * 1024 * 1024 + 3 * 1024);
+        let target = TestBlockDevice::new(40 * 1024 * 1024);
+
+        let killfd = EventFd::new(0).unwrap();
+        let mut stripe_fetcher = StripeFetcher::new(&source, &target, killfd).unwrap();
+
+        let (req_sender, req_receiver) = std::sync::mpsc::channel();
+        let (resp_sender, resp_receiver) = std::sync::mpsc::channel();
+
+        stripe_fetcher.add_req_mpsc_pair(resp_sender, req_receiver);
+
+        let buf1 = "some test data".as_bytes();
+        let buf2 = "some more test data".as_bytes();
+        let mut buf3 = vec![0u8; 64];
+
+        {
+            let metadata_manager = &stripe_fetcher.metadata_manager;
+
+            source.write(metadata_manager.stripe_source_offset(0), buf1, buf1.len());
+            source.write(metadata_manager.stripe_source_offset(3), buf2, buf2.len());
+
+            // before fetch, contents shouldn't be the same
+            target.read(metadata_manager.stripe_target_offset(0), &mut buf3, 64);
+            assert_ne!(&buf3[..buf1.len()], buf1);
+            target.read(metadata_manager.stripe_target_offset(3), &mut buf3, 64);
+            assert_ne!(&buf3[..buf2.len()], buf2);
+        }
+
+        // request fetch
+        req_sender.send(StripeFetcherRequest::Fetch(0)).unwrap();
+        req_sender.send(StripeFetcherRequest::Fetch(3)).unwrap();
+
+        let mut completed = 0;
+        while completed < 2 {
+            stripe_fetcher.update();
+            if let Ok(resp) = resp_receiver.try_recv() {
+                match resp {
+                    StripeFetcherResponse::Fetch(stripe_id, success) => {
+                        assert!(success);
+                        assert!(stripe_id == 0 || stripe_id == 3);
+                        completed += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        {
+            let metadata_manager = &stripe_fetcher.metadata_manager;
+
+            // after fetch, contents should be the same
+            target.read(metadata_manager.stripe_target_offset(0), &mut buf3, 64);
+            assert_eq!(&buf3[..buf1.len()], buf1);
+            target.read(metadata_manager.stripe_target_offset(3), &mut buf3, 64);
+            assert_eq!(&buf3[..buf2.len()], buf2);
+        }
+
+        // request flush
+        const NUM_FLUSHES: usize = 10;
+        for i in 0..NUM_FLUSHES {
+            req_sender.send(StripeFetcherRequest::Flush(i)).unwrap();
+        }
+
+        let mut completed = [false; NUM_FLUSHES];
+        let mut flush_count = 0;
+        while flush_count < NUM_FLUSHES {
+            stripe_fetcher.update();
+            if let Ok(resp) = resp_receiver.try_recv() {
+                match resp {
+                    StripeFetcherResponse::Flush(flush_id, success) => {
+                        assert!(success);
+                        assert!(flush_id < NUM_FLUSHES);
+                        completed[flush_id] = true;
+                        flush_count += 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for i in 0..NUM_FLUSHES {
+            assert!(completed[i], "Flush {} was not completed", i);
+        }
+    }
+}

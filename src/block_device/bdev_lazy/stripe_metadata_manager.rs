@@ -24,10 +24,10 @@ const METADATA_FLUSH_ID: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct StripeStatusVec {
-    data: Vec<StripeStatus>,
-    stripe_size: u64,
-    device_size: u64,
-    stripe_count: u64,
+    pub data: Vec<StripeStatus>,
+    pub stripe_size: u64,
+    pub device_size: u64,
+    pub stripe_count: u64,
 }
 
 impl StripeStatusVec {
@@ -121,12 +121,12 @@ impl StripeMetadataManger {
         }
     }
 
-    pub fn stripe_source_offset(&self, stripe_id: usize) -> u64 {
-        (stripe_id * STRIPE_SIZE) as u64
+    pub fn stripe_source_offset(&self, stripe_id: usize) -> usize {
+        (stripe_id * STRIPE_SIZE) as usize
     }
 
-    pub fn stripe_target_offset(&self, stripe_id: usize) -> u64 {
-        (stripe_id * STRIPE_SIZE + UBI_METADATA_SIZE) as u64
+    pub fn stripe_target_offset(&self, stripe_id: usize) -> usize {
+        (stripe_id * STRIPE_SIZE + UBI_METADATA_SIZE) as usize
     }
 
     pub fn stripe_size(&self, stripe_id: usize) -> usize {
@@ -269,7 +269,7 @@ mod tests {
         assert_eq!(manager.metadata_size(), UBI_METADATA_SIZE);
         assert_eq!(manager.stripe_status(0), StripeStatus::NotFetched);
         assert_eq!(manager.stripe_source_offset(0), 0);
-        assert_eq!(manager.stripe_target_offset(0), UBI_METADATA_SIZE as u64);
+        assert_eq!(manager.stripe_target_offset(0), UBI_METADATA_SIZE);
 
         let stripes_to_fetch = vec![0, 3, 7, 8];
 
@@ -315,6 +315,10 @@ mod tests {
             };
             assert_eq!(header_buf, expected_header);
         }
+
+        let mut magic_buf = [0u8; UBI_MAGIC_SIZE];
+        target.read(0, &mut magic_buf, UBI_MAGIC_SIZE);
+        assert_eq!(magic_buf, *UBI_MAGIC);
 
         Ok(())
     }

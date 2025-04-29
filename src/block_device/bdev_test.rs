@@ -91,6 +91,13 @@ impl TestBlockDevice {
         buf.copy_from_slice(&mem[start..end]);
     }
 
+    pub fn write(&self, offset: usize, buf: &[u8], len: usize) {
+        let mut mem = self.mem.lock().unwrap();
+        let start = offset;
+        let end = start + len;
+        mem[start..end].copy_from_slice(buf);
+    }
+
     pub fn flushes(&self) -> usize {
         self.flushes.load(Ordering::SeqCst)
     }

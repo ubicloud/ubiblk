@@ -1,19 +1,22 @@
-use std::sync::atomic::Ordering;
-use std::sync::{atomic::AtomicUsize, Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use super::*;
 
+pub struct TestDeviceMetrics {
+    pub reads: usize,
+    pub writes: usize,
+    pub flushes: usize,
+}
+
 struct TestIoChannel {
-    mem: Arc<Mutex<Vec<u8>>>,
+    mem: Arc<RwLock<Vec<u8>>>,
     finished_requests: Vec<(usize, bool)>,
-    reads: Arc<AtomicUsize>,
-    writes: Arc<AtomicUsize>,
-    flushes: Arc<AtomicUsize>,
+    metrics: Arc<RwLock<TestDeviceMetrics>>,
 }
 
 impl IoChannel for TestIoChannel {
     fn add_read(&mut self, _sector: u64, _buf: SharedBuffer, _len: usize, _id: usize) {
-        let mem = self.mem.lock().unwrap();
+        let mem = self.mem.read().unwrap();
         let mut buf = _buf.borrow_mut();
         let len = buf.len();
         let start = (_sector * 512) as usize;
@@ -25,11 +28,11 @@ impl IoChannel for TestIoChannel {
 
         buf.copy_from_slice(&mem[start..end]);
         self.finished_requests.push((_id, true));
-        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.metrics.write().unwrap().reads += 1;
     }
 
     fn add_write(&mut self, _sector: u64, _buf: SharedBuffer, _len: usize, _id: usize) {
-        let mut mem = self.mem.lock().unwrap();
+        let mut mem = self.mem.write().unwrap();
         let buf = _buf.borrow();
         let len = buf.len();
         let start = (_sector * 512) as usize;
@@ -41,12 +44,12 @@ impl IoChannel for TestIoChannel {
 
         mem[start..end].copy_from_slice(&buf);
         self.finished_requests.push((_id, true));
-        self.writes.fetch_add(1, Ordering::SeqCst);
+        self.metrics.write().unwrap().writes += 1;
     }
 
     fn add_flush(&mut self, _id: usize) {
         self.finished_requests.push((_id, true));
-        self.flushes.fetch_add(1, Ordering::SeqCst);
+        self.metrics.write().unwrap().flushes += 1;
     }
 
     fn submit(&mut self) -> Result<()> {
@@ -66,40 +69,40 @@ impl IoChannel for TestIoChannel {
 
 pub struct TestBlockDevice {
     size: u64,
-    mem: Arc<Mutex<Vec<u8>>>,
-    reads: Arc<AtomicUsize>,
-    writes: Arc<AtomicUsize>,
-    flushes: Arc<AtomicUsize>,
+    pub mem: Arc<RwLock<Vec<u8>>>,
+    pub metrics: Arc<RwLock<TestDeviceMetrics>>,
 }
 
 impl TestBlockDevice {
     pub fn new(size: u64) -> Self {
-        let mem = Arc::new(Mutex::new(vec![0u8; size as usize]));
+        let mem = Arc::new(RwLock::new(vec![0u8; size as usize]));
         TestBlockDevice {
             size,
             mem,
-            reads: Arc::new(AtomicUsize::new(0)),
-            writes: Arc::new(AtomicUsize::new(0)),
-            flushes: Arc::new(AtomicUsize::new(0)),
+            metrics: Arc::new(RwLock::new(TestDeviceMetrics {
+                reads: 0,
+                writes: 0,
+                flushes: 0,
+            })),
         }
     }
 
     pub fn read(&self, offset: usize, buf: &mut [u8], len: usize) {
-        let mem = self.mem.lock().unwrap();
+        let mem = self.mem.read().unwrap();
         let start = offset;
         let end = start + len;
         buf.copy_from_slice(&mem[start..end]);
     }
 
     pub fn write(&self, offset: usize, buf: &[u8], len: usize) {
-        let mut mem = self.mem.lock().unwrap();
+        let mut mem = self.mem.write().unwrap();
         let start = offset;
         let end = start + len;
         mem[start..end].copy_from_slice(buf);
     }
 
     pub fn flushes(&self) -> usize {
-        self.flushes.load(Ordering::SeqCst)
+        self.metrics.read().unwrap().flushes
     }
 }
 
@@ -108,9 +111,7 @@ impl BlockDevice for TestBlockDevice {
         Ok(Box::new(TestIoChannel {
             mem: self.mem.clone(),
             finished_requests: Vec::new(),
-            reads: self.reads.clone(),
-            writes: self.writes.clone(),
-            flushes: self.flushes.clone(),
+            metrics: self.metrics.clone(),
         }))
     }
 

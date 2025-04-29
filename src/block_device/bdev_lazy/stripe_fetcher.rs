@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
-pub use super::stripe_metadata_manager::{StripeMetadataManger, StripeStatus, StripeStatusVec};
+pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
 use crate::Result;
 use log::{debug, error, info};
 use vmm_sys_util::eventfd::EventFd;
@@ -35,7 +35,7 @@ struct FetchBuffer {
 pub struct StripeFetcher {
     fetch_source_channel: Box<dyn IoChannel>,
     fetch_target_channel: Box<dyn IoChannel>,
-    metadata_manager: Box<StripeMetadataManger>,
+    metadata_manager: Box<StripeMetadataManager>,
     fetch_queue: VecDeque<usize>,
     stripe_requesters: HashMap<usize, Vec<Sender<StripeFetcherResponse>>>,
     req_mpsc_pairs: Vec<(
@@ -57,7 +57,7 @@ impl StripeFetcher {
     ) -> Result<Self> {
         let fetch_source_channel = source.create_channel()?;
         let fetch_target_channel = target.create_channel()?;
-        let metadata_manager = StripeMetadataManger::new(source, target)?;
+        let metadata_manager = StripeMetadataManager::new(source, target)?;
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,

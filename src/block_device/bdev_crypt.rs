@@ -92,6 +92,10 @@ impl CryptIoChannel {
 
 impl IoChannel for CryptIoChannel {
     fn add_read(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
+        if len % 512 != 0 {
+            // programming error, so panic
+            panic!("Read length must be a multiple of 512");
+        }
         self.read_requests[id] = Some(Request {
             sector,
             buf: buf.clone(),
@@ -101,6 +105,10 @@ impl IoChannel for CryptIoChannel {
     }
 
     fn add_write(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
+        if len % 512 != 0 {
+            // programming error, so panic
+            panic!("Write length must be a multiple of 512");
+        }
         self.encrypt(buf.borrow_mut().as_mut_slice(), sector, (len / 512) as u64);
         self.base.add_write(sector, buf.clone(), len, id);
     }
@@ -180,4 +188,86 @@ fn prepare_keys(hex_key1: &str, hex_key2: &str) -> Result<([u8; 32], [u8; 32])> 
     let key2 = decode_key(hex_key2)?;
 
     Ok((key1, key2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_device::bdev_test::TestBlockDevice;
+
+    #[test]
+    fn test_crypt_block_device() {
+        let base = TestBlockDevice::new(1024 * 1024);
+        let metrics = base.metrics.clone();
+        let mem = base.mem.clone();
+        let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let key2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+        let crypt_bdev = CryptBlockDevice::new(Box::new(base), key1, key2);
+        let mut channel = crypt_bdev
+            .create_channel()
+            .expect("Failed to create channel");
+
+        // initially, first 2 sectors of mem should be the same
+        assert_eq!(
+            &mem.read().unwrap()[0..512],
+            &mem.read().unwrap()[512..1024]
+        );
+
+        let sample_data = "Hello, world!".as_bytes();
+        let buf = Rc::new(RefCell::new(vec![0u8; 512]));
+
+        for i in 0..2 {
+            buf.borrow_mut()[0..sample_data.len()].copy_from_slice(sample_data);
+            channel.add_write(i, buf.clone(), 512, 12);
+            channel.submit().expect("Failed to submit write request");
+            while channel.busy() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let poll_results = channel.poll();
+            assert_eq!(poll_results, vec![(12, true)]);
+        }
+
+        assert_eq!(metrics.read().unwrap().reads, 0);
+        assert_eq!(metrics.read().unwrap().writes, 2);
+        assert_eq!(metrics.read().unwrap().flushes, 0);
+
+        for i in 0..2 {
+            let read_id = 34;
+            buf.borrow_mut().fill(0);
+            channel.add_read(i, buf.clone(), 512, read_id);
+            channel.submit().expect("Failed to submit read request");
+
+            while channel.busy() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            let poll_results = channel.poll();
+            assert_eq!(poll_results, vec![(read_id, true)]);
+            assert_eq!(&buf.borrow()[0..sample_data.len()], sample_data);
+        }
+
+        assert_eq!(metrics.read().unwrap().reads, 2);
+        assert_eq!(metrics.read().unwrap().writes, 2);
+        assert_eq!(metrics.read().unwrap().flushes, 0);
+
+        let flush_id = 56;
+        channel.add_flush(flush_id);
+        channel.submit().expect("Failed to submit flush request");
+        while channel.busy() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let poll_results = channel.poll();
+        assert_eq!(poll_results, vec![(flush_id, true)]);
+
+        assert_eq!(metrics.read().unwrap().reads, 2);
+        assert_eq!(metrics.read().unwrap().writes, 2);
+        assert_eq!(metrics.read().unwrap().flushes, 1);
+
+        // Although we wrote the same data to both sectors, the encrypted data
+        // should be different due to the different tweaks.
+        assert_ne!(
+            &mem.read().unwrap()[0..512],
+            &mem.read().unwrap()[512..1024]
+        );
+    }
 }

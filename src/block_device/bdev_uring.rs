@@ -160,3 +160,50 @@ impl UringBlockDevice {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use log::error;
+    use std::{cell::RefCell, rc::Rc, thread::sleep, time::Duration};
+    use tempfile::NamedTempFile;
+
+    fn spin_until_complete(chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
+        let mut completed = vec![];
+        while chan.busy() {
+            completed.extend(chan.poll());
+            sleep(Duration::from_millis(10));
+        }
+        completed
+    }
+
+    #[test]
+    fn create_channel_and_basic_io() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            Error::IoError
+        })?;
+        let path = tmpfile.path().to_owned();
+        let block_dev = UringBlockDevice::new(path.clone(), 8)?;
+        let mut chan = block_dev.create_channel()?;
+
+        // Write sector 0
+        let pattern = vec![0xABu8; 512];
+        let write_buf = Rc::new(RefCell::new(pattern.clone()));
+        chan.add_write(0, write_buf.clone(), 512, 1);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(1, true)]);
+
+        // Read it back
+        let read_buf = Rc::new(RefCell::new(vec![0u8; 512]));
+        chan.add_read(0, read_buf.clone(), 512, 2);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(2, true)]);
+        assert_eq!(*read_buf.borrow(), pattern);
+
+        Ok(())
+    }
+}

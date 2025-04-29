@@ -10,7 +10,7 @@ use crate::utils::block::{print_features, VirtioBlockConfig};
 
 use super::backend_thread::UbiBlkBackendThread;
 use crate::{Error, Result};
-use log::{error, info};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use vhost::vhost_user::message::*;
 use vhost_user_backend::{
@@ -82,7 +82,7 @@ impl<'a> UbiBlkBackend {
             queues_per_thread.push(0b1 << i);
         }
 
-        println!("queues_per_thread: {:?}", queues_per_thread);
+        debug!("queues_per_thread: {:?}", queues_per_thread);
 
         Ok(UbiBlkBackend {
             threads,
@@ -125,7 +125,7 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
     }
 
     fn acked_features(&self, features: u64) {
-        println!("acked_features: 0x{:x}", features);
+        info!("acked_features: 0x{:x}", features);
         print_features(features);
     }
 
@@ -146,7 +146,7 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
     //   le16 used_event; /* Only if VIRTIO_F_EVENT_IDX */
     // };
     fn set_event_idx(&self, enabled: bool) {
-        println!("set_event_idx: {}", enabled);
+        info!("set_event_idx: {}", enabled);
         for thread in self.threads.iter() {
             thread.lock().unwrap().event_idx = enabled;
         }
@@ -245,7 +245,7 @@ fn build_block_device(options: &Options) -> Box<dyn BlockDevice> {
     let mut block_device: Box<dyn BlockDevice> =
         block_device::UringBlockDevice::new(PathBuf::from(&options.path), options.queue_size)
             .map_err(|e| {
-                println!("Failed to create block device: {:?}", e);
+                error!("Failed to create block device: {:?}", e);
                 Box::new(e)
             })
             .unwrap();
@@ -343,21 +343,27 @@ fn start_block_backend(options: &Options) -> std::result::Result<(), Box<dyn std
     } else {
         info!("No stripe fetcher thread to join");
     }
-    println!("Daemon is finished!");
+
+    info!("Daemon is finished!");
 
     Ok(())
 }
 
 pub fn block_backend_loop(config: &Options) {
     env_logger::init();
+
+    info!("Starting vhost-user-blk backend with options: {:?}", config);
+
+    info!("Process ID: {}", std::process::id());
+
     loop {
         match start_block_backend(config) {
             Err(e) => {
-                println!("An error occurred: {:?}", e);
+                error!("An error occurred: {:?}", e);
                 break;
             }
             Ok(_) => {
-                println!("Disconnected from the socket, restarting ...");
+                info!("Disconnected from the socket, restarting ...");
                 continue;
             }
         }

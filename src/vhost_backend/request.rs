@@ -13,6 +13,7 @@
 
 use std::result;
 
+use log::error;
 use smallvec::SmallVec;
 use thiserror::Error;
 use virtio_bindings::virtio_blk::*;
@@ -92,7 +93,7 @@ impl Request {
             .next()
             .ok_or(Error::DescriptorChainTooShort)
             .inspect_err(|_| {
-                println!("Missing head descriptor");
+                error!("Missing head descriptor");
             })?;
 
         // The head contains the request type which MUST be readable.
@@ -114,14 +115,14 @@ impl Request {
             .next()
             .ok_or(Error::DescriptorChainTooShort)
             .inspect_err(|_| {
-                println!("Only head descriptor present: request = {:?}", req);
+                error!("Only head descriptor present: request = {:?}", req);
             })?;
 
         if !desc.has_next() {
             status_desc = desc;
             // Only flush requests are allowed to skip the data descriptor.
             if req.request_type != RequestType::Flush {
-                println!("Need a data descriptor: request = {:?}", req);
+                error!("Need a data descriptor: request = {:?}", req);
                 return Err(Error::DescriptorChainTooShort);
             }
         } else {
@@ -142,7 +143,7 @@ impl Request {
                     .next()
                     .ok_or(Error::DescriptorChainTooShort)
                     .inspect_err(|_| {
-                        println!("DescriptorChain corrupted: request = {:?}", req);
+                        error!("DescriptorChain corrupted: request = {:?}", req);
                     })?;
             }
             status_desc = desc;

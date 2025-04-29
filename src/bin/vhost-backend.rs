@@ -36,12 +36,5 @@ fn main() {
         }
     };
 
-    println!(
-        "Starting vhost-user-blk backend with options: {:?}",
-        options
-    );
-
-    println!("Process ID: {}", std::process::id());
-
     block_backend_loop(&options);
 }

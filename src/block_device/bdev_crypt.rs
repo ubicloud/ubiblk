@@ -94,7 +94,7 @@ impl IoChannel for CryptIoChannel {
     fn add_read(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
         if len % 512 != 0 {
             // programming error, so panic
-            panic!("Read length must be a multiple of 512");
+            panic!("Read length must be a multiple of 512 (sector={},len={})", sector, len);
         }
         self.read_requests[id] = Some(Request {
             sector,
@@ -107,7 +107,7 @@ impl IoChannel for CryptIoChannel {
     fn add_write(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
         if len % 512 != 0 {
             // programming error, so panic
-            panic!("Write length must be a multiple of 512");
+            panic!("Write length must be a multiple of 512 (sector={},len={})", sector, len);
         }
         self.encrypt(buf.borrow_mut().as_mut_slice(), sector, (len / 512) as u64);
         self.base.add_write(sector, buf.clone(), len, id);

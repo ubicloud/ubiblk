@@ -138,8 +138,8 @@ impl StripeMetadataManager {
     }
 
     pub fn start_flush(&mut self) -> Result<()> {
-        // copy metadata to metadata buffer
         let metadata_buf = self.metadata_buf.clone();
+        let metadata_buf_size = metadata_buf.borrow().len();
         let metadata_size = std::mem::size_of::<UbiMetadata>();
         unsafe {
             let src = &*self.metadata as *const UbiMetadata as *const u8;
@@ -148,7 +148,7 @@ impl StripeMetadataManager {
         }
 
         self.channel
-            .add_write(0, metadata_buf, metadata_size, METADATA_WRITE_ID);
+            .add_write(0, metadata_buf, metadata_buf_size, METADATA_WRITE_ID);
 
         self.channel.submit()?;
 

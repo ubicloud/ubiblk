@@ -1,5 +1,5 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
-use crate::{Error, Result};
+use crate::{vhost_backend::SECTOR_SIZE, Error, Result};
 use io_uring::IoUring;
 use log::error;
 use std::{
@@ -45,14 +45,14 @@ impl UringIoChannel {
 }
 
 impl IoChannel for UringIoChannel {
-    fn add_read(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
+    fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let mut buf = buf.borrow_mut();
         let fd = self.file.as_raw_fd();
-        let read_e =
-            io_uring::opcode::Read::new(io_uring::types::Fd(fd), buf.as_mut_ptr(), len as u32)
-                .offset(sector * 512)
-                .build()
-                .user_data(id as u64);
+        let len = sector_count * SECTOR_SIZE as u32;
+        let read_e = io_uring::opcode::Read::new(io_uring::types::Fd(fd), buf.as_mut_ptr(), len)
+            .offset(sector_offset * SECTOR_SIZE as u64)
+            .build()
+            .user_data(id as u64);
         let push_result = unsafe { self.ring.submission().push(&read_e) };
         if let Err(_) = push_result {
             self.finished_requests.push((id, false));
@@ -61,12 +61,13 @@ impl IoChannel for UringIoChannel {
         self.submissions += 1;
     }
 
-    fn add_write(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
+    fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let buf = buf.borrow();
         let fd = self.file.as_raw_fd();
+        let len = sector_count * SECTOR_SIZE as u32;
         let write_e =
             io_uring::opcode::Write::new(io_uring::types::Fd(fd), buf.as_ptr(), len as u32)
-                .offset(sector * 512)
+                .offset(sector_offset * SECTOR_SIZE as u64)
                 .build()
                 .user_data(id as u64);
         let push_result = unsafe { self.ring.submission().push(&write_e) };
@@ -127,7 +128,7 @@ impl IoChannel for UringIoChannel {
 
 pub struct UringBlockDevice {
     path: PathBuf,
-    size: u64,
+    sector_count: u64,
     queue_size: usize,
 }
 
@@ -137,8 +138,8 @@ impl BlockDevice for UringBlockDevice {
         Ok(Box::new(channel))
     }
 
-    fn size(&self) -> u64 {
-        self.size
+    fn sector_count(&self) -> u64 {
+        self.sector_count
     }
 }
 
@@ -147,9 +148,14 @@ impl UringBlockDevice {
         match std::fs::metadata(&path) {
             Ok(metadata) => {
                 let size = metadata.len();
+                if size % SECTOR_SIZE as u64 != 0 {
+                    error!("File size is not a multiple of sector size");
+                    return Err(Error::InvalidParameter);
+                }
+                let sector_count = size / SECTOR_SIZE as u64;
                 Ok(Box::new(UringBlockDevice {
                     path,
-                    size,
+                    sector_count,
                     queue_size,
                 }))
             }
@@ -189,16 +195,16 @@ mod tests {
         let mut chan = block_dev.create_channel()?;
 
         // Write sector 0
-        let pattern = vec![0xABu8; 512];
+        let pattern = vec![0xABu8; SECTOR_SIZE];
         let write_buf = Rc::new(RefCell::new(pattern.clone()));
-        chan.add_write(0, write_buf.clone(), 512, 1);
+        chan.add_write(0, 1, write_buf.clone(), 1);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);
         assert_eq!(result, vec![(1, true)]);
 
         // Read it back
-        let read_buf = Rc::new(RefCell::new(vec![0u8; 512]));
-        chan.add_read(0, read_buf.clone(), 512, 2);
+        let read_buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);
         assert_eq!(result, vec![(2, true)]);

@@ -1,12 +1,13 @@
 use super::*;
+use crate::vhost_backend::SECTOR_SIZE;
 use crate::{Error, Result};
 use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
 use log::error;
 
 struct Request {
-    sector: u64,
+    sector_offset: u64,
+    sector_count: u32,
     buf: SharedBuffer,
-    len: usize,
 }
 
 struct CryptIoChannel {
@@ -54,16 +55,17 @@ impl CryptIoChannel {
      */
 
     fn decrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
-        for i in 0..sector_count {
-            let sector = sector_start + i;
+        for i in 0..sector_count as usize {
+            let sector = sector_start + i as u64;
             let mut tweak = self.get_initial_tweak(sector);
-            let sector_data = &mut buf[(i * 512) as usize..((i + 1) * 512) as usize];
+            let sector_data =
+                &mut buf[(i * SECTOR_SIZE) as usize..((i + 1) * SECTOR_SIZE) as usize];
             unsafe {
                 XTS_AES_256_dec(
                     self.key2.as_mut_ptr(),
                     self.key1.as_mut_ptr(),
                     tweak.as_mut_ptr(),
-                    512,
+                    SECTOR_SIZE as u64,
                     sector_data.as_ptr(),
                     sector_data.as_mut_ptr(),
                 );
@@ -72,16 +74,17 @@ impl CryptIoChannel {
     }
 
     fn encrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
-        for i in 0..sector_count {
-            let sector = sector_start + i;
+        for i in 0..sector_count as usize {
+            let sector = sector_start + i as u64;
             let mut tweak = self.get_initial_tweak(sector);
-            let sector_data = &mut buf[((i * 512) as usize)..((i + 1) * 512) as usize];
+            let sector_data =
+                &mut buf[((i * SECTOR_SIZE) as usize)..((i + 1) * SECTOR_SIZE) as usize];
             unsafe {
                 XTS_AES_256_enc(
                     self.key2.as_mut_ptr(),
                     self.key1.as_mut_ptr(),
                     tweak.as_mut_ptr(),
-                    512,
+                    SECTOR_SIZE as u64,
                     sector_data.as_ptr(),
                     sector_data.as_mut_ptr(),
                 );
@@ -91,26 +94,24 @@ impl CryptIoChannel {
 }
 
 impl IoChannel for CryptIoChannel {
-    fn add_read(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
-        if len % 512 != 0 {
-            // programming error, so panic
-            panic!("Read length must be a multiple of 512 (sector={},len={})", sector, len);
-        }
+    fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         self.read_requests[id] = Some(Request {
-            sector,
+            sector_offset,
             buf: buf.clone(),
-            len,
+            sector_count,
         });
-        self.base.add_read(sector, buf.clone(), len, id);
+        self.base
+            .add_read(sector_offset, sector_count, buf.clone(), id);
     }
 
-    fn add_write(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
-        if len % 512 != 0 {
-            // programming error, so panic
-            panic!("Write length must be a multiple of 512 (sector={},len={})", sector, len);
-        }
-        self.encrypt(buf.borrow_mut().as_mut_slice(), sector, (len / 512) as u64);
-        self.base.add_write(sector, buf.clone(), len, id);
+    fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
+        self.encrypt(
+            buf.borrow_mut().as_mut_slice(),
+            sector_offset,
+            sector_count as u64,
+        );
+        self.base
+            .add_write(sector_offset, sector_count, buf.clone(), id);
     }
 
     fn add_flush(&mut self, id: usize) {
@@ -127,8 +128,8 @@ impl IoChannel for CryptIoChannel {
             if let Some(req) = self.read_requests[id].take() {
                 self.decrypt(
                     req.buf.borrow_mut().as_mut_slice(),
-                    req.sector,
-                    (req.len / 512) as u64,
+                    req.sector_offset,
+                    req.sector_count as u64,
                 );
                 results.push((id, result));
             } else {
@@ -157,8 +158,8 @@ impl BlockDevice for CryptBlockDevice {
         Ok(Box::new(crypt_channel))
     }
 
-    fn size(&self) -> u64 {
-        self.base.size()
+    fn sector_count(&self) -> u64 {
+        self.base.sector_count()
     }
 }
 
@@ -193,7 +194,7 @@ fn prepare_keys(hex_key1: &str, hex_key2: &str) -> Result<([u8; 32], [u8; 32])> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::{block_device::bdev_test::TestBlockDevice, vhost_backend::SECTOR_SIZE};
 
     #[test]
     fn test_crypt_block_device() {
@@ -209,16 +210,16 @@ mod tests {
 
         // initially, first 2 sectors of mem should be the same
         assert_eq!(
-            &mem.read().unwrap()[0..512],
-            &mem.read().unwrap()[512..1024]
+            &mem.read().unwrap()[0..SECTOR_SIZE],
+            &mem.read().unwrap()[SECTOR_SIZE..SECTOR_SIZE * 2]
         );
 
         let sample_data = "Hello, world!".as_bytes();
-        let buf = Rc::new(RefCell::new(vec![0u8; 512]));
+        let buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
 
         for i in 0..2 {
             buf.borrow_mut()[0..sample_data.len()].copy_from_slice(sample_data);
-            channel.add_write(i, buf.clone(), 512, 12);
+            channel.add_write(i, 1, buf.clone(), 12);
             channel.submit().expect("Failed to submit write request");
             while channel.busy() {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -234,7 +235,7 @@ mod tests {
         for i in 0..2 {
             let read_id = 34;
             buf.borrow_mut().fill(0);
-            channel.add_read(i, buf.clone(), 512, read_id);
+            channel.add_read(i, 1, buf.clone(), read_id);
             channel.submit().expect("Failed to submit read request");
 
             while channel.busy() {
@@ -266,8 +267,8 @@ mod tests {
         // Although we wrote the same data to both sectors, the encrypted data
         // should be different due to the different tweaks.
         assert_ne!(
-            &mem.read().unwrap()[0..512],
-            &mem.read().unwrap()[512..1024]
+            &mem.read().unwrap()[0..SECTOR_SIZE],
+            &mem.read().unwrap()[SECTOR_SIZE..SECTOR_SIZE * 2]
         );
     }
 }

@@ -1,7 +1,7 @@
 use std::{cell::RefCell, mem::MaybeUninit, ptr::copy_nonoverlapping, rc::Rc};
 
 use super::super::*;
-use crate::Result;
+use crate::{vhost_backend::SECTOR_SIZE, Result};
 use log::{error, info};
 
 #[repr(u8)]
@@ -16,8 +16,10 @@ pub enum StripeStatus {
 const UBI_MAGIC_SIZE: usize = 9;
 const UBI_MAX_STRIPES: usize = 2 * 1024 * 1024;
 const UBI_METADATA_SIZE: usize = 8388608; // 8MB
+const UBI_METADATA_SECTOR_COUNT: u32 = (UBI_METADATA_SIZE / SECTOR_SIZE) as u32;
 const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
-const STRIPE_SIZE: usize = 1024 * 1024; // 1MB
+const _STRIPE_SIZE: usize = 1024 * 1024; // 1MB
+const STRIPE_SECTOR_COUNT: u32 = (_STRIPE_SIZE / SECTOR_SIZE) as u32;
 
 const METADATA_WRITE_ID: usize = 0;
 const METADATA_FLUSH_ID: usize = 1;
@@ -25,14 +27,14 @@ const METADATA_FLUSH_ID: usize = 1;
 #[derive(Debug, Clone)]
 pub struct StripeStatusVec {
     pub data: Vec<StripeStatus>,
-    pub stripe_size: u64,
-    pub device_size: u64,
+    pub stripe_sector_count: u64,
+    pub device_sector_count: u64,
     pub stripe_count: u64,
 }
 
 impl StripeStatusVec {
     pub fn sector_to_stripe_id(&self, sector: u64) -> usize {
-        let stripe_id = (sector / (self.stripe_size / 512)) as usize;
+        let stripe_id = (sector / self.stripe_sector_count) as usize;
         stripe_id
     }
 
@@ -48,13 +50,16 @@ impl StripeStatusVec {
         self.data[stripe_id] = status;
     }
 
-    pub fn stripe_size(&self, stripe_id: usize) -> usize {
-        self.stripe_size
-            .min(self.device_size - (stripe_id as u64 * self.stripe_size)) as usize
+    pub fn stripe_sector_count(&self, stripe_id: usize) -> u32 {
+        let stripe_sector_count = self
+            .stripe_sector_count
+            .min(self.device_sector_count - (stripe_id as u64 * self.stripe_sector_count))
+            as usize;
+        stripe_sector_count as u32
     }
 
     pub fn translate_sector(&self, sector: u64) -> u64 {
-        UBI_METADATA_SIZE as u64 / 512 + sector
+        UBI_METADATA_SECTOR_COUNT as u64 + sector
     }
 }
 
@@ -91,7 +96,7 @@ impl StripeMetadataManager {
     pub fn new(source: &dyn BlockDevice, target: &dyn BlockDevice) -> Result<Box<Self>> {
         let mut channel = target.create_channel()?;
         let metadata = Self::load_metadata(&mut channel);
-        let stripe_status_vec = Self::create_stripe_status_vec(&metadata, source.size());
+        let stripe_status_vec = Self::create_stripe_status_vec(&metadata, source.sector_count());
         Ok(Box::new(StripeMetadataManager {
             channel,
             metadata,
@@ -100,8 +105,8 @@ impl StripeMetadataManager {
         }))
     }
 
-    pub fn metadata_size(&self) -> usize {
-        UBI_METADATA_SIZE
+    pub fn metadata_sector_count(&self) -> u64 {
+        UBI_METADATA_SECTOR_COUNT as u64
     }
 
     pub fn stripe_status(&self, stripe_id: usize) -> StripeStatus {
@@ -122,15 +127,15 @@ impl StripeMetadataManager {
     }
 
     pub fn stripe_source_offset(&self, stripe_id: usize) -> usize {
-        (stripe_id * STRIPE_SIZE) as usize
+        stripe_id * STRIPE_SECTOR_COUNT as usize
     }
 
     pub fn stripe_target_offset(&self, stripe_id: usize) -> usize {
-        (stripe_id * STRIPE_SIZE + UBI_METADATA_SIZE) as usize
+        stripe_id * STRIPE_SECTOR_COUNT as usize + UBI_METADATA_SECTOR_COUNT as usize
     }
 
-    pub fn stripe_size(&self, stripe_id: usize) -> usize {
-        self.stripe_status_vec.stripe_size(stripe_id)
+    pub fn stripe_sector_count(&self, stripe_id: usize) -> u32 {
+        self.stripe_status_vec.stripe_sector_count(stripe_id)
     }
 
     pub fn stripe_status_vec(&self) -> StripeStatusVec {
@@ -139,7 +144,6 @@ impl StripeMetadataManager {
 
     pub fn start_flush(&mut self) -> Result<()> {
         let metadata_buf = self.metadata_buf.clone();
-        let metadata_buf_size = metadata_buf.borrow().len();
         let metadata_size = std::mem::size_of::<UbiMetadata>();
         unsafe {
             let src = &*self.metadata as *const UbiMetadata as *const u8;
@@ -147,8 +151,12 @@ impl StripeMetadataManager {
             copy_nonoverlapping(src, dst, metadata_size);
         }
 
-        self.channel
-            .add_write(0, metadata_buf, metadata_buf_size, METADATA_WRITE_ID);
+        self.channel.add_write(
+            0,
+            UBI_METADATA_SECTOR_COUNT,
+            metadata_buf,
+            METADATA_WRITE_ID,
+        );
 
         self.channel.submit()?;
 
@@ -185,7 +193,7 @@ impl StripeMetadataManager {
         info!("Loading metadata from device");
         let buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(vec![0u8; UBI_METADATA_SIZE]));
 
-        io_channel.add_read(0, buf.clone(), UBI_METADATA_SIZE, 0);
+        io_channel.add_read(0, UBI_METADATA_SECTOR_COUNT, buf.clone(), 0);
         io_channel.submit().unwrap();
 
         let mut results = io_channel.poll();
@@ -231,7 +239,10 @@ impl StripeMetadataManager {
         metadata
     }
 
-    fn create_stripe_status_vec(metadata: &Box<UbiMetadata>, device_size: u64) -> StripeStatusVec {
+    fn create_stripe_status_vec(
+        metadata: &Box<UbiMetadata>,
+        device_sector_count: u64,
+    ) -> StripeStatusVec {
         let v = metadata
             .stripe_headers
             .iter()
@@ -244,12 +255,12 @@ impl StripeMetadataManager {
                 }
             })
             .collect::<Vec<StripeStatus>>();
-        let stripe_size = STRIPE_SIZE as u64;
-        let stripe_count = (device_size + stripe_size - 1) / stripe_size;
+        let stripe_sector_count = STRIPE_SECTOR_COUNT as u64;
+        let stripe_count = (device_sector_count + stripe_sector_count - 1) / stripe_sector_count;
         StripeStatusVec {
             data: v,
-            stripe_size,
-            device_size,
+            stripe_sector_count,
+            device_sector_count,
             stripe_count,
         }
     }
@@ -266,10 +277,16 @@ mod tests {
         let target = TestBlockDevice::new(40 * 1024 * 1024);
         let mut manager = StripeMetadataManager::new(&source, &target)?;
 
-        assert_eq!(manager.metadata_size(), UBI_METADATA_SIZE);
+        assert_eq!(
+            manager.metadata_sector_count(),
+            UBI_METADATA_SECTOR_COUNT as u64
+        );
         assert_eq!(manager.stripe_status(0), StripeStatus::NotFetched);
         assert_eq!(manager.stripe_source_offset(0), 0);
-        assert_eq!(manager.stripe_target_offset(0), UBI_METADATA_SIZE);
+        assert_eq!(
+            manager.stripe_target_offset(0),
+            UBI_METADATA_SECTOR_COUNT as usize
+        );
 
         let stripes_to_fetch = vec![0, 3, 7, 8];
 
@@ -290,12 +307,15 @@ mod tests {
         assert_eq!(stripe_status_vec.stripe_count, 30);
 
         for stripe_id in 0..30 {
-            let expected_size = if stripe_id == 29 {
-                3 * 1024
+            let expected_sector_count = if stripe_id == 29 {
+                6
             } else {
-                STRIPE_SIZE
+                STRIPE_SECTOR_COUNT
             };
-            assert_eq!(manager.stripe_size(stripe_id), expected_size);
+            assert_eq!(
+                manager.stripe_sector_count(stripe_id),
+                expected_sector_count
+            );
         }
 
         assert_eq!(target.flushes(), 0);

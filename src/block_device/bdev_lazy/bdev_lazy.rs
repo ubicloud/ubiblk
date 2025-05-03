@@ -7,7 +7,7 @@ use super::super::*;
 use super::stripe_fetcher::{
     SharedStripeFetcher, StripeFetcherRequest, StripeFetcherResponse, StripeStatus, StripeStatusVec,
 };
-use crate::{block_device::SharedBuffer, Result};
+use crate::{block_device::SharedBuffer, Error, Result};
 use log::error;
 
 #[derive(Debug)]
@@ -19,9 +19,9 @@ enum RequestType {
 struct Request {
     id: usize,
     type_: RequestType,
-    sector: u64,
+    sector_offset: u64,
+    sector_count: u32,
     buf: SharedBuffer,
-    len: usize,
     stripe_id_first: usize,
     stripe_id_last: usize,
 }
@@ -129,15 +129,23 @@ impl LazyIoChannel {
                 queued_rw_requests.push_front(request);
                 break;
             }
-            let sector = self.translate_sector(request.sector);
+            let sector = self.translate_sector(request.sector_offset);
             match request.type_ {
                 RequestType::In => {
-                    self.base
-                        .add_read(sector, request.buf.clone(), request.len, request.id);
+                    self.base.add_read(
+                        sector,
+                        request.sector_count,
+                        request.buf.clone(),
+                        request.id,
+                    );
                 }
                 RequestType::Out => {
-                    self.base
-                        .add_write(sector, request.buf.clone(), request.len, request.id);
+                    self.base.add_write(
+                        sector,
+                        request.sector_count,
+                        request.buf.clone(),
+                        request.id,
+                    );
                 }
             }
 
@@ -160,21 +168,21 @@ impl LazyIoChannel {
 }
 
 impl IoChannel for LazyIoChannel {
-    fn add_read(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
+    fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let request = Request {
             id,
             type_: RequestType::In,
-            sector,
+            sector_offset,
+            sector_count,
             buf: buf.clone(),
-            len,
-            stripe_id_first: self.sector_to_stripe_id(sector),
-            stripe_id_last: self.sector_to_stripe_id(sector + (len / 512) as u64 - 1),
+            stripe_id_first: self.sector_to_stripe_id(sector_offset),
+            stripe_id_last: self.sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
         };
 
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
-            let sector = self.translate_sector(sector);
-            self.base.add_read(sector, buf, len, id);
+            self.base
+                .add_read(self.translate_sector(sector_offset), sector_count, buf, id);
         } else {
             if let Err(e) = self.start_stripe_fetches(&request) {
                 error!("Failed to send fetch request: {}", e);
@@ -185,21 +193,25 @@ impl IoChannel for LazyIoChannel {
         }
     }
 
-    fn add_write(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
+    fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let request = Request {
             id,
             type_: RequestType::Out,
-            sector,
+            sector_offset,
+            sector_count,
             buf: buf.clone(),
-            len,
-            stripe_id_first: self.sector_to_stripe_id(sector),
-            stripe_id_last: self.sector_to_stripe_id(sector + (len / 512) as u64 - 1),
+            stripe_id_first: self.sector_to_stripe_id(sector_offset),
+            stripe_id_last: self.sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
         };
 
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
-            self.base
-                .add_write(self.translate_sector(sector), buf.clone(), len, id);
+            self.base.add_write(
+                self.translate_sector(sector_offset),
+                sector_count,
+                buf.clone(),
+                id,
+            );
         } else {
             if let Err(e) = self.start_stripe_fetches(&request) {
                 error!("Failed to send fetch request: {}", e);
@@ -249,18 +261,28 @@ impl IoChannel for LazyIoChannel {
 pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     stripe_fetcher: SharedStripeFetcher,
-    size: u64,
+    sector_count: u64,
 }
 
 impl LazyBlockDevice {
-    pub fn new(base: Box<dyn BlockDevice>, stripe_fetcher: SharedStripeFetcher) -> Box<Self> {
-        let base_size = base.size();
-        let metadata_size = stripe_fetcher.lock().unwrap().metadata_size() as u64;
-        Box::new(LazyBlockDevice {
+    pub fn new(
+        base: Box<dyn BlockDevice>,
+        stripe_fetcher: SharedStripeFetcher,
+    ) -> Result<Box<Self>> {
+        let base_sector_count = base.sector_count();
+        let metadata_sector_count = stripe_fetcher.lock().unwrap().metadata_sector_count();
+        if base_sector_count < metadata_sector_count {
+            error!(
+                "Base device sector count ({}) is less than metadata sector count ({})",
+                base_sector_count, metadata_sector_count
+            );
+            return Err(Error::InvalidParameter);
+        }
+        Ok(Box::new(LazyBlockDevice {
             base,
             stripe_fetcher,
-            size: base_size - metadata_size,
-        })
+            sector_count: base_sector_count - metadata_sector_count,
+        }))
     }
 }
 
@@ -281,7 +303,7 @@ impl BlockDevice for LazyBlockDevice {
         )))
     }
 
-    fn size(&self) -> u64 {
-        self.size
+    fn sector_count(&self) -> u64 {
+        self.sector_count
     }
 }

@@ -5,8 +5,11 @@ use std::{
     time::Instant,
 };
 
-use crate::block_device::{self, BlockDevice, StripeFetcher, SyncBlockDevice};
 use crate::utils::block::{print_features, VirtioBlockConfig};
+use crate::{
+    block_device::{self, BlockDevice, StripeFetcher, SyncBlockDevice},
+    vhost_backend::SECTOR_SIZE,
+};
 
 use super::backend_thread::UbiBlkBackendThread;
 use crate::{Error, Result};
@@ -54,10 +57,10 @@ impl<'a> UbiBlkBackend {
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         block_device: Box<dyn BlockDevice>,
     ) -> Result<Self> {
-        let nsectors = block_device.size() / 512;
+        let nsectors = block_device.sector_count();
         let virtio_config = VirtioBlockConfig {
-            capacity: nsectors,             /* The capacity (in 512-byte sectors). */
-            blk_size: 512,                  /* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
+            capacity: nsectors,             /* The capacity (in SECTOR_SIZE-byte sectors). */
+            blk_size: SECTOR_SIZE as u32,   /* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
             size_max: options.seg_size_max, /* The maximum segment size (if VIRTIO_BLK_F_SIZE_MAX) */
             seg_max: options.seg_count_max, /* The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX) */
             min_io_size: 1, /* minimum I/O size without performance penalty in logical blocks. */
@@ -278,7 +281,7 @@ fn start_block_backend(options: &Options) -> std::result::Result<(), Box<dyn std
 
     let block_device = match maybe_stripe_fetcher.as_ref() {
         Some(stripe_fetcher) => {
-            block_device::LazyBlockDevice::new(base_block_device, stripe_fetcher.clone())
+            block_device::LazyBlockDevice::new(base_block_device, stripe_fetcher.clone())?
         }
         None => base_block_device,
     };

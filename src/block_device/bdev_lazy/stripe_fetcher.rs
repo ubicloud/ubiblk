@@ -5,6 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
 pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
+use crate::vhost_backend::SECTOR_SIZE;
 use crate::Result;
 use log::{debug, error, info};
 use vmm_sys_util::eventfd::EventFd;
@@ -166,13 +167,13 @@ impl StripeFetcher {
         let fetch_buffer = &mut self.fetch_buffers[buffer_idx];
         let stripe_id = fetch_buffer.used_for.unwrap();
         let buf = fetch_buffer.buf.clone();
-        let stripe_size = self.metadata_manager.stripe_size(stripe_id);
+        let stripe_sector_count = self.metadata_manager.stripe_sector_count(stripe_id);
         let stripe_offset = self.metadata_manager.stripe_target_offset(stripe_id);
 
         self.fetch_target_channel.add_write(
-            (stripe_offset / 512) as u64,
-            buf.clone(),
-            stripe_size,
+            (stripe_offset / SECTOR_SIZE) as u64,
+            stripe_sector_count,
+            buf,
             buffer_idx,
         );
 
@@ -222,13 +223,13 @@ impl StripeFetcher {
             fetch_buffer.used_for = Some(stripe_id);
 
             let buf = fetch_buffer.buf.clone();
-            let stripe_size = self.metadata_manager.stripe_size(stripe_id);
+            let stripe_sector_count = self.metadata_manager.stripe_sector_count(stripe_id);
             let stripe_offset = self.metadata_manager.stripe_source_offset(stripe_id);
 
             self.fetch_source_channel.add_read(
-                (stripe_offset / 512) as u64,
+                (stripe_offset / SECTOR_SIZE) as u64,
+                stripe_sector_count,
                 buf.clone(),
-                stripe_size,
                 buffer_idx,
             );
 
@@ -303,8 +304,8 @@ impl StripeFetcher {
         self.metadata_manager.stripe_status_vec()
     }
 
-    pub fn metadata_size(&self) -> usize {
-        self.metadata_manager.metadata_size()
+    pub fn metadata_sector_count(&self) -> u64 {
+        self.metadata_manager.metadata_sector_count()
     }
 }
 

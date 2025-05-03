@@ -2,8 +2,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::{ops::Deref, sync::RwLockWriteGuard};
 
-use super::request::*;
 use super::Options;
+use super::{request::*, SECTOR_SIZE};
 use crate::block_device::IoChannel;
 use crate::block_device::SharedBuffer;
 use crate::{Error, Result};
@@ -169,19 +169,49 @@ impl UbiBlkBackendThread {
         len as usize
     }
 
-    fn process_read(&mut self, request: &Request, desc_chain: &DescChain) {
+    fn process_read(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
         let len = self.request_len(request);
+        if len % SECTOR_SIZE != 0 {
+            error!(
+                "read request length is not a multiple of sector size: {}",
+                len
+            );
+            self.complete_io(
+                vring,
+                desc_chain,
+                request.status_addr,
+                VIRTIO_BLK_S_IOERR as u8,
+            );
+            return;
+        }
+
         let id = self.get_request_slot(len, request, desc_chain);
+
+        let sector_count = (len / SECTOR_SIZE) as u32;
         self.io_channel.add_read(
             request.sector,
+            sector_count,
             self.request_slots[id].buffer.clone(),
-            len,
             id,
         );
     }
 
     fn process_write(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
         let len = self.request_len(request);
+        if len % SECTOR_SIZE != 0 {
+            error!(
+                "write request length is not a multiple of sector size: {}",
+                len
+            );
+            self.complete_io(
+                vring,
+                desc_chain,
+                request.status_addr,
+                VIRTIO_BLK_S_IOERR as u8,
+            );
+            return;
+        }
+
         let id = self.get_request_slot(len, request, desc_chain);
         let mem = desc_chain.memory();
         let mut pos: usize = 0;
@@ -209,10 +239,12 @@ impl UbiBlkBackendThread {
             return;
         }
 
+        let sector_count = (len / SECTOR_SIZE) as u32;
+
         self.io_channel.add_write(
             request.sector,
+            sector_count,
             self.request_slots[id].buffer.clone(),
-            len,
             id,
         );
     }
@@ -248,7 +280,7 @@ impl UbiBlkBackendThread {
         {
             match Request::parse(&mut desc_chain) {
                 Ok(request) => match request.request_type {
-                    RequestType::In => self.process_read(&request, &desc_chain),
+                    RequestType::In => self.process_read(&request, &desc_chain, vring),
                     RequestType::Out => self.process_write(&request, &desc_chain, vring),
                     RequestType::Flush => self.process_flush(&request, &desc_chain),
                     RequestType::GetDeviceId => {

@@ -4,8 +4,8 @@ use std::{cell::RefCell, rc::Rc};
 pub type SharedBuffer = Rc<RefCell<Vec<u8>>>;
 
 pub trait IoChannel {
-    fn add_read(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize);
-    fn add_write(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize);
+    fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);
+    fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);
     fn add_flush(&mut self, id: usize);
     fn submit(&mut self) -> Result<()>;
 
@@ -15,7 +15,7 @@ pub trait IoChannel {
 
 pub trait BlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>>;
-    fn size(&self) -> u64;
+    fn sector_count(&self) -> u64;
 }
 
 mod bdev_crypt;

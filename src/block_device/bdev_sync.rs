@@ -1,4 +1,5 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
+use crate::vhost_backend::SECTOR_SIZE;
 use crate::{Error, Result};
 use log::error;
 use std::fs::{File, OpenOptions};
@@ -29,16 +30,17 @@ impl SyncIoChannel {
 }
 
 impl IoChannel for SyncIoChannel {
-    fn add_read(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
+    fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let mut buf = buf.borrow_mut();
         let mut file = self.file.lock().unwrap();
-        if let Err(e) = file.seek(SeekFrom::Start(sector * 512)) {
-            error!("Error seeking to sector {}: {}", sector, e);
+        let len = sector_count as usize * SECTOR_SIZE;
+        if let Err(e) = file.seek(SeekFrom::Start(sector_offset * SECTOR_SIZE as u64)) {
+            error!("Error seeking to sector {}: {}", sector_offset, e);
             self.finished_requests.push((id, false));
             return;
         }
         if let Err(e) = file.read_exact(&mut buf[..len]) {
-            error!("Error reading from sector {}: {}", sector, e);
+            error!("Error reading from sector {}: {}", sector_offset, e);
             self.finished_requests.push((id, false));
             return;
         }
@@ -46,17 +48,18 @@ impl IoChannel for SyncIoChannel {
         self.finished_requests.push((id, true));
     }
 
-    fn add_write(&mut self, sector: u64, buf: SharedBuffer, len: usize, id: usize) {
+    fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let buf = buf.borrow();
         let mut file = self.file.lock().unwrap();
+        let len = sector_count as usize * SECTOR_SIZE;
 
-        if let Err(e) = file.seek(SeekFrom::Start(sector * 512)) {
-            error!("Error seeking to sector {}: {}", sector, e);
+        if let Err(e) = file.seek(SeekFrom::Start(sector_offset * SECTOR_SIZE as u64)) {
+            error!("Error seeking to sector {}: {}", sector_offset, e);
             self.finished_requests.push((id, false));
             return;
         }
         if let Err(e) = file.write_all(&buf[..len]) {
-            error!("Error writing to sector {}: {}", sector, e);
+            error!("Error writing to sector {}: {}", sector_offset, e);
             self.finished_requests.push((id, false));
             return;
         }
@@ -94,7 +97,7 @@ impl IoChannel for SyncIoChannel {
 
 pub struct SyncBlockDevice {
     path: PathBuf,
-    size: u64,
+    sector_count: u64,
 }
 
 impl BlockDevice for SyncBlockDevice {
@@ -106,8 +109,8 @@ impl BlockDevice for SyncBlockDevice {
         Ok(Box::new(channel))
     }
 
-    fn size(&self) -> u64 {
-        self.size
+    fn sector_count(&self) -> u64 {
+        self.sector_count
     }
 }
 
@@ -116,7 +119,12 @@ impl SyncBlockDevice {
         match std::fs::metadata(&path) {
             Ok(metadata) => {
                 let size = metadata.len();
-                Ok(Box::new(SyncBlockDevice { path, size }))
+                if size % SECTOR_SIZE as u64 != 0 {
+                    error!("File size is not a multiple of sector size");
+                    return Err(Error::InvalidParameter);
+                }
+                let sector_count = size / SECTOR_SIZE as u64;
+                Ok(Box::new(SyncBlockDevice { path, sector_count }))
             }
             Err(e) => {
                 error!("Failed to get metadata for file {}: {}", path.display(), e);

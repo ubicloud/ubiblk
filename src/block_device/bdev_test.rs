@@ -1,5 +1,7 @@
 use std::sync::{Arc, RwLock};
 
+use crate::vhost_backend::SECTOR_SIZE;
+
 use super::*;
 
 pub struct TestDeviceMetrics {
@@ -15,11 +17,11 @@ struct TestIoChannel {
 }
 
 impl IoChannel for TestIoChannel {
-    fn add_read(&mut self, _sector: u64, _buf: SharedBuffer, _len: usize, _id: usize) {
+    fn add_read(&mut self, sector_offset: u64, sector_count: u32, _buf: SharedBuffer, _id: usize) {
         let mem = self.mem.read().unwrap();
         let mut buf = _buf.borrow_mut();
-        let len = buf.len();
-        let start = (_sector * 512) as usize;
+        let len = sector_count as usize * SECTOR_SIZE;
+        let start = sector_offset as usize * SECTOR_SIZE;
         let end = start + len;
         if end > mem.len() {
             self.finished_requests.push((_id, false));
@@ -31,11 +33,11 @@ impl IoChannel for TestIoChannel {
         self.metrics.write().unwrap().reads += 1;
     }
 
-    fn add_write(&mut self, _sector: u64, _buf: SharedBuffer, _len: usize, _id: usize) {
+    fn add_write(&mut self, sector_offset: u64, sector_count: u32, _buf: SharedBuffer, _id: usize) {
         let mut mem = self.mem.write().unwrap();
         let buf = _buf.borrow();
-        let len = buf.len();
-        let start = (_sector * 512) as usize;
+        let len = sector_count as usize * SECTOR_SIZE;
+        let start = sector_offset as usize * SECTOR_SIZE;
         let end = start + len;
         if end > mem.len() {
             self.finished_requests.push((_id, false));
@@ -68,16 +70,20 @@ impl IoChannel for TestIoChannel {
 }
 
 pub struct TestBlockDevice {
-    size: u64,
+    sector_count: u64,
     pub mem: Arc<RwLock<Vec<u8>>>,
     pub metrics: Arc<RwLock<TestDeviceMetrics>>,
 }
 
 impl TestBlockDevice {
     pub fn new(size: u64) -> Self {
+        if size % SECTOR_SIZE as u64 != 0 {
+            panic!("Size must be a multiple of SECTOR_SIZE");
+        }
+        let sector_count = size / SECTOR_SIZE as u64;
         let mem = Arc::new(RwLock::new(vec![0u8; size as usize]));
         TestBlockDevice {
-            size,
+            sector_count,
             mem,
             metrics: Arc::new(RwLock::new(TestDeviceMetrics {
                 reads: 0,
@@ -115,8 +121,8 @@ impl BlockDevice for TestBlockDevice {
         }))
     }
 
-    fn size(&self) -> u64 {
-        self.size
+    fn sector_count(&self) -> u64 {
+        self.sector_count
     }
 }
 
@@ -129,8 +135,8 @@ mod tests {
         let device = TestBlockDevice::new(1024 * 1024);
         let mut channel = device.create_channel().unwrap();
 
-        let buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; 512]));
-        channel.add_read(0, buf.clone(), 512, 1);
+        let buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        channel.add_read(0, 1, buf.clone(), 1);
         channel.submit().unwrap();
         let results = channel.poll();
         assert_eq!(results.len(), 1);

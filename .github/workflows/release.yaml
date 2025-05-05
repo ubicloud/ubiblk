@@ -15,7 +15,7 @@ jobs:
         include:
           - runner: ubicloud-standard-4
             target: x86_64-unknown-linux-musl
-            arch: x86
+            arch: x64
           - runner: ubicloud-standard-4-arm
             target: aarch64-unknown-linux-musl
             arch: arm64

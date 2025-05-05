@@ -146,15 +146,14 @@ impl IoChannel for CryptIoChannel {
 
 pub struct CryptBlockDevice {
     base: Box<dyn BlockDevice>,
-    key1: String,
-    key2: String,
+    key1: [u8; 32],
+    key2: [u8; 32],
 }
 
 impl BlockDevice for CryptBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
         let base_channel = self.base.create_channel()?;
-        let (key1, key2) = prepare_keys(&self.key1, &self.key2)?;
-        let crypt_channel = CryptIoChannel::new(base_channel, key1, key2);
+        let crypt_channel = CryptIoChannel::new(base_channel, self.key1.clone(), self.key2.clone());
         Ok(Box::new(crypt_channel))
     }
 
@@ -164,12 +163,13 @@ impl BlockDevice for CryptBlockDevice {
 }
 
 impl CryptBlockDevice {
-    pub fn new(base: Box<dyn BlockDevice>, key1: &str, key2: &str) -> Box<Self> {
-        Box::new(CryptBlockDevice {
+    pub fn new(base: Box<dyn BlockDevice>, key1: &str, key2: &str) -> Result<Box<Self>> {
+        let (key1, key2) = prepare_keys(key1, key2)?;
+        Ok(Box::new(CryptBlockDevice {
             base,
-            key1: key1.to_string(),
-            key2: key2.to_string(),
-        })
+            key1: key1,
+            key2: key2,
+        }))
     }
 }
 
@@ -179,9 +179,14 @@ fn prepare_keys(hex_key1: &str, hex_key2: &str) -> Result<([u8; 32], [u8; 32])> 
             error!("Failed to decode hex string: {}", e);
             Error::InvalidParameter
         })?;
+
+        if bytes.len() != 32 {
+            error!("Key length must be 32 bytes");
+            return Err(Error::InvalidParameter);
+        }
+
         let mut key = [0u8; 32];
-        let copy_len = std::cmp::min(bytes.len(), 32);
-        key[..copy_len].copy_from_slice(&bytes[..copy_len]);
+        key.copy_from_slice(&bytes);
         Ok(key)
     }
 
@@ -203,7 +208,8 @@ mod tests {
         let mem = base.mem.clone();
         let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let key2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-        let crypt_bdev = CryptBlockDevice::new(Box::new(base), key1, key2);
+        let crypt_bdev = CryptBlockDevice::new(Box::new(base), key1, key2)
+            .expect("Failed to create CryptBlockDevice");
         let mut channel = crypt_bdev
             .create_channel()
             .expect("Failed to create channel");
@@ -270,5 +276,23 @@ mod tests {
             &mem.read().unwrap()[0..SECTOR_SIZE],
             &mem.read().unwrap()[SECTOR_SIZE..SECTOR_SIZE * 2]
         );
+    }
+
+    #[test]
+    fn test_invalid_key_length() {
+        let base = TestBlockDevice::new(1024 * 1024);
+        let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef11";
+        let key2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba987654321032";
+        let result = CryptBlockDevice::new(Box::new(base), key1, key2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_invalid_key_format() {
+        let base = TestBlockDevice::new(1024 * 1024);
+        let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let key2 = "invalid_key_formatdcba9876543210fedcba9876543210fedcba9876543210";
+        let result = CryptBlockDevice::new(Box::new(base), key1, key2);
+        assert!(result.is_err());
     }
 }

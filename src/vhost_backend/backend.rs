@@ -244,7 +244,7 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
     }
 }
 
-fn build_block_device(options: &Options) -> Box<dyn BlockDevice> {
+fn build_block_device(options: &Options) -> Result<Box<dyn BlockDevice>> {
     let mut block_device: Box<dyn BlockDevice> =
         block_device::UringBlockDevice::new(PathBuf::from(&options.path), options.queue_size)
             .map_err(|e| {
@@ -254,16 +254,16 @@ fn build_block_device(options: &Options) -> Box<dyn BlockDevice> {
             .unwrap();
 
     if let Some((key1, key2)) = &options.encryption_key {
-        block_device = block_device::CryptBlockDevice::new(block_device, &key1, &key2);
+        block_device = block_device::CryptBlockDevice::new(block_device, &key1, &key2)?;
     }
 
-    block_device
+    Ok(block_device)
 }
 
 fn start_block_backend(options: &Options) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
-    let base_block_device = build_block_device(options);
+    let base_block_device = build_block_device(options)?;
 
     let stripe_fetcher_killfd = EventFd::new(libc::EFD_NONBLOCK)?;
     let maybe_stripe_fetcher = match options.image_path {

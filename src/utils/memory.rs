@@ -2,8 +2,36 @@ use std::fs::{File, OpenOptions};
 use std::io::{Error, ErrorKind, Result};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
-use std::ptr;
+
+use std::{fs, io, path::Path, ptr};
+
+/// Return the size of the huge‑page we can use:
+/// * 2 MiB if any 2 MiB huge‑pages are free;
+/// * otherwise 1 GiB if any 1 GiB huge‑pages are free;
+/// * otherwise return an error.
+fn pick_hugepage_size() -> io::Result<usize> {
+    const HUGEPAGE_2M: &str = "/sys/kernel/mm/hugepages/hugepages-2048kB";
+    const HUGEPAGE_1G: &str = "/sys/kernel/mm/hugepages/hugepages-1048576kB";
+
+    fn has_free<P: AsRef<Path>>(dir: P) -> io::Result<bool> {
+        let n: usize = fs::read_to_string(dir.as_ref().join("free_hugepages"))?
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        Ok(n > 0)
+    }
+
+    if has_free(HUGEPAGE_2M)? {
+        Ok(2 * 1024 * 1024) // 2 MiB
+    } else if has_free(HUGEPAGE_1G)? {
+        Ok(1024 * 1024 * 1024) // 1 GiB
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            "no huge‑pages available",
+        ))
+    }
+}
 
 /// Allocates shared memory using a hugepage file
 ///
@@ -19,8 +47,8 @@ use std::ptr;
 /// This function is unsafe because it deals with memory mapping and raw pointers.
 /// The caller is responsible for unmapping the memory when no longer needed.
 pub fn allocate_hugepage_memory() -> Result<(File, *mut u8, usize)> {
-    // Use a full 2MB hugepage
-    let mem_size = 2 * 1024 * 1024;
+    // Use a full hugepage
+    let mem_size = pick_hugepage_size()?;
 
     // Open a file in the hugepage directory
     let hugepage_file = OpenOptions::new()

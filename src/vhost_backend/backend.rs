@@ -268,7 +268,8 @@ fn start_block_backend(options: &Options) -> std::result::Result<(), Box<dyn std
     let stripe_fetcher_killfd = EventFd::new(libc::EFD_NONBLOCK)?;
     let maybe_stripe_fetcher = match options.image_path {
         Some(ref path) => {
-            let image_bdev = SyncBlockDevice::new(PathBuf::from(path))?;
+            let readonly = true;
+            let image_bdev = SyncBlockDevice::new(PathBuf::from(path), readonly)?;
             let stripe_fetcher = StripeFetcher::new(
                 &*image_bdev,
                 &*base_block_device,

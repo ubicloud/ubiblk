@@ -13,10 +13,10 @@ struct SyncIoChannel {
 }
 
 impl SyncIoChannel {
-    fn new(path: &Path) -> Result<Self> {
+    fn new(path: &Path, readonly: bool) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
-            .write(true)
+            .write(!readonly)
             .open(path)
             .map_err(|e| {
                 error!("Failed to open file {}: {}", path.display(), e);
@@ -98,11 +98,12 @@ impl IoChannel for SyncIoChannel {
 pub struct SyncBlockDevice {
     path: PathBuf,
     sector_count: u64,
+    readonly: bool,
 }
 
 impl BlockDevice for SyncBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
-        let channel = SyncIoChannel::new(&self.path).map_err(|e| {
+        let channel = SyncIoChannel::new(&self.path, self.readonly).map_err(|e| {
             error!("Failed to create IO channel: {}", e);
             Error::IoError
         })?;
@@ -115,7 +116,7 @@ impl BlockDevice for SyncBlockDevice {
 }
 
 impl SyncBlockDevice {
-    pub fn new(path: PathBuf) -> Result<Box<Self>> {
+    pub fn new(path: PathBuf, readonly: bool) -> Result<Box<Self>> {
         match std::fs::metadata(&path) {
             Ok(metadata) => {
                 let size = metadata.len();
@@ -124,12 +125,91 @@ impl SyncBlockDevice {
                     return Err(Error::InvalidParameter);
                 }
                 let sector_count = size / SECTOR_SIZE as u64;
-                Ok(Box::new(SyncBlockDevice { path, sector_count }))
+                Ok(Box::new(SyncBlockDevice {
+                    path,
+                    sector_count,
+                    readonly,
+                }))
             }
             Err(e) => {
                 error!("Failed to get metadata for file {}: {}", path.display(), e);
                 Err(Error::IoError)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, rc::Rc};
+
+    use tempfile::NamedTempFile;
+
+    use super::*;
+
+    #[test]
+    fn create_channel_and_basic_io() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            Error::IoError
+        })?;
+
+        let path = tmpfile.path().to_path_buf();
+        let device = SyncBlockDevice::new(path.clone(), false).map_err(|e| {
+            error!("Failed to create SyncBlockDevice: {}", e);
+            Error::IoError
+        })?;
+
+        let mut chan = device.create_channel().map_err(|e| {
+            error!("Failed to create IO channel: {}", e);
+            Error::IoError
+        })?;
+
+        // Write sector 0
+        let pattern = vec![0xABu8; SECTOR_SIZE];
+        let write_buf = Rc::new(RefCell::new(pattern.clone()));
+        chan.add_write(0, 1, write_buf.clone(), 1);
+        chan.submit()?;
+        let result = chan.poll();
+        assert_eq!(result, vec![(1, true)]);
+
+        // Read it back
+        let read_buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        chan.add_read(0, 1, read_buf.clone(), 2);
+        chan.submit()?;
+        let result = chan.poll();
+        assert_eq!(result, vec![(2, true)]);
+        assert_eq!(*read_buf.borrow(), pattern);
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_channel_and_basic_io_readonly() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            Error::IoError
+        })?;
+
+        let path = tmpfile.path().to_path_buf();
+        let device = SyncBlockDevice::new(path.clone(), true).map_err(|e| {
+            error!("Failed to create SyncBlockDevice: {}", e);
+            Error::IoError
+        })?;
+
+        let mut chan = device.create_channel().map_err(|e| {
+            error!("Failed to create IO channel: {}", e);
+            Error::IoError
+        })?;
+
+        // Write sector 0
+        let pattern = vec![0xABu8; SECTOR_SIZE];
+        let write_buf = Rc::new(RefCell::new(pattern.clone()));
+        chan.add_write(0, 1, write_buf.clone(), 1);
+        chan.submit()?;
+        let result = chan.poll();
+        assert_eq!(result, vec![(1, false)]);
+
+        Ok(())
     }
 }

@@ -6,6 +6,10 @@ use std::{
 };
 use ubiblk::utils::decode_hex;
 
+fn first_difference<T: PartialEq>(a: &[T], b: &[T]) -> Option<usize> {
+    a.iter().zip(b.iter()).position(|(x, y)| x != y)
+}
+
 fn main() {
     let cmd_arguments = Command::new("replay-log")
         .version(env!("CARGO_PKG_VERSION"))
@@ -139,20 +143,19 @@ fn main() {
                 error!("Error reading data from disk: {}", e);
                 std::process::exit(1);
             }
-            if buffer != data {
+            let first_diff = first_difference(&data, &buffer);
+            if let Some(index) = first_diff {
                 error!(
-                    "Data mismatch on line {}: expected {:?}..., got {:?}...",
+                    "Data mismatch on line {}: expected {:?}..., got {:?}... at index {}",
                     line_num + 1,
-                    &data[..10],
-                    &buffer[..10]
+                    &buffer[index..std::cmp::min(index + 10, buffer.len())],
+                    &data[index..std::cmp::min(index + 10, data.len())],
+                    index
                 );
-                std::process::exit(1);
             }
         } else {
             error!("Unknown command on line {}: {}", line_num + 1, command);
             std::process::exit(1);
         }
     }
-
-    println!("Replay completed successfully.");
 }

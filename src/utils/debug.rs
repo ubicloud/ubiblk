@@ -48,6 +48,16 @@ pub fn encode_hex(data: &[u8], len: usize) -> String {
         .join("")
 }
 
+pub fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
+    if hex.len() % 2 != 0 {
+        return Err("Hex string must be even length".into());
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +78,12 @@ mod tests {
         let data = b"Hello";
         let expected = "48656c6c6f";
         assert_eq!(encode_hex(data, data.len()), expected);
+    }
+
+    #[test]
+    fn test_decode_hex() {
+        let hex = "48656c6c6f";
+        let expected = b"Hello".to_vec();
+        assert_eq!(decode_hex(hex).unwrap(), expected);
     }
 }

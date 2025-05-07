@@ -34,6 +34,7 @@ type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
 pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
+    pub io_debug_path: Option<String>,
     pub socket: String,
     pub num_queues: usize,
     pub queue_size: usize,

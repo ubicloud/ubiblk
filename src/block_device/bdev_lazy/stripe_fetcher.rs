@@ -5,7 +5,6 @@ use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
 pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
-use crate::vhost_backend::SECTOR_SIZE;
 use crate::Result;
 use log::{debug, error, info};
 use vmm_sys_util::eventfd::EventFd;
@@ -168,10 +167,10 @@ impl StripeFetcher {
         let stripe_id = fetch_buffer.used_for.unwrap();
         let buf = fetch_buffer.buf.clone();
         let stripe_sector_count = self.metadata_manager.stripe_sector_count(stripe_id);
-        let stripe_offset = self.metadata_manager.stripe_target_offset(stripe_id);
+        let stripe_sector_offset = self.metadata_manager.stripe_target_sector_offset(stripe_id);
 
         self.fetch_target_channel.add_write(
-            (stripe_offset / SECTOR_SIZE) as u64,
+            stripe_sector_offset as u64,
             stripe_sector_count,
             buf,
             buffer_idx,
@@ -224,10 +223,10 @@ impl StripeFetcher {
 
             let buf = fetch_buffer.buf.clone();
             let stripe_sector_count = self.metadata_manager.stripe_sector_count(stripe_id);
-            let stripe_offset = self.metadata_manager.stripe_source_offset(stripe_id);
+            let stripe_sector_offset = self.metadata_manager.stripe_source_sector_offset(stripe_id);
 
             self.fetch_source_channel.add_read(
-                (stripe_offset / SECTOR_SIZE) as u64,
+                stripe_sector_offset,
                 stripe_sector_count,
                 buf.clone(),
                 buffer_idx,
@@ -316,6 +315,7 @@ unsafe impl Sync for StripeFetcher {}
 mod tests {
     use super::*;
     use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::vhost_backend::SECTOR_SIZE;
 
     #[test]
     fn test_stripe_fetcher() {
@@ -337,13 +337,29 @@ mod tests {
         {
             let metadata_manager = &stripe_fetcher.metadata_manager;
 
-            source.write(metadata_manager.stripe_source_offset(0), buf1, buf1.len());
-            source.write(metadata_manager.stripe_source_offset(3), buf2, buf2.len());
+            source.write(
+                metadata_manager.stripe_source_sector_offset(0) as usize * SECTOR_SIZE,
+                buf1,
+                buf1.len(),
+            );
+            source.write(
+                metadata_manager.stripe_source_sector_offset(3) as usize * SECTOR_SIZE,
+                buf2,
+                buf2.len(),
+            );
 
             // before fetch, contents shouldn't be the same
-            target.read(metadata_manager.stripe_target_offset(0), &mut buf3, 64);
+            target.read(
+                metadata_manager.stripe_target_sector_offset(0) as usize * SECTOR_SIZE,
+                &mut buf3,
+                64,
+            );
             assert_ne!(&buf3[..buf1.len()], buf1);
-            target.read(metadata_manager.stripe_target_offset(3), &mut buf3, 64);
+            target.read(
+                metadata_manager.stripe_target_sector_offset(3) as usize * SECTOR_SIZE,
+                &mut buf3,
+                64,
+            );
             assert_ne!(&buf3[..buf2.len()], buf2);
         }
 
@@ -370,9 +386,17 @@ mod tests {
             let metadata_manager = &stripe_fetcher.metadata_manager;
 
             // after fetch, contents should be the same
-            target.read(metadata_manager.stripe_target_offset(0), &mut buf3, 64);
+            target.read(
+                metadata_manager.stripe_target_sector_offset(0) as usize * SECTOR_SIZE,
+                &mut buf3,
+                64,
+            );
             assert_eq!(&buf3[..buf1.len()], buf1);
-            target.read(metadata_manager.stripe_target_offset(3), &mut buf3, 64);
+            target.read(
+                metadata_manager.stripe_target_sector_offset(3) as usize * SECTOR_SIZE,
+                &mut buf3,
+                64,
+            );
             assert_eq!(&buf3[..buf2.len()], buf2);
         }
 

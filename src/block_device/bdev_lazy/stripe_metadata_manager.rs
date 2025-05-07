@@ -126,12 +126,12 @@ impl StripeMetadataManager {
         }
     }
 
-    pub fn stripe_source_offset(&self, stripe_id: usize) -> usize {
-        stripe_id * STRIPE_SECTOR_COUNT as usize
+    pub fn stripe_source_sector_offset(&self, stripe_id: usize) -> u64 {
+        stripe_id as u64 * STRIPE_SECTOR_COUNT as u64
     }
 
-    pub fn stripe_target_offset(&self, stripe_id: usize) -> usize {
-        stripe_id * STRIPE_SECTOR_COUNT as usize + UBI_METADATA_SECTOR_COUNT as usize
+    pub fn stripe_target_sector_offset(&self, stripe_id: usize) -> u64 {
+        stripe_id as u64 * STRIPE_SECTOR_COUNT as u64 + UBI_METADATA_SECTOR_COUNT as u64
     }
 
     pub fn stripe_sector_count(&self, stripe_id: usize) -> u32 {
@@ -282,10 +282,10 @@ mod tests {
             UBI_METADATA_SECTOR_COUNT as u64
         );
         assert_eq!(manager.stripe_status(0), StripeStatus::NotFetched);
-        assert_eq!(manager.stripe_source_offset(0), 0);
+        assert_eq!(manager.stripe_source_sector_offset(0), 0);
         assert_eq!(
-            manager.stripe_target_offset(0),
-            UBI_METADATA_SECTOR_COUNT as usize
+            manager.stripe_target_sector_offset(0),
+            UBI_METADATA_SECTOR_COUNT as u64
         );
 
         let stripes_to_fetch = vec![0, 3, 7, 8];

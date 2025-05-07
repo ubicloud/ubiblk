@@ -28,8 +28,9 @@ type DescChain = DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>;
 struct RequestSlot {
     used: bool,
     request_type: RequestType,
+    request_sector: u64,
+    request_len: usize,
     buffer: SharedBuffer,
-    sector: u64,
     len: usize,
     status_addr: GuestAddress,
     desc_chain: Option<DescChain>,
@@ -59,7 +60,8 @@ impl UbiBlkBackendThread {
                 buffer: Rc::new(RefCell::new(vec![0; buf_size as usize])),
                 len: buf_size as usize,
                 status_addr: GuestAddress(0),
-                sector: 0,
+                request_sector: 0,
+                request_len: 0,
                 desc_chain: None,
                 data_descriptors: vec![],
             })
@@ -104,6 +106,8 @@ impl UbiBlkBackendThread {
                 slot.status_addr = request.status_addr;
                 slot.desc_chain = Some(desc_chain.clone());
                 slot.data_descriptors = request.data_descriptors.to_vec();
+                slot.request_sector = request.sector;
+                slot.request_len = len;
                 return i;
             }
         }
@@ -112,7 +116,8 @@ impl UbiBlkBackendThread {
             request_type: request.request_type,
             buffer: Rc::new(RefCell::new(vec![0; len])),
             len,
-            sector: request.sector,
+            request_sector: request.sector,
+            request_len: len,
             status_addr: request.status_addr,
             desc_chain: Some(desc_chain.clone()),
             data_descriptors: request.data_descriptors.to_vec(),
@@ -192,9 +197,9 @@ impl UbiBlkBackendThread {
                 let buf = borrow.as_slice();
                 file.write_fmt(format_args!(
                     "READ\n{}\n{}\n{}\n",
-                    req.sector,
-                    req.len,
-                    crate::utils::debug::encode_hex(buf, req.len)
+                    req.request_sector,
+                    req.request_len,
+                    crate::utils::debug::encode_hex(buf, req.request_len)
                 ))
                 .unwrap_or_else(|e| {
                     error!("failed to write to io debug file: {:?}", e);

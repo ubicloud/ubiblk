@@ -58,6 +58,12 @@ impl StripeFetcher {
         let fetch_source_channel = source.create_channel()?;
         let fetch_target_channel = target.create_channel()?;
         let metadata_manager = StripeMetadataManager::new(source, target)?;
+        let fetch_buffers = (0..MAX_CONCURRENT_FETCHES)
+            .map(|_| FetchBuffer {
+                used_for: None,
+                buf: Rc::new(RefCell::new(vec![0u8; STRIPE_SIZE])),
+            })
+            .collect();
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,
@@ -65,13 +71,7 @@ impl StripeFetcher {
             fetch_queue: VecDeque::new(),
             stripe_requesters: HashMap::new(),
             req_mpsc_pairs: vec![],
-            fetch_buffers: vec![
-                FetchBuffer {
-                    used_for: None,
-                    buf: Rc::new(RefCell::new(vec![0u8; STRIPE_SIZE])),
-                };
-                MAX_CONCURRENT_FETCHES
-            ],
+            fetch_buffers: fetch_buffers,
             stripes_fetched: 0,
             pending_flush_requests: vec![],
             inprogress_flush_requests: vec![],

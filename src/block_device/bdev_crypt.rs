@@ -1,7 +1,11 @@
 use super::*;
-use crate::vhost_backend::SECTOR_SIZE;
+use crate::vhost_backend::{CipherMethod, KeyEncryptionCipher, SECTOR_SIZE};
 use crate::{Error, Result};
 use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
+use aes_gcm::{
+    aead::{consts::U12, generic_array::GenericArray, Aead, KeyInit},
+    Aes256Gcm,
+};
 use log::error;
 
 struct Request {
@@ -163,8 +167,14 @@ impl BlockDevice for CryptBlockDevice {
 }
 
 impl CryptBlockDevice {
-    pub fn new(base: Box<dyn BlockDevice>, key1: &str, key2: &str) -> Result<Box<Self>> {
+    pub fn new(
+        base: Box<dyn BlockDevice>,
+        key1: &str,
+        key2: &str,
+        kek: KeyEncryptionCipher,
+    ) -> Result<Box<Self>> {
         let (key1, key2) = prepare_keys(key1, key2)?;
+        let (key1, key2) = decrypt_keys(key1, key2, kek)?;
         Ok(Box::new(CryptBlockDevice {
             base,
             key1: key1,
@@ -196,19 +206,69 @@ fn prepare_keys(hex_key1: &str, hex_key2: &str) -> Result<([u8; 32], [u8; 32])> 
     Ok((key1, key2))
 }
 
+fn decrypt_keys(
+    key1: [u8; 32],
+    key2: [u8; 32],
+    kek: KeyEncryptionCipher,
+) -> Result<([u8; 32], [u8; 32])> {
+    match kek.method {
+        CipherMethod::None => Ok((key1, key2)),
+
+        CipherMethod::Aes256Gcm => {
+            let kek_key = kek.key.ok_or(Error::InvalidParameter)?;
+            let kek_iv = kek.iv.ok_or(Error::InvalidParameter)?;
+
+            let cipher = Aes256Gcm::new_from_slice(&kek_key).map_err(|e| {
+                error!("Failed to initialize cipher: {}", e);
+                Error::InvalidParameter
+            })?;
+            let nonce = Nonce::from_slice(&kek_iv);
+
+            let clear1 = decrypt_block(&cipher, nonce, &key1)?;
+            let clear2 = decrypt_block(&cipher, nonce, &key2)?;
+            Ok((clear1, clear2))
+        }
+    }
+}
+
+type Nonce = GenericArray<u8, U12>;
+
+fn decrypt_block(cipher: &Aes256Gcm, nonce: &Nonce, enc: &[u8; 32]) -> Result<[u8; 32]> {
+    let plain = cipher.decrypt(nonce, enc.as_ref()).map_err(|e| {
+        error!("Failed to decrypt key: {}", e);
+        Error::InvalidParameter
+    })?;
+
+    if plain.len() != 32 {
+        error!("Decrypted key must be exactly 32 bytes");
+        return Err(Error::InvalidParameter);
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&plain);
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{block_device::bdev_test::TestBlockDevice, vhost_backend::SECTOR_SIZE};
+    use crate::{
+        block_device::bdev_test::TestBlockDevice,
+        vhost_backend::{CipherMethod, SECTOR_SIZE},
+    };
 
     #[test]
     fn test_crypt_block_device() {
+        let kek = KeyEncryptionCipher {
+            method: CipherMethod::None,
+            key: None,
+            iv: None,
+        };
         let base = TestBlockDevice::new(1024 * 1024);
         let metrics = base.metrics.clone();
         let mem = base.mem.clone();
         let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let key2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-        let crypt_bdev = CryptBlockDevice::new(Box::new(base), key1, key2)
+        let crypt_bdev = CryptBlockDevice::new(Box::new(base), key1, key2, kek)
             .expect("Failed to create CryptBlockDevice");
         let mut channel = crypt_bdev
             .create_channel()
@@ -280,19 +340,29 @@ mod tests {
 
     #[test]
     fn test_invalid_key_length() {
+        let kek = KeyEncryptionCipher {
+            method: CipherMethod::None,
+            key: None,
+            iv: None,
+        };
         let base = TestBlockDevice::new(1024 * 1024);
         let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef11";
         let key2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba987654321032";
-        let result = CryptBlockDevice::new(Box::new(base), key1, key2);
+        let result = CryptBlockDevice::new(Box::new(base), key1, key2, kek);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_invalid_key_format() {
+        let kek = KeyEncryptionCipher {
+            method: CipherMethod::None,
+            key: None,
+            iv: None,
+        };
         let base = TestBlockDevice::new(1024 * 1024);
         let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let key2 = "invalid_key_formatdcba9876543210fedcba9876543210fedcba9876543210";
-        let result = CryptBlockDevice::new(Box::new(base), key1, key2);
+        let result = CryptBlockDevice::new(Box::new(base), key1, key2, kek);
         assert!(result.is_err());
     }
 }

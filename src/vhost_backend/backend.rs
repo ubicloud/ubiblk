@@ -11,10 +11,9 @@ use crate::{
     vhost_backend::SECTOR_SIZE,
 };
 
-use super::backend_thread::UbiBlkBackendThread;
+use super::{backend_thread::UbiBlkBackendThread, KeyEncryptionCipher, Options};
 use crate::{Error, Result};
 use log::{debug, error, info};
-use serde::{Deserialize, Serialize};
 use vhost::vhost_user::message::*;
 use vhost_user_backend::{
     bitmap::BitmapMmapRegion, VhostUserBackend, VhostUserDaemon, VringRwLock, VringT,
@@ -29,20 +28,6 @@ use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic};
 use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Options {
-    pub path: String,
-    pub image_path: Option<String>,
-    pub io_debug_path: Option<String>,
-    pub socket: String,
-    pub num_queues: usize,
-    pub queue_size: usize,
-    pub seg_size_max: u32,
-    pub seg_count_max: u32,
-    pub poll_queue_timeout_us: u128,
-    pub encryption_key: Option<(String, String)>,
-}
 
 struct UbiBlkBackend {
     threads: Vec<Mutex<UbiBlkBackendThread>>,
@@ -245,7 +230,7 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
     }
 }
 
-fn build_block_device(options: &Options) -> Result<Box<dyn BlockDevice>> {
+fn build_block_device(options: &Options, kek: KeyEncryptionCipher) -> Result<Box<dyn BlockDevice>> {
     let mut block_device: Box<dyn BlockDevice> =
         block_device::UringBlockDevice::new(PathBuf::from(&options.path), options.queue_size)
             .map_err(|e| {
@@ -255,16 +240,19 @@ fn build_block_device(options: &Options) -> Result<Box<dyn BlockDevice>> {
             .unwrap();
 
     if let Some((key1, key2)) = &options.encryption_key {
-        block_device = block_device::CryptBlockDevice::new(block_device, &key1, &key2)?;
+        block_device = block_device::CryptBlockDevice::new(block_device, &key1, &key2, kek)?;
     }
 
     Ok(block_device)
 }
 
-fn start_block_backend(options: &Options) -> std::result::Result<(), Box<dyn std::error::Error>> {
+fn start_block_backend(
+    options: &Options,
+    kek: KeyEncryptionCipher,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
-    let base_block_device = build_block_device(options)?;
+    let base_block_device = build_block_device(options, kek.clone())?;
 
     let stripe_fetcher_killfd = EventFd::new(libc::EFD_NONBLOCK)?;
     let maybe_stripe_fetcher = match options.image_path {
@@ -354,7 +342,7 @@ fn start_block_backend(options: &Options) -> std::result::Result<(), Box<dyn std
     Ok(())
 }
 
-pub fn block_backend_loop(config: &Options) {
+pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) {
     env_logger::init();
 
     info!("Starting vhost-user-blk backend with options: {:?}", config);
@@ -362,7 +350,7 @@ pub fn block_backend_loop(config: &Options) {
     info!("Process ID: {}", std::process::id());
 
     loop {
-        match start_block_backend(config) {
+        match start_block_backend(config, kek.clone()) {
             Err(e) => {
                 error!("An error occurred: {:?}", e);
                 break;

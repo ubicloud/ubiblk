@@ -17,6 +17,19 @@ fn main() {
                 .required(true)
                 .help("Path to the configuration YAML file."),
         )
+        .arg(
+            Arg::new("kek")
+                .short('k')
+                .long("kek")
+                .help("Path to the key encryption key file."),
+        )
+        .arg(
+            Arg::new("unlink-kek")
+                .short('u')
+                .long("unlink-kek")
+                .action(clap::ArgAction::SetTrue)
+                .help("Unlink the key encryption key file after use."),
+        )
         .get_matches();
 
     let config_path = cmd_arguments.get_one::<String>("config").unwrap();
@@ -42,5 +55,38 @@ fn main() {
         process::exit(1);
     }
 
-    block_backend_loop(&options);
+    let mut kek = KeyEncryptionCipher {
+        method: CipherMethod::None,
+        key: None,
+        iv: None,
+    };
+
+    if let Some(kek_path) = cmd_arguments.get_one::<String>("kek") {
+        let file = match File::open(kek_path) {
+            Ok(file) => file,
+            Err(e) => {
+                error!("Error opening KEK file {}: {}", kek_path, e);
+                process::exit(1);
+            }
+        };
+
+        kek = match serde_yaml::from_reader(file) {
+            Ok(kek) => kek,
+            Err(e) => {
+                error!("Error parsing KEK file {}: {}", kek_path, e);
+                process::exit(1);
+            }
+        };
+
+        if let Some(unlink_kek) = cmd_arguments.get_one::<bool>("unlink-kek") {
+            if *unlink_kek {
+                if let Err(e) = std::fs::remove_file(kek_path) {
+                    error!("Error unlinking KEK file {}: {}", kek_path, e);
+                    process::exit(1);
+                }
+            }
+        }
+    }
+
+    block_backend_loop(&options, kek);
 }

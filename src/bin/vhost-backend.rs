@@ -6,6 +6,8 @@ use std::process;
 use ubiblk::vhost_backend::*;
 
 fn main() {
+    env_logger::init();
+
     let cmd_arguments = Command::new("vhost-user-blk backend")
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))

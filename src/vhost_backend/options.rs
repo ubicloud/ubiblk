@@ -48,7 +48,7 @@ pub struct Options {
     pub seg_count_max: u32,
     pub poll_queue_timeout_us: u128,
 
-    #[serde(deserialize_with = "decode_encryption_keys")]
+    #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -115,5 +115,20 @@ mod tests {
                 ]
             ))
         );
+    }
+
+    #[test]
+    fn test_missing_encryption_key() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        num_queues: 4
+        queue_size: 1024
+        seg_size_max: 4096
+        seg_count_max: 10
+        poll_queue_timeout_us: 1000
+        "#;
+        let options: Options = from_str(yaml).unwrap();
+        assert!(options.encryption_key.is_none());
     }
 }

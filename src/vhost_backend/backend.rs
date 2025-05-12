@@ -344,8 +344,6 @@ fn start_block_backend(
 }
 
 pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) {
-    env_logger::init();
-
     info!("Starting vhost-user-blk backend with options: {:?}", config);
 
     info!("Process ID: {}", std::process::id());

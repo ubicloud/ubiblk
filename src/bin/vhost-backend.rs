@@ -6,6 +6,8 @@ use std::process;
 use ubiblk::vhost_backend::*;
 
 fn main() {
+    env_logger::init();
+
     let cmd_arguments = Command::new("vhost-user-blk backend")
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
@@ -58,7 +60,8 @@ fn main() {
     let mut kek = KeyEncryptionCipher {
         method: CipherMethod::None,
         key: None,
-        iv: None,
+        initial_vector: None,
+        auth_data: None,
     };
 
     if let Some(kek_path) = cmd_arguments.get_one::<String>("kek") {

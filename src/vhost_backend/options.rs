@@ -33,7 +33,10 @@ pub struct KeyEncryptionCipher {
     pub key: Option<Vec<u8>>,
 
     #[serde_as(as = "Option<Base64>")]
-    pub iv: Option<Vec<u8>>,
+    pub initial_vector: Option<Vec<u8>>,
+
+    #[serde_as(as = "Option<Base64>")]
+    pub auth_data: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,7 +51,7 @@ pub struct Options {
     pub seg_count_max: u32,
     pub poll_queue_timeout_us: u128,
 
-    #[serde(deserialize_with = "decode_encryption_keys")]
+    #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
 }
 
@@ -62,7 +65,8 @@ mod tests {
         let yaml = r#"
         method: aes256-gcm
         key: "uCvGiJ+tlAL0635kGhUaOhmgseSkoCK1HDhxJGgujSI="
-        iv: "UEt+wI+Ldq1UgQ/P"
+        initial_vector: "UEt+wI+Ldq1UgQ/P"
+        auth_data: "dm0zamdlejhfMA=="
         "#;
 
         let cipher: KeyEncryptionCipher = from_str(yaml).unwrap();
@@ -76,9 +80,15 @@ mod tests {
             ])
         );
         assert_eq!(
-            cipher.iv,
+            cipher.initial_vector,
             Some(vec![
                 0x50, 0x4b, 0x7e, 0xc0, 0x8f, 0x8b, 0x76, 0xad, 0x54, 0x81, 0x0f, 0xcf,
+            ])
+        );
+        assert_eq!(
+            cipher.auth_data,
+            Some(vec![
+                0x76, 0x6d, 0x33, 0x6a, 0x67, 0x65, 0x7a, 56, 0x5f, 0x30
             ])
         );
     }
@@ -115,5 +125,20 @@ mod tests {
                 ]
             ))
         );
+    }
+
+    #[test]
+    fn test_missing_encryption_key() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        num_queues: 4
+        queue_size: 1024
+        seg_size_max: 4096
+        seg_count_max: 10
+        poll_queue_timeout_us: 1000
+        "#;
+        let options: Options = from_str(yaml).unwrap();
+        assert!(options.encryption_key.is_none());
     }
 }

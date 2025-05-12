@@ -169,11 +169,10 @@ impl BlockDevice for CryptBlockDevice {
 impl CryptBlockDevice {
     pub fn new(
         base: Box<dyn BlockDevice>,
-        key1: &str,
-        key2: &str,
+        key1: Vec<u8>,
+        key2: Vec<u8>,
         kek: KeyEncryptionCipher,
     ) -> Result<Box<Self>> {
-        let (key1, key2) = prepare_keys(key1, key2)?;
         let (key1, key2) = decrypt_keys(key1, key2, kek)?;
         Ok(Box::new(CryptBlockDevice {
             base,
@@ -183,36 +182,27 @@ impl CryptBlockDevice {
     }
 }
 
-fn prepare_keys(hex_key1: &str, hex_key2: &str) -> Result<([u8; 32], [u8; 32])> {
-    fn decode_key(hex: &str) -> Result<[u8; 32]> {
-        let bytes = hex::decode(hex).map_err(|e| {
-            error!("Failed to decode hex string: {}", e);
-            Error::InvalidParameter
-        })?;
-
-        if bytes.len() != 32 {
-            error!("Key length must be 32 bytes");
-            return Err(Error::InvalidParameter);
-        }
-
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes);
-        Ok(key)
-    }
-
-    let key1 = decode_key(hex_key1)?;
-    let key2 = decode_key(hex_key2)?;
-
-    Ok((key1, key2))
-}
-
 fn decrypt_keys(
-    key1: [u8; 32],
-    key2: [u8; 32],
+    key1: Vec<u8>,
+    key2: Vec<u8>,
     kek: KeyEncryptionCipher,
 ) -> Result<([u8; 32], [u8; 32])> {
     match kek.method {
-        CipherMethod::None => Ok((key1, key2)),
+        CipherMethod::None => {
+            if key1.len() != 32 || key2.len() != 32 {
+                error!("Key length must be 32 bytes");
+                return Err(Error::InvalidParameter);
+            }
+            let key1 = key1.try_into().map_err(|_| {
+                error!("Failed to convert key1 to array");
+                Error::InvalidParameter
+            })?;
+            let key2 = key2.try_into().map_err(|_| {
+                error!("Failed to convert key2 to array");
+                Error::InvalidParameter
+            })?;
+            Ok((key1, key2))
+        }
 
         CipherMethod::Aes256Gcm => {
             let kek_key = kek.key.ok_or(Error::InvalidParameter)?;
@@ -233,7 +223,7 @@ fn decrypt_keys(
 
 type Nonce = GenericArray<u8, U12>;
 
-fn decrypt_block(cipher: &Aes256Gcm, nonce: &Nonce, enc: &[u8; 32]) -> Result<[u8; 32]> {
+fn decrypt_block(cipher: &Aes256Gcm, nonce: &Nonce, enc: &[u8]) -> Result<[u8; 32]> {
     let plain = cipher.decrypt(nonce, enc.as_ref()).map_err(|e| {
         error!("Failed to decrypt key: {}", e);
         Error::InvalidParameter
@@ -266,9 +256,15 @@ mod tests {
         let base = TestBlockDevice::new(1024 * 1024);
         let metrics = base.metrics.clone();
         let mem = base.mem.clone();
-        let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let key2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-        let crypt_bdev = CryptBlockDevice::new(Box::new(base), key1, key2, kek)
+        let key1 = [
+            1, 35, 69, 103, 137, 171, 205, 239, 1, 35, 69, 103, 137, 171, 205, 239, 1, 35, 69, 103,
+            137, 171, 205, 239, 1, 35, 69, 103, 137, 171, 205, 239,
+        ];
+        let key2 = [
+            254, 220, 186, 152, 118, 84, 50, 16, 254, 220, 186, 152, 118, 84, 50, 16, 254, 220,
+            186, 152, 118, 84, 50, 16, 254, 220, 186, 152, 118, 84, 50, 16,
+        ];
+        let crypt_bdev = CryptBlockDevice::new(Box::new(base), key1.to_vec(), key2.to_vec(), kek)
             .expect("Failed to create CryptBlockDevice");
         let mut channel = crypt_bdev
             .create_channel()
@@ -346,23 +342,55 @@ mod tests {
             iv: None,
         };
         let base = TestBlockDevice::new(1024 * 1024);
-        let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef11";
-        let key2 = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba987654321032";
-        let result = CryptBlockDevice::new(Box::new(base), key1, key2, kek);
+        let key1 = [
+            1, 35, 69, 103, 137, 171, 205, 239, 1, 35, 69, 103, 137, 171, 205, 239, 1, 35, 69, 103,
+            137, 171, 205, 239, 1, 35, 69, 103, 137, 171, 205, 239, 1, 35, 69, 103, 137, 171, 205,
+            239,
+        ];
+        let key2 = [
+            254, 220, 186, 152, 118, 84, 50, 16, 254, 220, 186, 152, 118, 84, 50, 16, 254, 220,
+            186, 152, 118, 84, 50, 16, 254, 220, 186, 152, 118, 84, 50, 16, 254, 220, 186, 152,
+            118, 84, 50, 16,
+        ];
+        let result = CryptBlockDevice::new(Box::new(base), key1.to_vec(), key2.to_vec(), kek);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_invalid_key_format() {
+    fn test_encrypted_key_decryption() {
         let kek = KeyEncryptionCipher {
-            method: CipherMethod::None,
-            key: None,
-            iv: None,
+            method: CipherMethod::Aes256Gcm,
+            key: Some(vec![
+                0xb8, 0x2b, 0xc6, 0x88, 0x9f, 0xad, 0x94, 0x02, 0xf4, 0xeb, 0x7e, 0x64, 0x1a, 0x15,
+                0x1a, 0x3a, 0x19, 0xa0, 0xb1, 0xe4, 0xa4, 0xa0, 0x22, 0xb5, 0x1c, 0x38, 0x71, 0x24,
+                0x68, 0x2e, 0x8d, 0x22,
+            ]),
+            iv: Some(vec![
+                0x50, 0x4b, 0x7e, 0xc0, 0x8f, 0x8b, 0x76, 0xad, 0x54, 0x81, 0x0f, 0xcf,
+            ]),
         };
+        let key1 = vec![
+            0x68, 0x84, 0xaa, 0xee, 0x36, 0xde, 0x35, 0x63, 0xbc, 0x53, 0xe5, 0x47, 0x39, 0xbd,
+            0x3d, 0x2b, 0x82, 0xb9, 0x4a, 0x3d, 0x43, 0xb0, 0xc1, 0x8b, 0x7f, 0x6f, 0x3d, 0xa0,
+            0xee, 0x2f, 0x38, 0x6f, 0x52, 0x23, 0x55, 0xa9, 0x19, 0xd5, 0x0c, 0xed, 0x69, 0xae,
+            0x59, 0x00, 0x6d, 0x1a, 0x19, 0x32,
+        ];
+        let key2 = vec![
+            0xe4, 0xe4, 0xda, 0xba, 0x49, 0xd2, 0xc7, 0x05, 0x85, 0xa9, 0x11, 0xaf, 0x13, 0x61,
+            0x1f, 0xdd, 0x9b, 0xf6, 0xb3, 0x5b, 0x32, 0x3d, 0xd6, 0xd8, 0x15, 0x7c, 0xaa, 0xdc,
+            0x51, 0xe4, 0x2b, 0xaf, 0x7f, 0x06, 0x12, 0x3e, 0xee, 0x31, 0x7e, 0x54, 0x54, 0x06,
+            0x15, 0xbd, 0x7e, 0x8f, 0x7b, 0x23,
+        ];
+
         let base = TestBlockDevice::new(1024 * 1024);
-        let key1 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let key2 = "invalid_key_formatdcba9876543210fedcba9876543210fedcba9876543210";
-        let result = CryptBlockDevice::new(Box::new(base), key1, key2, kek);
-        assert!(result.is_err());
+        let bdev_crypt = CryptBlockDevice::new(Box::new(base), key1.clone(), key2.clone(), kek)
+            .expect("Failed to create CryptBlockDevice");
+
+        let expected_key1_hex = "13a13755601ef674dab4ba8f8c33762082270f9d1aad33ae1bec63919501d176";
+        let expected_key2_hex = "9fc147011f120412e34e4e67a6ef54d69b68f6fb6b2024fd71fff4ed2acac2b6";
+        let key1 = hex::encode(bdev_crypt.key1);
+        let key2 = hex::encode(bdev_crypt.key2);
+        assert_eq!(key1, expected_key1_hex);
+        assert_eq!(key2, expected_key2_hex);
     }
 }

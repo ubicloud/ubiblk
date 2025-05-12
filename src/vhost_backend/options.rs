@@ -33,7 +33,10 @@ pub struct KeyEncryptionCipher {
     pub key: Option<Vec<u8>>,
 
     #[serde_as(as = "Option<Base64>")]
-    pub iv: Option<Vec<u8>>,
+    pub initial_vector: Option<Vec<u8>>,
+
+    #[serde_as(as = "Option<Base64>")]
+    pub auth_data: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -62,7 +65,8 @@ mod tests {
         let yaml = r#"
         method: aes256-gcm
         key: "uCvGiJ+tlAL0635kGhUaOhmgseSkoCK1HDhxJGgujSI="
-        iv: "UEt+wI+Ldq1UgQ/P"
+        initial_vector: "UEt+wI+Ldq1UgQ/P"
+        auth_data: "dm0zamdlejhfMA=="
         "#;
 
         let cipher: KeyEncryptionCipher = from_str(yaml).unwrap();
@@ -76,9 +80,15 @@ mod tests {
             ])
         );
         assert_eq!(
-            cipher.iv,
+            cipher.initial_vector,
             Some(vec![
                 0x50, 0x4b, 0x7e, 0xc0, 0x8f, 0x8b, 0x76, 0xad, 0x54, 0x81, 0x0f, 0xcf,
+            ])
+        );
+        assert_eq!(
+            cipher.auth_data,
+            Some(vec![
+                0x76, 0x6d, 0x33, 0x6a, 0x67, 0x65, 0x7a, 56, 0x5f, 0x30
             ])
         );
     }

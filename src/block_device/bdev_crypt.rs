@@ -2,6 +2,7 @@ use super::*;
 use crate::vhost_backend::{CipherMethod, KeyEncryptionCipher, SECTOR_SIZE};
 use crate::{Error, Result};
 use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
+use aes_gcm::aead::Payload;
 use aes_gcm::{
     aead::{consts::U12, generic_array::GenericArray, Aead, KeyInit},
     Aes256Gcm,
@@ -206,16 +207,22 @@ fn decrypt_keys(
 
         CipherMethod::Aes256Gcm => {
             let kek_key = kek.key.ok_or(Error::InvalidParameter)?;
-            let kek_iv = kek.iv.ok_or(Error::InvalidParameter)?;
+            let kek_iv = kek.initial_vector.ok_or(Error::InvalidParameter)?;
+            let kek_auth_data = kek.auth_data.ok_or(Error::InvalidParameter)?;
 
             let cipher = Aes256Gcm::new_from_slice(&kek_key).map_err(|e| {
                 error!("Failed to initialize cipher: {}", e);
                 Error::InvalidParameter
             })?;
+
+            if kek_iv.len() != 12 {
+                error!("Initial vector must be exactly 12 bytes");
+                return Err(Error::InvalidParameter);
+            }
             let nonce = Nonce::from_slice(&kek_iv);
 
-            let clear1 = decrypt_block(&cipher, nonce, &key1)?;
-            let clear2 = decrypt_block(&cipher, nonce, &key2)?;
+            let clear1 = decrypt_block(&cipher, nonce, &kek_auth_data, &key1)?;
+            let clear2 = decrypt_block(&cipher, nonce, &kek_auth_data, &key2)?;
             Ok((clear1, clear2))
         }
     }
@@ -223,11 +230,24 @@ fn decrypt_keys(
 
 type Nonce = GenericArray<u8, U12>;
 
-fn decrypt_block(cipher: &Aes256Gcm, nonce: &Nonce, enc: &[u8]) -> Result<[u8; 32]> {
-    let plain = cipher.decrypt(nonce, enc.as_ref()).map_err(|e| {
-        error!("Failed to decrypt key: {}", e);
-        Error::InvalidParameter
-    })?;
+fn decrypt_block(
+    cipher: &Aes256Gcm,
+    nonce: &Nonce,
+    auth_data: &[u8],
+    enc: &[u8],
+) -> Result<[u8; 32]> {
+    let plain = cipher
+        .decrypt(
+            nonce,
+            Payload {
+                msg: enc,
+                aad: auth_data,
+            },
+        )
+        .map_err(|e| {
+            error!("Failed to decrypt key: {}", e);
+            Error::InvalidParameter
+        })?;
 
     if plain.len() != 32 {
         error!("Decrypted key must be exactly 32 bytes");
@@ -251,7 +271,8 @@ mod tests {
         let kek = KeyEncryptionCipher {
             method: CipherMethod::None,
             key: None,
-            iv: None,
+            initial_vector: None,
+            auth_data: None,
         };
         let base = TestBlockDevice::new(1024 * 1024);
         let metrics = base.metrics.clone();
@@ -339,7 +360,8 @@ mod tests {
         let kek = KeyEncryptionCipher {
             method: CipherMethod::None,
             key: None,
-            iv: None,
+            initial_vector: None,
+            auth_data: None,
         };
         let base = TestBlockDevice::new(1024 * 1024);
         let key1 = [
@@ -365,9 +387,10 @@ mod tests {
                 0x1a, 0x3a, 0x19, 0xa0, 0xb1, 0xe4, 0xa4, 0xa0, 0x22, 0xb5, 0x1c, 0x38, 0x71, 0x24,
                 0x68, 0x2e, 0x8d, 0x22,
             ]),
-            iv: Some(vec![
+            initial_vector: Some(vec![
                 0x50, 0x4b, 0x7e, 0xc0, 0x8f, 0x8b, 0x76, 0xad, 0x54, 0x81, 0x0f, 0xcf,
             ]),
+            auth_data: Some(vec![]),
         };
         let key1 = vec![
             0x68, 0x84, 0xaa, 0xee, 0x36, 0xde, 0x35, 0x63, 0xbc, 0x53, 0xe5, 0x47, 0x39, 0xbd,

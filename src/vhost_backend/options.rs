@@ -39,16 +39,46 @@ pub struct KeyEncryptionCipher {
     pub auth_data: Option<Vec<u8>>,
 }
 
+fn default_poll_queue_timeout_us() -> u128 {
+    1000
+}
+
+fn default_num_queues() -> usize {
+    1
+}
+
+fn default_queue_size() -> usize {
+    64
+}
+
+fn default_seg_size_max() -> u32 {
+    65536
+}
+
+fn default_seg_count_max() -> u32 {
+    4
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
     pub io_debug_path: Option<String>,
     pub socket: String,
+
+    #[serde(default = "default_num_queues")]
     pub num_queues: usize,
+
+    #[serde(default = "default_queue_size")]
     pub queue_size: usize,
+
+    #[serde(default = "default_seg_size_max")]
     pub seg_size_max: u32,
+
+    #[serde(default = "default_seg_count_max")]
     pub seg_count_max: u32,
+
+    #[serde(default = "default_poll_queue_timeout_us")]
     pub poll_queue_timeout_us: u128,
 
     #[serde(default, deserialize_with = "decode_encryption_keys")]
@@ -98,11 +128,6 @@ mod tests {
         let yaml = r#"
         path: "/path/to/image"
         socket: "/path/to/socket"
-        num_queues: 4
-        queue_size: 1024
-        seg_size_max: 4096
-        seg_count_max: 10
-        poll_queue_timeout_us: 1000
         encryption_key:
           - "aISq7jbeNWO8U+VHOb09K4K5Sj1DsMGLf289oO4vOG9SI1WpGdUM7WmuWQBtGhky"
           - "5OTauknSxwWFqRGvE2Ef3Zv2s1syPdbYFXyq3FHkK69/BhI+7jF+VFQGFb1+j3sj"
@@ -132,11 +157,6 @@ mod tests {
         let yaml = r#"
         path: "/path/to/image"
         socket: "/path/to/socket"
-        num_queues: 4
-        queue_size: 1024
-        seg_size_max: 4096
-        seg_count_max: 10
-        poll_queue_timeout_us: 1000
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert!(options.encryption_key.is_none());

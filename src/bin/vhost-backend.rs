@@ -60,7 +60,7 @@ fn main() {
     let mut kek = KeyEncryptionCipher {
         method: CipherMethod::None,
         key: None,
-        initial_vector: None,
+        init_vector: None,
         auth_data: None,
     };
 

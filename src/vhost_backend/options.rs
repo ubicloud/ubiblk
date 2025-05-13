@@ -59,6 +59,10 @@ fn default_seg_count_max() -> u32 {
     4
 }
 
+fn default_skip_sync() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Options {
     pub path: String,
@@ -80,6 +84,9 @@ pub struct Options {
 
     #[serde(default = "default_poll_queue_timeout_us")]
     pub poll_queue_timeout_us: u128,
+
+    #[serde(default = "default_skip_sync")]
+    pub skip_sync: bool,
 
     #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,

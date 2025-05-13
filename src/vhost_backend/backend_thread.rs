@@ -44,6 +44,7 @@ pub struct UbiBlkBackendThread {
     io_channel: Box<dyn IoChannel>,
     request_slots: Vec<RequestSlot>,
     io_debug_file: Option<fs::File>,
+    skip_sync: bool,
 }
 
 impl UbiBlkBackendThread {
@@ -94,6 +95,7 @@ impl UbiBlkBackendThread {
             io_channel,
             request_slots,
             io_debug_file,
+            skip_sync: options.skip_sync,
         })
     }
 
@@ -316,7 +318,16 @@ impl UbiBlkBackendThread {
         );
     }
 
-    fn process_flush(&mut self, request: &Request, desc_chain: &DescChain) {
+    fn process_flush(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
+        if self.skip_sync {
+            self.complete_io(
+                vring,
+                desc_chain,
+                request.status_addr,
+                VIRTIO_BLK_S_OK as u8,
+            );
+            return;
+        }
         let id = self.get_request_slot(0, request, desc_chain);
         self.io_channel.add_flush(id);
     }
@@ -349,7 +360,7 @@ impl UbiBlkBackendThread {
                 Ok(request) => match request.request_type {
                     RequestType::In => self.process_read(&request, &desc_chain, vring),
                     RequestType::Out => self.process_write(&request, &desc_chain, vring),
-                    RequestType::Flush => self.process_flush(&request, &desc_chain),
+                    RequestType::Flush => self.process_flush(&request, &desc_chain, vring),
                     RequestType::GetDeviceId => {
                         self.process_get_device_id(&request, desc_chain, vring)
                     }

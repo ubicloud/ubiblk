@@ -66,17 +66,30 @@ vhost-frontend --socket /tmp/vhost.sock --stage virtqueue
 
 ## vhost-backend
 
-The `vhost-backend` utility launches a vhost-user-blk backend based on a YAML config.
+The `vhost-backend` utility launches a vhost-user-blk backend based on a YAML configuration file.
+It now supports advanced features such as lazy stripe fetching for efficient I/O, integrated block encryption via KEK,
+and configurable I/O debug logging.
 
-Usage:
+**Usage:**
 ```bash
-vhost-backend --config <CONFIG_YAML>
+vhost-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek]
 ```
 
-Arguments:
-- `-f, --config <CONFIG_YAML>` Path to the backend configuration YAML file.
+**Arguments:**
+- `-f, --config <CONFIG_YAML>`  Path to the backend YAML configuration file.
+- `-k, --kek <KEK_FILE>`   (Optional) Path to the key encryption file for encrypted block device support.
+- `-u, --unlink-kek`       (Optional) Unlink (delete) the KEK file after use.
 
-Examples:
+**Configuration:**
+The configuration YAML must define:
+- `path`: Base disk image path.
+- `image_path`: (Optional) Image path for lazy stripe fetch.
+- `socket`: vhost-user socket path.
+- `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us`:(Optional) Configuration for virtqueues and I/O.
+- `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
+- `io_debug_path`: (Optional) Path for I/O debug log.
+
+**Examples:**
 ```bash
 vhost-backend --config config.yaml
 ```
@@ -94,7 +107,18 @@ queue_size: 256                          # Integer: size of each virtqueue
 seg_size_max: 4096                       # Integer: max IO segment size (bytes)
 seg_count_max: 1                         # Integer: max segments per IO
 poll_queue_timeout_us: 500               # Integer: poll timeout in microseconds
-encryption_key:                          # Optional: AES‐XTS keys (hex strings)
-  - "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-  - "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+io_debug_path: "/tmp/io_debug.log"       # Optional: path for I/O debug log
+encryption_key:                          # Optional: AES‐XTS keys (base64 encoded)
+  - "x74Yhe/ovgxY4BrBaM6Wm/9firf9k/N+ayvGsskBo+hjQtrL+nslCDC5oR/HpSDL"
+  - "TJn65Jb//AYqu/a8zlpb0IlXC4vwFQ5DtbQkMTeliEAwafr0DEH+5hNro8FuVzQ+"
+```
+
+## Key Encryption Key (KEK) File
+The keys in the configuration file can be encrypted using a KEK file. The KEK file should contain the encryption key in base64 format. The backend will use this key to decrypt the block device keys at runtime.
+
+```yaml
+method: "aes256-gcm"                # Encryption method (aes256-gcm or none)
+key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60=" # Base64 encoded key
+init_vector: "UEt+wI+Ldq1UgQ/P"     # Base64 encoded IV
+auth_data: "dm0zamdlejhfMA=="       # Base64 encoded auth data
 ```

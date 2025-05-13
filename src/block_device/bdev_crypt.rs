@@ -207,7 +207,7 @@ fn decrypt_keys(
 
         CipherMethod::Aes256Gcm => {
             let kek_key = kek.key.ok_or(Error::InvalidParameter)?;
-            let kek_iv = kek.initial_vector.ok_or(Error::InvalidParameter)?;
+            let kek_iv = kek.init_vector.ok_or(Error::InvalidParameter)?;
             let kek_auth_data = kek.auth_data.ok_or(Error::InvalidParameter)?;
 
             let cipher = Aes256Gcm::new_from_slice(&kek_key).map_err(|e| {
@@ -271,7 +271,7 @@ mod tests {
         let kek = KeyEncryptionCipher {
             method: CipherMethod::None,
             key: None,
-            initial_vector: None,
+            init_vector: None,
             auth_data: None,
         };
         let base = TestBlockDevice::new(1024 * 1024);
@@ -360,7 +360,7 @@ mod tests {
         let kek = KeyEncryptionCipher {
             method: CipherMethod::None,
             key: None,
-            initial_vector: None,
+            init_vector: None,
             auth_data: None,
         };
         let base = TestBlockDevice::new(1024 * 1024);
@@ -387,7 +387,7 @@ mod tests {
                 0x1a, 0x3a, 0x19, 0xa0, 0xb1, 0xe4, 0xa4, 0xa0, 0x22, 0xb5, 0x1c, 0x38, 0x71, 0x24,
                 0x68, 0x2e, 0x8d, 0x22,
             ]),
-            initial_vector: Some(vec![
+            init_vector: Some(vec![
                 0x50, 0x4b, 0x7e, 0xc0, 0x8f, 0x8b, 0x76, 0xad, 0x54, 0x81, 0x0f, 0xcf,
             ]),
             auth_data: Some(vec![]),

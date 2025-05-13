@@ -33,7 +33,7 @@ pub struct KeyEncryptionCipher {
     pub key: Option<Vec<u8>>,
 
     #[serde_as(as = "Option<Base64>")]
-    pub initial_vector: Option<Vec<u8>>,
+    pub init_vector: Option<Vec<u8>>,
 
     #[serde_as(as = "Option<Base64>")]
     pub auth_data: Option<Vec<u8>>,
@@ -102,7 +102,7 @@ mod tests {
         let yaml = r#"
         method: aes256-gcm
         key: "uCvGiJ+tlAL0635kGhUaOhmgseSkoCK1HDhxJGgujSI="
-        initial_vector: "UEt+wI+Ldq1UgQ/P"
+        init_vector: "UEt+wI+Ldq1UgQ/P"
         auth_data: "dm0zamdlejhfMA=="
         "#;
 
@@ -117,7 +117,7 @@ mod tests {
             ])
         );
         assert_eq!(
-            cipher.initial_vector,
+            cipher.init_vector,
             Some(vec![
                 0x50, 0x4b, 0x7e, 0xc0, 0x8f, 0x8b, 0x76, 0xad, 0x54, 0x81, 0x0f, 0xcf,
             ])

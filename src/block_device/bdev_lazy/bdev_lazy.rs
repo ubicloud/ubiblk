@@ -7,7 +7,7 @@ use super::super::*;
 use super::stripe_fetcher::{
     SharedStripeFetcher, StripeFetcherRequest, StripeFetcherResponse, StripeStatus, StripeStatusVec,
 };
-use crate::{block_device::SharedBuffer, Error, Result};
+use crate::{block_device::SharedBuffer, Result, VhostUserBlockError};
 use log::error;
 
 #[derive(Debug)]
@@ -83,7 +83,7 @@ impl LazyIoChannel {
                     .send(StripeFetcherRequest::Fetch(stripe_id))
                     .map_err(|e| {
                         error!("Failed to send fetch request: {}", e);
-                        crate::Error::IoError
+                        VhostUserBlockError::ChannelError
                     })?;
             }
         }
@@ -276,7 +276,12 @@ impl LazyBlockDevice {
                 "Base device sector count ({}) is less than metadata sector count ({})",
                 base_sector_count, metadata_sector_count
             );
-            return Err(Error::InvalidParameter);
+            return Err(VhostUserBlockError::InvalidParameter {
+                description: format!(
+                    "Base device sector count ({}) is less than metadata sector count ({})",
+                    base_sector_count, metadata_sector_count
+                ),
+            });
         }
         Ok(Box::new(LazyBlockDevice {
             base,

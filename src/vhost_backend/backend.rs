@@ -5,9 +5,12 @@ use std::{
     time::Instant,
 };
 
-use crate::utils::block::{print_features, VirtioBlockConfig};
 use crate::{
-    block_device::{self, BlockDevice, StripeFetcher, SyncBlockDevice},
+    block_device::UringBlockDevice,
+    utils::block::{print_features, VirtioBlockConfig},
+};
+use crate::{
+    block_device::{self, BlockDevice, StripeFetcher},
     vhost_backend::SECTOR_SIZE,
 };
 
@@ -231,13 +234,16 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
 }
 
 fn build_block_device(options: &Options, kek: KeyEncryptionCipher) -> Result<Box<dyn BlockDevice>> {
-    let mut block_device: Box<dyn BlockDevice> =
-        block_device::UringBlockDevice::new(PathBuf::from(&options.path), options.queue_size)
-            .map_err(|e| {
-                error!("Failed to create block device: {:?}", e);
-                Box::new(e)
-            })
-            .unwrap();
+    let mut block_device: Box<dyn BlockDevice> = block_device::UringBlockDevice::new(
+        PathBuf::from(&options.path),
+        options.queue_size,
+        false,
+    )
+    .map_err(|e| {
+        error!("Failed to create block device: {:?}", e);
+        Box::new(e)
+    })
+    .unwrap();
 
     if let Some((key1, key2)) = &options.encryption_key {
         block_device =
@@ -259,7 +265,7 @@ fn start_block_backend(
     let maybe_stripe_fetcher = match options.image_path {
         Some(ref path) => {
             let readonly = true;
-            let image_bdev = SyncBlockDevice::new(PathBuf::from(path), readonly)?;
+            let image_bdev = UringBlockDevice::new(PathBuf::from(path), 64, readonly)?;
             let stripe_fetcher = StripeFetcher::new(
                 &*image_bdev,
                 &*base_block_device,

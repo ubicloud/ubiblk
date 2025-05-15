@@ -17,10 +17,10 @@ struct UringIoChannel {
 }
 
 impl UringIoChannel {
-    fn new(path: &str, queue_size: usize) -> Result<Self> {
+    fn new(path: &str, queue_size: usize, readonly: bool) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
-            .write(true)
+            .write(!readonly)
             .open(path)
             .map_err(|e| {
                 error!("Failed to open file {}: {}", path, e);
@@ -130,11 +130,13 @@ pub struct UringBlockDevice {
     path: PathBuf,
     sector_count: u64,
     queue_size: usize,
+    readonly: bool,
 }
 
 impl BlockDevice for UringBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
-        let channel = UringIoChannel::new(self.path.to_str().unwrap(), self.queue_size)?;
+        let channel =
+            UringIoChannel::new(self.path.to_string_lossy().as_ref(), self.queue_size, self.readonly)?;
         Ok(Box::new(channel))
     }
 
@@ -144,7 +146,7 @@ impl BlockDevice for UringBlockDevice {
 }
 
 impl UringBlockDevice {
-    pub fn new(path: PathBuf, queue_size: usize) -> Result<Box<Self>> {
+    pub fn new(path: PathBuf, queue_size: usize, readonly: bool) -> Result<Box<Self>> {
         match std::fs::metadata(&path) {
             Ok(metadata) => {
                 let size = metadata.len();
@@ -157,6 +159,7 @@ impl UringBlockDevice {
                     path,
                     sector_count,
                     queue_size,
+                    readonly,
                 }))
             }
             Err(e) => {
@@ -191,7 +194,7 @@ mod tests {
             Error::IoError
         })?;
         let path = tmpfile.path().to_owned();
-        let block_dev = UringBlockDevice::new(path.clone(), 8)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 8, false)?;
         let mut chan = block_dev.create_channel()?;
 
         // Write sector 0
@@ -209,6 +212,33 @@ mod tests {
         let result = spin_until_complete(&mut chan);
         assert_eq!(result, vec![(2, true)]);
         assert_eq!(*read_buf.borrow(), pattern);
+
+        Ok(())
+    }
+
+    #[test]
+    fn create_channel_and_basic_io_readonly() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            Error::IoError
+        })?;
+        let path = tmpfile.path().to_owned();
+        let block_dev = UringBlockDevice::new(path.clone(), 8, true)?;
+        let mut chan = block_dev.create_channel()?;
+
+        // Read sector 0
+        let read_buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        chan.add_read(0, 1, read_buf.clone(), 2);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(2, true)]);
+
+        // Attempt to write should fail
+        let write_buf = Rc::new(RefCell::new(vec![0xABu8; SECTOR_SIZE]));
+        chan.add_write(0, 1, write_buf.clone(), 1);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(1, false)]);
 
         Ok(())
     }

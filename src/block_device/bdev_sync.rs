@@ -1,6 +1,6 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
 use crate::vhost_backend::SECTOR_SIZE;
-use crate::{Error, Result};
+use crate::{Result, VhostUserBlockError};
 use log::error;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -20,7 +20,7 @@ impl SyncIoChannel {
             .open(path)
             .map_err(|e| {
                 error!("Failed to open file {}: {}", path.display(), e);
-                Error::IoError
+                VhostUserBlockError::IoError { source: e }
             })?;
         Ok(SyncIoChannel {
             file: Arc::new(Mutex::new(file)),
@@ -103,10 +103,7 @@ pub struct SyncBlockDevice {
 
 impl BlockDevice for SyncBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
-        let channel = SyncIoChannel::new(&self.path, self.readonly).map_err(|e| {
-            error!("Failed to create IO channel: {}", e);
-            Error::IoError
-        })?;
+        let channel = SyncIoChannel::new(&self.path, self.readonly)?;
         Ok(Box::new(channel))
     }
 
@@ -122,7 +119,9 @@ impl SyncBlockDevice {
                 let size = metadata.len();
                 if size % SECTOR_SIZE as u64 != 0 {
                     error!("File size is not a multiple of sector size");
-                    return Err(Error::InvalidParameter);
+                    return Err(VhostUserBlockError::InvalidParameter {
+                        description: "File size is not a multiple of sector size".to_string(),
+                    });
                 }
                 let sector_count = size / SECTOR_SIZE as u64;
                 Ok(Box::new(SyncBlockDevice {
@@ -133,7 +132,7 @@ impl SyncBlockDevice {
             }
             Err(e) => {
                 error!("Failed to get metadata for file {}: {}", path.display(), e);
-                Err(Error::IoError)
+                Err(VhostUserBlockError::IoError { source: e })
             }
         }
     }
@@ -151,19 +150,13 @@ mod tests {
     fn create_channel_and_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {}", e);
-            Error::IoError
+            VhostUserBlockError::IoError { source: e }
         })?;
 
         let path = tmpfile.path().to_path_buf();
-        let device = SyncBlockDevice::new(path.clone(), false).map_err(|e| {
-            error!("Failed to create SyncBlockDevice: {}", e);
-            Error::IoError
-        })?;
+        let device = SyncBlockDevice::new(path.clone(), false)?;
 
-        let mut chan = device.create_channel().map_err(|e| {
-            error!("Failed to create IO channel: {}", e);
-            Error::IoError
-        })?;
+        let mut chan = device.create_channel()?;
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];
@@ -188,19 +181,13 @@ mod tests {
     fn create_channel_and_basic_io_readonly() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {}", e);
-            Error::IoError
+            VhostUserBlockError::IoError { source: e }
         })?;
 
         let path = tmpfile.path().to_path_buf();
-        let device = SyncBlockDevice::new(path.clone(), true).map_err(|e| {
-            error!("Failed to create SyncBlockDevice: {}", e);
-            Error::IoError
-        })?;
+        let device = SyncBlockDevice::new(path.clone(), true)?;
 
-        let mut chan = device.create_channel().map_err(|e| {
-            error!("Failed to create IO channel: {}", e);
-            Error::IoError
-        })?;
+        let mut chan = device.create_channel()?;
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];

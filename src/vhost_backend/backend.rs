@@ -15,7 +15,7 @@ use crate::{
 };
 
 use super::{backend_thread::UbiBlkBackendThread, KeyEncryptionCipher, Options};
-use crate::{Error, Result};
+use crate::Result;
 use log::{debug, error, info};
 use vhost::vhost_user::message::*;
 use vhost_user_backend::{
@@ -64,10 +64,7 @@ impl<'a> UbiBlkBackend {
         let mut queues_per_thread = Vec::new();
         let mut threads: Vec<Mutex<UbiBlkBackendThread>> = Vec::new();
         for i in 0..options.num_queues {
-            let io_channel = block_device.create_channel().map_err(|e| {
-                error!("Failed to create channel: {:?}", e);
-                Error::IoChannelCreation
-            })?;
+            let io_channel = block_device.create_channel()?;
             let thread: Mutex<UbiBlkBackendThread> =
                 Mutex::new(UbiBlkBackendThread::new(mem.clone(), io_channel, options)?);
             threads.push(thread);

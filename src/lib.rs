@@ -9,4 +9,4 @@ pub mod error;
 pub mod utils;
 pub mod vhost_backend;
 
-pub use error::{Error, Result};
+pub use error::{Result, VhostUserBlockError};

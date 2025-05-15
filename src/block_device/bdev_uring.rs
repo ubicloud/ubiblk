@@ -1,5 +1,5 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
-use crate::{vhost_backend::SECTOR_SIZE, Error, Result};
+use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use io_uring::IoUring;
 use log::error;
 use std::{
@@ -24,15 +24,17 @@ impl UringIoChannel {
             .open(path)
             .map_err(|e| {
                 error!("Failed to open file {}: {}", path, e);
-                Error::IoError
+                VhostUserBlockError::IoError { source: e }
             })?;
         let io_uring_entries: u32 = queue_size.try_into().map_err(|_| {
             error!("Invalid queue size: {}", queue_size);
-            Error::InvalidParameter
+            VhostUserBlockError::InvalidParameter {
+                description: "Invalid io_uring queue size".to_string(),
+            }
         })?;
         let ring = IoUring::new(io_uring_entries).map_err(|e| {
             error!("Failed to create io_uring: {}", e);
-            Error::IoError
+            VhostUserBlockError::IoError { source: e }
         })?;
         Ok(UringIoChannel {
             file,
@@ -92,9 +94,9 @@ impl IoChannel for UringIoChannel {
     }
 
     fn submit(&mut self) -> Result<()> {
-        if let Err(_) = self.ring.submit() {
+        if let Err(e) = self.ring.submit() {
             error!("Failed to submit IO request");
-            return Err(Error::IoError);
+            return Err(VhostUserBlockError::IoError { source: e });
         }
         Ok(())
     }
@@ -135,8 +137,11 @@ pub struct UringBlockDevice {
 
 impl BlockDevice for UringBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
-        let channel =
-            UringIoChannel::new(self.path.to_string_lossy().as_ref(), self.queue_size, self.readonly)?;
+        let channel = UringIoChannel::new(
+            self.path.to_string_lossy().as_ref(),
+            self.queue_size,
+            self.readonly,
+        )?;
         Ok(Box::new(channel))
     }
 
@@ -152,7 +157,9 @@ impl UringBlockDevice {
                 let size = metadata.len();
                 if size % SECTOR_SIZE as u64 != 0 {
                     error!("File size is not a multiple of sector size");
-                    return Err(Error::InvalidParameter);
+                    return Err(VhostUserBlockError::InvalidParameter {
+                        description: "File size is not a multiple of sector size".to_string(),
+                    });
                 }
                 let sector_count = size / SECTOR_SIZE as u64;
                 Ok(Box::new(UringBlockDevice {
@@ -164,7 +171,7 @@ impl UringBlockDevice {
             }
             Err(e) => {
                 error!("Failed to get metadata for {}: {}", path.display(), e);
-                Err(Error::IoError)
+                Err(VhostUserBlockError::IoError { source: e })
             }
         }
     }
@@ -191,7 +198,7 @@ mod tests {
     fn create_channel_and_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {}", e);
-            Error::IoError
+            VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, false)?;
@@ -220,7 +227,7 @@ mod tests {
     fn create_channel_and_basic_io_readonly() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {}", e);
-            Error::IoError
+            VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, true)?;

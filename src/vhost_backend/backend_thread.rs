@@ -8,7 +8,7 @@ use super::Options;
 use super::{request::*, SECTOR_SIZE};
 use crate::block_device::IoChannel;
 use crate::block_device::SharedBuffer;
-use crate::{Error, Result};
+use crate::{Result, VhostUserBlockError};
 
 use libc::EFD_NONBLOCK;
 use log::error;
@@ -70,7 +70,7 @@ impl UbiBlkBackendThread {
 
         let kill_evt = EventFd::new(EFD_NONBLOCK).map_err(|e| {
             error!("failed to create kill eventfd: {:?}", e);
-            Error::ThreadCreation
+            VhostUserBlockError::ThreadCreation
         })?;
 
         let io_debug_file = match options.io_debug_path {
@@ -81,7 +81,7 @@ impl UbiBlkBackendThread {
                     .open(path)
                     .map_err(|e| {
                         error!("failed to open io debug file: {:?}", e);
-                        Error::IoError
+                        VhostUserBlockError::IoError { source: e }
                     })?;
                 Some(file)
             }
@@ -163,7 +163,7 @@ impl UbiBlkBackendThread {
             mem.read_exact_volatile_from(*data_addr, &mut buf_chunk, *data_len as usize)
                 .map_err(|e| {
                     error!("read_exact_volatile_from failed: {:?}", e);
-                    Error::GuestMemoryAccess
+                    VhostUserBlockError::GuestMemoryAccess { source: e }
                 })?;
             pos += *data_len as usize;
         }

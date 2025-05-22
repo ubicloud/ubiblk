@@ -8,6 +8,7 @@ use std::{
 use crate::{
     block_device::UringBlockDevice,
     utils::block::{print_features, VirtioBlockConfig},
+    VhostUserBlockError,
 };
 use crate::{
     block_device::{self, BlockDevice, StripeFetcher},
@@ -15,6 +16,7 @@ use crate::{
 };
 
 use super::{backend_thread::UbiBlkBackendThread, KeyEncryptionCipher, Options};
+use crate::block_device::UbiMetadata;
 use crate::Result;
 use log::{debug, error, info};
 use vhost::vhost_user::message::*;
@@ -230,17 +232,18 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
     }
 }
 
-fn build_block_device(options: &Options, kek: KeyEncryptionCipher) -> Result<Box<dyn BlockDevice>> {
-    let mut block_device: Box<dyn BlockDevice> = block_device::UringBlockDevice::new(
-        PathBuf::from(&options.path),
-        options.queue_size,
-        false,
-    )
-    .map_err(|e| {
-        error!("Failed to create block device: {:?}", e);
-        Box::new(e)
-    })
-    .unwrap();
+fn build_block_device(
+    path: &str,
+    options: &Options,
+    kek: KeyEncryptionCipher,
+) -> Result<Box<dyn BlockDevice>> {
+    let mut block_device: Box<dyn BlockDevice> =
+        block_device::UringBlockDevice::new(PathBuf::from(&path), options.queue_size, false)
+            .map_err(|e| {
+                error!("Failed to create block device: {:?}", e);
+                Box::new(e)
+            })
+            .unwrap();
 
     if let Some((key1, key2)) = &options.encryption_key {
         block_device =
@@ -256,16 +259,26 @@ fn start_block_backend(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
-    let base_block_device = build_block_device(options, kek.clone())?;
+    let base_block_device = build_block_device(&options.path, options, kek.clone())?;
 
     let stripe_fetcher_killfd = EventFd::new(libc::EFD_NONBLOCK)?;
     let maybe_stripe_fetcher = match options.image_path {
         Some(ref path) => {
+            if options.metadata_path.is_none() {
+                return Err(Box::new(
+                    VhostUserBlockError::InvalidParameter {
+                        description: "metadata_path is required when image_path is provided".to_string(),
+                    },
+                ));
+            }
+            let metadata_path = options.metadata_path.as_ref().unwrap();
+            let metadata_dev = build_block_device(&metadata_path, options, kek)?;
             let readonly = true;
             let image_bdev = UringBlockDevice::new(PathBuf::from(path), 64, readonly)?;
             let stripe_fetcher = StripeFetcher::new(
                 &*image_bdev,
                 &*base_block_device,
+                &*metadata_dev,
                 stripe_fetcher_killfd.try_clone()?,
             )?;
             Some(Arc::new(Mutex::new(stripe_fetcher)))
@@ -363,4 +376,23 @@ pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) {
             }
         }
     }
+}
+
+pub fn init_metadata(
+    config: &Options,
+    kek: KeyEncryptionCipher,
+    stripe_sector_count_shift: u8,
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let metadata_path =
+        config
+            .metadata_path
+            .as_ref()
+            .ok_or_else(|| VhostUserBlockError::InvalidParameter {
+                description: "metadata_path is none".to_string(),
+            })?;
+    let metadata_bdev = build_block_device(&metadata_path, config, kek.clone())?;
+    let mut ch = metadata_bdev.create_channel()?;
+    let metadata = UbiMetadata::new(stripe_sector_count_shift);
+    metadata.write(&mut ch)?;
+    Ok(())
 }

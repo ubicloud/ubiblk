@@ -67,6 +67,7 @@ fn default_skip_sync() -> bool {
 pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
+    pub metadata_path: Option<String>,
     pub io_debug_path: Option<String>,
     pub socket: String,
 

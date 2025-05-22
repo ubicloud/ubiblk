@@ -129,7 +129,7 @@ impl LazyIoChannel {
                 queued_rw_requests.push_front(request);
                 break;
             }
-            let sector = self.translate_sector(request.sector_offset);
+            let sector = request.sector_offset;
             match request.type_ {
                 RequestType::In => {
                     self.base.add_read(
@@ -161,10 +161,6 @@ impl LazyIoChannel {
             }
         }
     }
-
-    fn translate_sector(&self, sector: u64) -> u64 {
-        self.stripe_status_vec.borrow().translate_sector(sector)
-    }
 }
 
 impl IoChannel for LazyIoChannel {
@@ -181,8 +177,7 @@ impl IoChannel for LazyIoChannel {
 
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
-            self.base
-                .add_read(self.translate_sector(sector_offset), sector_count, buf, id);
+            self.base.add_read(sector_offset, sector_count, buf, id);
         } else {
             if let Err(e) = self.start_stripe_fetches(&request) {
                 error!("Failed to send fetch request: {}", e);
@@ -206,12 +201,8 @@ impl IoChannel for LazyIoChannel {
 
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
-            self.base.add_write(
-                self.translate_sector(sector_offset),
-                sector_count,
-                buf.clone(),
-                id,
-            );
+            self.base
+                .add_write(sector_offset, sector_count, buf.clone(), id);
         } else {
             if let Err(e) = self.start_stripe_fetches(&request) {
                 error!("Failed to send fetch request: {}", e);
@@ -270,23 +261,10 @@ impl LazyBlockDevice {
         stripe_fetcher: SharedStripeFetcher,
     ) -> Result<Box<Self>> {
         let base_sector_count = base.sector_count();
-        let metadata_sector_count = stripe_fetcher.lock().unwrap().metadata_sector_count();
-        if base_sector_count < metadata_sector_count {
-            error!(
-                "Base device sector count ({}) is less than metadata sector count ({})",
-                base_sector_count, metadata_sector_count
-            );
-            return Err(VhostUserBlockError::InvalidParameter {
-                description: format!(
-                    "Base device sector count ({}) is less than metadata sector count ({})",
-                    base_sector_count, metadata_sector_count
-                ),
-            });
-        }
         Ok(Box::new(LazyBlockDevice {
             base,
             stripe_fetcher,
-            sector_count: base_sector_count - metadata_sector_count,
+            sector_count: base_sector_count,
         }))
     }
 }

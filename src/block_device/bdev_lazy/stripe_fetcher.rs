@@ -35,6 +35,8 @@ struct FetchBuffer {
 pub struct StripeFetcher {
     fetch_source_channel: Box<dyn IoChannel>,
     fetch_target_channel: Box<dyn IoChannel>,
+    source_sector_count: u64,
+    target_sector_count: u64,
     metadata_manager: Box<StripeMetadataManager>,
     fetch_queue: VecDeque<usize>,
     stripe_requesters: HashMap<usize, Vec<Sender<StripeFetcherResponse>>>,
@@ -51,19 +53,22 @@ pub struct StripeFetcher {
 
 impl StripeFetcher {
     pub fn new(
-        source: &dyn BlockDevice,
-        target: &dyn BlockDevice,
+        source_dev: &dyn BlockDevice,
+        target_dev: &dyn BlockDevice,
+        metadata_dev: &dyn BlockDevice,
         killfd: EventFd,
     ) -> Result<Self> {
-        let fetch_source_channel = source.create_channel()?;
-        let fetch_target_channel = target.create_channel()?;
-        let metadata_manager = StripeMetadataManager::new(source, target)?;
+        let fetch_source_channel = source_dev.create_channel()?;
+        let fetch_target_channel = target_dev.create_channel()?;
+        let metadata_manager = StripeMetadataManager::new(metadata_dev, source_dev.sector_count())?;
         let fetch_buffers = (0..MAX_CONCURRENT_FETCHES)
             .map(|_| FetchBuffer {
                 used_for: None,
                 buf: Rc::new(RefCell::new(vec![0u8; STRIPE_SIZE])),
             })
             .collect();
+        let source_sector_count = source_dev.sector_count();
+        let target_sector_count = target_dev.sector_count();
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,
@@ -76,6 +81,8 @@ impl StripeFetcher {
             pending_flush_requests: vec![],
             inprogress_flush_requests: vec![],
             killfd,
+            source_sector_count,
+            target_sector_count,
         })
     }
 
@@ -166,12 +173,15 @@ impl StripeFetcher {
         let fetch_buffer = &mut self.fetch_buffers[buffer_idx];
         let stripe_id = fetch_buffer.used_for.unwrap();
         let buf = fetch_buffer.buf.clone();
-        let stripe_sector_count = self.metadata_manager.stripe_sector_count(stripe_id);
         let stripe_sector_offset = self.metadata_manager.stripe_target_sector_offset(stripe_id);
+        let stripe_sector_count = self
+            .metadata_manager
+            .stripe_sector_count()
+            .min(self.target_sector_count - stripe_sector_offset);
 
         self.fetch_target_channel.add_write(
             stripe_sector_offset as u64,
-            stripe_sector_count,
+            stripe_sector_count as u32,
             buf,
             buffer_idx,
         );
@@ -222,12 +232,15 @@ impl StripeFetcher {
             fetch_buffer.used_for = Some(stripe_id);
 
             let buf = fetch_buffer.buf.clone();
-            let stripe_sector_count = self.metadata_manager.stripe_sector_count(stripe_id);
             let stripe_sector_offset = self.metadata_manager.stripe_source_sector_offset(stripe_id);
+            let stripe_sector_count = self
+                .metadata_manager
+                .stripe_sector_count()
+                .min(self.source_sector_count - stripe_sector_offset);
 
             self.fetch_source_channel.add_read(
                 stripe_sector_offset,
-                stripe_sector_count,
+                stripe_sector_count as u32,
                 buf.clone(),
                 buffer_idx,
             );
@@ -302,10 +315,6 @@ impl StripeFetcher {
     pub fn stripe_status_vec(&self) -> StripeStatusVec {
         self.metadata_manager.stripe_status_vec()
     }
-
-    pub fn metadata_sector_count(&self) -> u64 {
-        self.metadata_manager.metadata_sector_count()
-    }
 }
 
 unsafe impl Send for StripeFetcher {}
@@ -314,16 +323,27 @@ unsafe impl Sync for StripeFetcher {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_device::bdev_lazy::stripe_metadata_manager::UbiMetadata;
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::vhost_backend::SECTOR_SIZE;
 
     #[test]
     fn test_stripe_fetcher() {
-        let source = TestBlockDevice::new(29 * 1024 * 1024 + 3 * 1024);
-        let target = TestBlockDevice::new(40 * 1024 * 1024);
+        let source_dev = TestBlockDevice::new(29 * 1024 * 1024 + 3 * 1024);
+        let target_dev = TestBlockDevice::new(29 * 1024 * 1024 + 3 * 1024);
+        let metadata_dev = TestBlockDevice::new(8 * 1024 * 1024);
+
+        let stripe_sector_count_shift = 11;
+        let mut ch = metadata_dev
+            .create_channel()
+            .expect("Failed to create channel");
+        UbiMetadata::new(stripe_sector_count_shift)
+            .write(&mut ch)
+            .unwrap();
 
         let killfd = EventFd::new(0).unwrap();
-        let mut stripe_fetcher = StripeFetcher::new(&source, &target, killfd).unwrap();
+        let mut stripe_fetcher =
+            StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd).unwrap();
 
         let (req_sender, req_receiver) = std::sync::mpsc::channel();
         let (resp_sender, resp_receiver) = std::sync::mpsc::channel();
@@ -337,25 +357,25 @@ mod tests {
         {
             let metadata_manager = &stripe_fetcher.metadata_manager;
 
-            source.write(
+            source_dev.write(
                 metadata_manager.stripe_source_sector_offset(0) as usize * SECTOR_SIZE,
                 buf1,
                 buf1.len(),
             );
-            source.write(
+            source_dev.write(
                 metadata_manager.stripe_source_sector_offset(3) as usize * SECTOR_SIZE,
                 buf2,
                 buf2.len(),
             );
 
             // before fetch, contents shouldn't be the same
-            target.read(
+            target_dev.read(
                 metadata_manager.stripe_target_sector_offset(0) as usize * SECTOR_SIZE,
                 &mut buf3,
                 64,
             );
             assert_ne!(&buf3[..buf1.len()], buf1);
-            target.read(
+            target_dev.read(
                 metadata_manager.stripe_target_sector_offset(3) as usize * SECTOR_SIZE,
                 &mut buf3,
                 64,
@@ -386,13 +406,13 @@ mod tests {
             let metadata_manager = &stripe_fetcher.metadata_manager;
 
             // after fetch, contents should be the same
-            target.read(
+            target_dev.read(
                 metadata_manager.stripe_target_sector_offset(0) as usize * SECTOR_SIZE,
                 &mut buf3,
                 64,
             );
             assert_eq!(&buf3[..buf1.len()], buf1);
-            target.read(
+            target_dev.read(
                 metadata_manager.stripe_target_sector_offset(3) as usize * SECTOR_SIZE,
                 &mut buf3,
                 64,

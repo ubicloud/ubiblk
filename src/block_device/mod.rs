@@ -29,5 +29,6 @@ mod bdev_test;
 pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_lazy::LazyBlockDevice;
 pub use bdev_lazy::StripeFetcher;
+pub use bdev_lazy::UbiMetadata;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;

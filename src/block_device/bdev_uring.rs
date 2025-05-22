@@ -2,6 +2,7 @@ use super::{BlockDevice, IoChannel, SharedBuffer};
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use io_uring::IoUring;
 use log::error;
+use nix::errno::Errno;
 use std::{
     fs::{File, OpenOptions},
     os::fd::AsRawFd,
@@ -112,6 +113,7 @@ impl IoChannel for UringIoChannel {
                     let id = entry.user_data();
                     if result < 0 {
                         finished_requests.push((id as usize, false));
+                        error!("IO request failed: {}", Errno::from_i32(-result));
                     } else {
                         finished_requests.push((id as usize, true));
                     }

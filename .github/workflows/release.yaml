@@ -54,11 +54,15 @@ jobs:
       - name: Build project
         run: |
           cargo build --release --target=${{ matrix.target }}
-          mv target/${{ matrix.target }}/release/vhost-backend target/${{ matrix.target }}/release/vhost-backend-${{ matrix.arch }}
+
+      - name: Package
+          cd target/${{ matrix.target }}/release
+          tar -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend init-metadata
+          cd -
 
       - uses: ncipollo/release-action@v1
         if: github.event_name == 'workflow_dispatch' && github.ref_type == 'tag'
         with:
-          artifacts: "${{ github.workspace }}/target/${{ matrix.target }}/release/vhost-backend-${{ matrix.arch }}"
+          artifacts: "${{ github.workspace }}/target/${{ matrix.target }}/release/vhost-backend-${{ matrix.arch }}.tar.gz"
           body: "Release ${{ github.ref_name }}"
           allowUpdates: true

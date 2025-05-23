@@ -56,6 +56,7 @@ jobs:
           cargo build --release --target=${{ matrix.target }}
 
       - name: Package
+        run: |
           cd target/${{ matrix.target }}/release
           tar -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend init-metadata
           cd -

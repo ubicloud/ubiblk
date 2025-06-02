@@ -256,6 +256,7 @@ impl StripeFetcher {
     }
 
     pub fn finish_flush(&mut self, success: bool) {
+        debug!("Finishing flush, success={}", success);
         for (sender, flush_id) in self.inprogress_flush_requests.drain(..) {
             if let Err(e) = sender.send(StripeFetcherResponse::Flush(flush_id, success)) {
                 error!("Failed to send flush response: {:?}", e);

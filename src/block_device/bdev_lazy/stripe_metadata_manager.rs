@@ -227,6 +227,11 @@ impl StripeMetadataManager {
             });
         }
 
+        debug!(
+            "Starting flush for metadata version {}",
+            self.metadata_version_current
+        );
+
         self.metadata_version_being_flushed = Some(self.metadata_version_current);
 
         let metadata_buf = self.metadata_buf.clone();
@@ -276,6 +281,7 @@ impl StripeMetadataManager {
                     (Some(version), true) => {
                         debug!("Metadata flush completed for version {}", version);
                         self.metadata_version_flushed = version;
+                        self.metadata_version_being_flushed = None;
                         return Some(true);
                     }
                 }

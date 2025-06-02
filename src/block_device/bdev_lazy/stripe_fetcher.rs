@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
+use super::stripe_metadata_manager::StartFlushResult;
 pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
 use crate::Result;
 use log::{debug, error, info};
@@ -107,7 +108,10 @@ impl StripeFetcher {
             StripeStatus::Fetched => {
                 debug!("Stripe {} already fetched", stripe_id);
                 if let Err(e) = sender.send(StripeFetcherResponse::Fetch(stripe_id, true)) {
-                    error!("Failed to send fetch response for already fetched stripe {}: {:?}", stripe_id, e);
+                    error!(
+                        "Failed to send fetch response for already fetched stripe {}: {:?}",
+                        stripe_id, e
+                    );
                 }
             }
             StripeStatus::Queued | StripeStatus::Fetching => {
@@ -284,9 +288,17 @@ impl StripeFetcher {
             self.inprogress_flush_requests = self.pending_flush_requests.clone();
             self.pending_flush_requests.clear();
 
-            if let Err(e) = self.metadata_manager.start_flush() {
-                error!("Failed to start flush: {:?}", e);
-                self.finish_flush(false);
+            match self.metadata_manager.start_flush() {
+                Ok(StartFlushResult::NoChanges) => {
+                    self.finish_flush(true);
+                }
+                Ok(StartFlushResult::Started) => {
+                    debug!("Flush started");
+                }
+                Err(e) => {
+                    error!("Failed to start flush: {:?}", e);
+                    self.finish_flush(false);
+                }
             }
         }
     }

@@ -262,14 +262,13 @@ fn start_block_backend(
     let base_block_device = build_block_device(&options.path, options, kek.clone())?;
 
     let stripe_fetcher_killfd = EventFd::new(libc::EFD_NONBLOCK)?;
-    let maybe_stripe_fetcher = match options.image_path {
+    let maybe_fetcher_base_pair = match options.image_path {
         Some(ref path) => {
             if options.metadata_path.is_none() {
-                return Err(Box::new(
-                    VhostUserBlockError::InvalidParameter {
-                        description: "metadata_path is required when image_path is provided".to_string(),
-                    },
-                ));
+                return Err(Box::new(VhostUserBlockError::InvalidParameter {
+                    description: "metadata_path is required when image_path is provided"
+                        .to_string(),
+                }));
             }
             let metadata_path = options.metadata_path.as_ref().unwrap();
             let metadata_dev = build_block_device(&metadata_path, options, kek)?;
@@ -281,14 +280,26 @@ fn start_block_backend(
                 &*metadata_dev,
                 stripe_fetcher_killfd.try_clone()?,
             )?;
-            Some(Arc::new(Mutex::new(stripe_fetcher)))
+            Some((Arc::new(Mutex::new(stripe_fetcher)), image_bdev))
         }
         None => None,
     };
 
-    let block_device = match maybe_stripe_fetcher.as_ref() {
-        Some(stripe_fetcher) => {
-            block_device::LazyBlockDevice::new(base_block_device, stripe_fetcher.clone())?
+    let mut maybe_stripe_fetcher = None;
+
+    let block_device = match maybe_fetcher_base_pair {
+        Some((stripe_fetcher, image_bdev)) => {
+            maybe_stripe_fetcher = Some(stripe_fetcher.clone());
+            let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
+                None
+            } else {
+                Some(image_bdev)
+            };
+            block_device::LazyBlockDevice::new(
+                base_block_device,
+                maybe_image_bdev,
+                stripe_fetcher.clone(),
+            )?
         }
         None => base_block_device,
     };

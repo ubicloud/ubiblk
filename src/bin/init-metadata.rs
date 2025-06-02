@@ -73,7 +73,9 @@ fn main() {
         .get_one::<u8>("stripe-sector-count-shift")
         .unwrap();
 
-    if *stripe_sector_count_shift > STRIPE_SECTOR_COUNT_SHIFT_MAX || *stripe_sector_count_shift < STRIPE_SECTOR_COUNT_SHIFT_MIN {
+    if *stripe_sector_count_shift > STRIPE_SECTOR_COUNT_SHIFT_MAX
+        || *stripe_sector_count_shift < STRIPE_SECTOR_COUNT_SHIFT_MIN
+    {
         error!(
             "stripe-sector-count-shift must be between {} and {}.",
             STRIPE_SECTOR_COUNT_SHIFT_MIN, STRIPE_SECTOR_COUNT_SHIFT_MAX

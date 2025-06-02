@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
@@ -39,7 +39,6 @@ pub struct StripeFetcher {
     target_sector_count: u64,
     metadata_manager: Box<StripeMetadataManager>,
     fetch_queue: VecDeque<usize>,
-    stripe_requesters: HashMap<usize, Vec<Sender<StripeFetcherResponse>>>,
     req_mpsc_pairs: Vec<(
         Sender<StripeFetcherResponse>,
         Receiver<StripeFetcherRequest>,
@@ -74,7 +73,6 @@ impl StripeFetcher {
             fetch_target_channel,
             metadata_manager,
             fetch_queue: VecDeque::new(),
-            stripe_requesters: HashMap::new(),
             req_mpsc_pairs: vec![],
             fetch_buffers: fetch_buffers,
             stripes_fetched: 0,
@@ -105,21 +103,15 @@ impl StripeFetcher {
                 self.fetch_queue.push_back(stripe_id);
                 self.metadata_manager
                     .set_stripe_status(stripe_id, StripeStatus::Queued);
-                self.stripe_requesters
-                    .insert(stripe_id, vec![sender.clone()]);
             }
             StripeStatus::Fetched => {
                 debug!("Stripe {} already fetched", stripe_id);
-                sender
-                    .send(StripeFetcherResponse::Fetch(stripe_id, true))
-                    .unwrap();
+                if let Err(e) = sender.send(StripeFetcherResponse::Fetch(stripe_id, true)) {
+                    error!("Failed to send fetch response for already fetched stripe {}: {:?}", stripe_id, e);
+                }
             }
             StripeStatus::Queued | StripeStatus::Fetching => {
                 debug!("Stripe {} is already queued or fetching", stripe_id);
-                self.stripe_requesters
-                    .entry(stripe_id)
-                    .or_insert_with(Vec::new)
-                    .push(sender.clone());
             }
         }
     }
@@ -274,12 +266,12 @@ impl StripeFetcher {
         completed_fetches.append(&mut self.poll_fetches());
 
         for (stripe_id, success) in completed_fetches {
-            if let Some(requesters) = self.stripe_requesters.remove(&stripe_id) {
-                for requester in requesters {
-                    if let Err(e) = requester.send(StripeFetcherResponse::Fetch(stripe_id, success))
-                    {
-                        error!("Failed to send response for stripe {}: {:?}", stripe_id, e);
-                    }
+            for (sender, _) in self.req_mpsc_pairs.iter() {
+                if let Err(e) = sender.send(StripeFetcherResponse::Fetch(stripe_id, success)) {
+                    error!(
+                        "Failed to send fetch response for stripe {}: {:?}",
+                        stripe_id, e
+                    );
                 }
             }
         }

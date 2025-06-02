@@ -63,6 +63,10 @@ fn default_skip_sync() -> bool {
     false
 }
 
+fn default_copy_on_read() -> bool {
+    false
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Options {
     pub path: String,
@@ -88,6 +92,9 @@ pub struct Options {
 
     #[serde(default = "default_skip_sync")]
     pub skip_sync: bool,
+
+    #[serde(default = "default_copy_on_read")]
+    pub copy_on_read: bool,
 
     #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
@@ -168,5 +175,15 @@ mod tests {
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert!(options.encryption_key.is_none());
+    }
+
+    #[test]
+    fn test_default_copy_on_read() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        "#;
+        let options: Options = from_str(yaml).unwrap();
+        assert!(!options.copy_on_read);
     }
 }

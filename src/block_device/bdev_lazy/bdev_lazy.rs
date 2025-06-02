@@ -28,6 +28,7 @@ struct Request {
 
 struct LazyIoChannel {
     base: Box<dyn IoChannel>,
+    image: Option<Box<dyn IoChannel>>,
     queued_rw_requests: RefCell<VecDeque<Request>>,
     flush_requests: HashSet<usize>,
     finished_requests: Vec<(usize, bool)>,
@@ -39,12 +40,14 @@ struct LazyIoChannel {
 impl LazyIoChannel {
     fn new(
         base: Box<dyn IoChannel>,
+        image: Option<Box<dyn IoChannel>>,
         sender: Sender<StripeFetcherRequest>,
         receiver: Receiver<StripeFetcherResponse>,
         stripe_status_vec: StripeStatusVec,
     ) -> Self {
         LazyIoChannel {
             base,
+            image,
             queued_rw_requests: RefCell::new(VecDeque::new()),
             finished_requests: Vec::new(),
             flush_requests: HashSet::new(),
@@ -178,6 +181,8 @@ impl IoChannel for LazyIoChannel {
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
             self.base.add_read(sector_offset, sector_count, buf, id);
+        } else if let Some(image_channel) = &mut self.image {
+            image_channel.add_read(sector_offset, sector_count, buf, id);
         } else {
             if let Err(e) = self.start_stripe_fetches(&request) {
                 error!("Failed to send fetch request: {}", e);
@@ -222,6 +227,9 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn submit(&mut self) -> Result<()> {
+        if let Some(image_channel) = &mut self.image {
+            image_channel.submit()?;
+        }
         self.base.submit()
     }
 
@@ -231,6 +239,9 @@ impl IoChannel for LazyIoChannel {
 
         let mut results = self.finished_requests.clone();
         results.extend(self.base.poll());
+        if let Some(image_channel) = &mut self.image {
+            results.extend(image_channel.poll());
+        }
         self.finished_requests.clear();
 
         for id in &results {
@@ -243,7 +254,13 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn busy(&mut self) -> bool {
+        let image_busy = if let Some(image_channel) = &mut self.image {
+            image_channel.busy()
+        } else {
+            false
+        };
         self.base.busy()
+            || image_busy
             || self.queued_rw_requests.borrow().len() > 0
             || self.flush_requests.len() > 0
     }
@@ -251,6 +268,7 @@ impl IoChannel for LazyIoChannel {
 
 pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
+    image: Option<Box<dyn BlockDevice>>,
     stripe_fetcher: SharedStripeFetcher,
     sector_count: u64,
 }
@@ -258,11 +276,13 @@ pub struct LazyBlockDevice {
 impl LazyBlockDevice {
     pub fn new(
         base: Box<dyn BlockDevice>,
+        image: Option<Box<dyn BlockDevice>>,
         stripe_fetcher: SharedStripeFetcher,
     ) -> Result<Box<Self>> {
         let base_sector_count = base.sector_count();
         Ok(Box::new(LazyBlockDevice {
             base,
+            image,
             stripe_fetcher,
             sector_count: base_sector_count,
         }))
@@ -274,12 +294,18 @@ impl BlockDevice for LazyBlockDevice {
         let (req_sender, req_receiver) = std::sync::mpsc::channel();
         let (resp_sender, resp_receiver) = std::sync::mpsc::channel();
         let base_channel = self.base.create_channel()?;
+        let image_channel = if let Some(image) = &self.image {
+            Some(image.create_channel()?)
+        } else {
+            None
+        };
 
         let mut stripe_fetcher = self.stripe_fetcher.lock().unwrap();
         stripe_fetcher.add_req_mpsc_pair(resp_sender, req_receiver);
 
         Ok(Box::new(LazyIoChannel::new(
             base_channel,
+            image_channel,
             req_sender,
             resp_receiver,
             stripe_fetcher.stripe_status_vec(),

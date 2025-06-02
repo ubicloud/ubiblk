@@ -2,7 +2,7 @@ use std::{cell::RefCell, mem::MaybeUninit, ptr::copy_nonoverlapping, rc::Rc};
 
 use super::super::*;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
-use log::{error, info};
+use log::{debug, error, info};
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -153,6 +153,14 @@ pub struct StripeMetadataManager {
     metadata: Box<UbiMetadata>,
     stripe_status_vec: StripeStatusVec,
     metadata_buf: SharedBuffer,
+    metadata_version_current: u64,
+    metadata_version_flushed: u64,
+    metadata_version_being_flushed: Option<u64>,
+}
+
+pub enum StartFlushResult {
+    Started,
+    NoChanges,
 }
 
 impl StripeMetadataManager {
@@ -167,6 +175,9 @@ impl StripeMetadataManager {
             metadata,
             stripe_status_vec,
             metadata_buf: Rc::new(RefCell::new(vec![0u8; metadata_buf_size])),
+            metadata_version_current: 0,
+            metadata_version_flushed: 0,
+            metadata_version_being_flushed: None,
         }))
     }
 
@@ -179,6 +190,7 @@ impl StripeMetadataManager {
     }
 
     pub fn set_stripe_status(&mut self, stripe_id: usize, status: StripeStatus) {
+        self.metadata_version_current += 1;
         self.stripe_status_vec.set_stripe_status(stripe_id, status);
         match status {
             StripeStatus::NotFetched => {
@@ -203,7 +215,20 @@ impl StripeMetadataManager {
         self.stripe_status_vec.clone()
     }
 
-    pub fn start_flush(&mut self) -> Result<()> {
+    pub fn start_flush(&mut self) -> Result<StartFlushResult> {
+        if self.metadata_version_flushed == self.metadata_version_current {
+            debug!("No changes to flush");
+            return Ok(StartFlushResult::NoChanges);
+        }
+
+        if self.metadata_version_being_flushed.is_some() {
+            return Err(VhostUserBlockError::MetadataError {
+                description: "Flush already in progress".to_string(),
+            });
+        }
+
+        self.metadata_version_being_flushed = Some(self.metadata_version_current);
+
         let metadata_buf = self.metadata_buf.clone();
         let metadata_size = std::mem::size_of::<UbiMetadata>();
         unsafe {
@@ -218,7 +243,7 @@ impl StripeMetadataManager {
 
         self.channel.submit()?;
 
-        Ok(())
+        Ok(StartFlushResult::Started)
     }
 
     pub fn poll_flush(&mut self) -> Option<bool> {
@@ -226,22 +251,34 @@ impl StripeMetadataManager {
             if id == METADATA_WRITE_ID {
                 if !success {
                     error!("Metadata write failed");
+                    self.metadata_version_being_flushed = None;
                     return Some(false);
                 }
 
                 self.channel.add_flush(METADATA_FLUSH_ID);
                 if let Err(e) = self.channel.submit() {
                     error!("Failed to submit flush: {}", e);
+                    self.metadata_version_being_flushed = None;
                     return Some(false);
                 }
                 return None;
             } else if id == METADATA_FLUSH_ID {
-                if !success {
-                    error!("Metadata flush failed");
-                    return Some(false);
+                match (self.metadata_version_being_flushed, success) {
+                    (None, _) => {
+                        error!("Flush ID received without a pending flush");
+                        return Some(false);
+                    }
+                    (Some(_), false) => {
+                        error!("Metadata flush failed");
+                        self.metadata_version_being_flushed = None;
+                        return Some(false);
+                    }
+                    (Some(version), true) => {
+                        debug!("Metadata flush completed for version {}", version);
+                        self.metadata_version_flushed = version;
+                        return Some(true);
+                    }
                 }
-
-                return Some(true);
             }
         }
         None

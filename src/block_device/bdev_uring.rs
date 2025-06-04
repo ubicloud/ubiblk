@@ -251,4 +251,23 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn new_with_unaligned_size_fails() -> Result<()> {
+        let mut tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        tmpfile
+            .as_file_mut()
+            .set_len(SECTOR_SIZE as u64 + 1)
+            .map_err(|e| {
+                error!("Failed to set temporary file size: {}", e);
+                VhostUserBlockError::IoError { source: e }
+            })?;
+        let path = tmpfile.path().to_owned();
+        let result = UringBlockDevice::new(path, 8, false);
+        assert!(result.is_err());
+        Ok(())
+    }
 }

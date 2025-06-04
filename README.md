@@ -19,50 +19,9 @@ sudo make install
 
 ## vhost-frontend
 
-The `vhost-frontend` utility is a command-line tool that connects to a vhost-user-blk backend and provides various functionalities for interacting with virtualized block devices.
-
-### Usage
-
-```
-vhost-frontend --socket <SOCKET_PATH> [--output <OUTPUT_FILE>] [--stage <STAGE>]
-```
-
-### Arguments
-
-- `-s, --socket <SOCKET_PATH>`: Path to the vhost-user socket (required)
-- `-o, --output <OUTPUT_FILE>`: Path to the output file (required for the copy stage)
-- `--stage <STAGE>`: Execution stage to run (default: "4")
-
-### Stages
-
-The `--stage` argument allows for running the vhost-frontend at different execution stages:
-
-| Value | Name       | Description                                      |
-|-------|------------|--------------------------------------------------|
-| 0     | setup      | Connect to the socket and set up basic frontend  |
-| 1     | config     | Read and display device configuration            |
-| 2     | memory     | Allocate and set up device memory                |
-| 3     | virtqueue  | Set up the virtqueue for device communication    |
-| 4     | copy       | Copy data from the device to the output file     |
-
-You can specify the stage by number or name: `--stage 2` or `--stage memory`.
-
-### Examples
-
-Connect to a vhost-user socket and display device configuration:
-```
-vhost-frontend --socket /tmp/vhost.sock --stage config
-```
-
-Copy data from a block device to a file:
-```
-vhost-frontend --socket /tmp/vhost.sock --output disk.img
-```
-
-Set up the virtqueue without copying data:
-```
-vhost-frontend --socket /tmp/vhost.sock --stage virtqueue
-```
+A small command-line tool that can connect to a vhost-user-blk backend and run
+through the different frontend stages.  See
+[docs/vhost-frontend.md](docs/vhost-frontend.md) for full documentation.
 
 ## vhost-backend
 
@@ -84,8 +43,11 @@ vhost-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek]
 The configuration YAML must define:
 - `path`: Base disk image path.
 - `image_path`: (Optional) Image path for lazy stripe fetch.
+- `metadata_path`: (Optional) Metadata file path used for lazy fetch. Required when `image_path` is set.
 - `socket`: vhost-user socket path.
-- `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us`:(Optional) Configuration for virtqueues and I/O.
+- `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
+- `skip_sync`: (Optional) Skip flush handling for faster operation.
+- `copy_on_read`: (Optional) Copy stripes from the image only when accessed.
 - `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
 - `io_debug_path`: (Optional) Path for I/O debug log.
 
@@ -101,6 +63,7 @@ The backend configuration YAML must match the `Options` struct fields:
 ```yaml
 path: "/path/to/block-device.raw"        # String: base disk image path
 image_path: "/path/to/ubi-image.raw"     # Optional String: UBI image for lazy fetch
+metadata_path: "/path/to/metadata"       # Optional: metadata path for lazy fetch
 socket: "/tmp/vhost.sock"                # String: vhost‐user socket path
 num_queues: 4                            # Integer: number of virtqueues
 queue_size: 256                          # Integer: size of each virtqueue
@@ -108,6 +71,8 @@ seg_size_max: 4096                       # Integer: max IO segment size (bytes)
 seg_count_max: 1                         # Integer: max segments per IO
 poll_queue_timeout_us: 500               # Integer: poll timeout in microseconds
 io_debug_path: "/tmp/io_debug.log"       # Optional: path for I/O debug log
+skip_sync: false                         # Optional: skip flush handling
+copy_on_read: false                      # Optional: copy stripes on first read
 encryption_key:                          # Optional: AES‐XTS keys (base64 encoded)
   - "x74Yhe/ovgxY4BrBaM6Wm/9firf9k/N+ayvGsskBo+hjQtrL+nslCDC5oR/HpSDL"
   - "TJn65Jb//AYqu/a8zlpb0IlXC4vwFQ5DtbQkMTeliEAwafr0DEH+5hNro8FuVzQ+"
@@ -122,3 +87,19 @@ key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60=" # Base64 encoded key
 init_vector: "UEt+wI+Ldq1UgQ/P"     # Base64 encoded IV
 auth_data: "dm0zamdlejhfMA=="       # Base64 encoded auth data
 ```
+
+## init-metadata
+
+Initialises the metadata file required when running the backend in lazy stripe
+fetch mode.
+
+```bash
+init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \
+             [--stripe-sector-count-shift <SHIFT>]
+```
+
+- `-f, --config <CONFIG_YAML>`: Path to the backend configuration file.
+- `-k, --kek <KEK_FILE>`: (Optional) KEK file for encrypted keys.
+- `-u, --unlink-kek`: (Optional) Delete the KEK file after use.
+- `-s, --stripe-sector-count-shift`: (Optional) Stripe size as a power of two
+  sectors (default: `11`).

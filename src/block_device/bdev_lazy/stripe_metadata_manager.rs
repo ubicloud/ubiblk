@@ -434,7 +434,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone)]
     struct FailingBlockDevice {
         inner: TestBlockDevice,
         state: Arc<Mutex<FailState>>,
@@ -575,6 +574,8 @@ mod tests {
         let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
 
         metadata_dev.fail_next_write();
+
+        manager.set_stripe_status(0, StripeStatus::Fetched);
 
         manager.start_flush().unwrap();
         assert_eq!(manager.poll_flush(), Some(false));

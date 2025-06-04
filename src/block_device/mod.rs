@@ -27,6 +27,9 @@ mod bdev_uring;
 #[cfg(test)]
 pub(crate) mod bdev_test;
 
+#[cfg(test)]
+pub(crate) mod bdev_failing;
+
 pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_lazy::LazyBlockDevice;
 pub use bdev_lazy::StripeFetcher;

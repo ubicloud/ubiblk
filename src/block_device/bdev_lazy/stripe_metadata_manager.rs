@@ -380,6 +380,7 @@ impl StripeMetadataManager {
 mod tests {
     use super::*;
     use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::VhostUserBlockError;
 
     #[test]
     fn test_stripe_metadata_manager() -> Result<()> {
@@ -439,6 +440,28 @@ mod tests {
         let mut magic_buf = [0u8; UBI_MAGIC_SIZE];
         metadata_dev.read(0, &mut magic_buf, UBI_MAGIC_SIZE);
         assert_eq!(magic_buf, *UBI_MAGIC);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_metadata_magic_mismatch() -> Result<()> {
+        let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let source_sector_count = 29 * stripe_sector_count + 4;
+
+        let mut ch = metadata_dev.create_channel()?;
+        UbiMetadata::new(stripe_sector_count_shift)
+            .write(&mut ch)
+            .unwrap();
+
+        // Corrupt the magic bytes
+        let bad_magic = [0u8; UBI_MAGIC_SIZE];
+        metadata_dev.write(0, &bad_magic, UBI_MAGIC_SIZE);
+
+        let result = StripeMetadataManager::new(&metadata_dev, source_sector_count);
+        assert!(matches!(result, Err(VhostUserBlockError::MetadataError { .. })));
 
         Ok(())
     }

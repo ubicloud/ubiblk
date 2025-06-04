@@ -19,7 +19,7 @@ struct CryptIoChannel {
     base: Box<dyn IoChannel>,
     key1: [u8; 32],
     key2: [u8; 32],
-    read_requests: [Option<Request>; 256],
+    read_requests: Vec<Option<Request>>,
 }
 
 impl CryptIoChannel {
@@ -28,7 +28,7 @@ impl CryptIoChannel {
             base,
             key1,
             key2,
-            read_requests: [const { None }; 256],
+            read_requests: Vec::new(),
         }
     }
 }
@@ -100,6 +100,9 @@ impl CryptIoChannel {
 
 impl IoChannel for CryptIoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
+        if id >= self.read_requests.len() {
+            self.read_requests.resize_with(id + 1, || None);
+        }
         self.read_requests[id] = Some(Request {
             sector_offset,
             buf: buf.clone(),
@@ -130,16 +133,18 @@ impl IoChannel for CryptIoChannel {
     fn poll(&mut self) -> Vec<(usize, bool)> {
         let mut results = vec![];
         for (id, result) in self.base.poll() {
-            if let Some(req) = self.read_requests[id].take() {
-                self.decrypt(
-                    req.buf.borrow_mut().as_mut_slice(),
-                    req.sector_offset,
-                    req.sector_count as u64,
-                );
-                results.push((id, result));
-            } else {
-                results.push((id, result));
+            if id < self.read_requests.len() {
+                if let Some(req) = self.read_requests[id].take() {
+                    self.decrypt(
+                        req.buf.borrow_mut().as_mut_slice(),
+                        req.sector_offset,
+                        req.sector_count as u64,
+                    );
+                    results.push((id, result));
+                    continue;
+                }
             }
+            results.push((id, result));
         }
         results
     }

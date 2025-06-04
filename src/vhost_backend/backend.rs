@@ -241,9 +241,8 @@ fn build_block_device(
         block_device::UringBlockDevice::new(PathBuf::from(&path), options.queue_size, false)
             .map_err(|e| {
                 error!("Failed to create block device: {:?}", e);
-                Box::new(e)
-            })
-            .unwrap();
+                e
+            })?;
 
     if let Some((key1, key2)) = &options.encryption_key {
         block_device =

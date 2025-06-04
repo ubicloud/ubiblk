@@ -438,4 +438,28 @@ mod tests {
         assert_eq!(key1, expected_key1_hex);
         assert_eq!(key2, expected_key2_hex);
     }
+
+    #[test]
+    fn test_invalid_encrypted_key_length() {
+        let kek = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(vec![
+                0xb8, 0x2b, 0xc6, 0x88, 0x9f, 0xad, 0x94, 0x02, 0xf4, 0xeb, 0x7e,
+                0x64, 0x1a, 0x15, 0x1a, 0x3a, 0x19, 0xa0, 0xb1, 0xe4, 0xa4, 0xa0,
+                0x22, 0xb5, 0x1c, 0x38, 0x71, 0x24, 0x68, 0x2e, 0x8d, 0x22,
+            ]),
+            init_vector: Some(vec![
+                0x50, 0x4b, 0x7e, 0xc0, 0x8f, 0x8b, 0x76, 0xad, 0x54, 0x81, 0x0f,
+                0xcf,
+            ]),
+            auth_data: Some(vec![]),
+        };
+        let key1 = vec![0u8; 31];
+        let key2 = vec![0u8; 31];
+
+        let base = TestBlockDevice::new(1024 * 1024);
+        let result =
+            CryptBlockDevice::new(Box::new(base), key1.clone(), key2.clone(), kek);
+        assert!(matches!(result, Err(VhostUserBlockError::InvalidParameter { .. })));
+    }
 }

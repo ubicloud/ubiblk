@@ -48,6 +48,15 @@ impl<'a> UbiBlkBackend {
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         block_device: Box<dyn BlockDevice>,
     ) -> Result<Self> {
+        if options.queue_size == 0 || !options.queue_size.is_power_of_two() {
+            return Err(VhostUserBlockError::InvalidParameter {
+                description: format!(
+                    "queue_size {} is not a non-zero power of two",
+                    options.queue_size
+                ),
+            });
+        }
+
         let nsectors = block_device.sector_count();
         let virtio_config = VirtioBlockConfig {
             capacity: nsectors,             /* The capacity (in SECTOR_SIZE-byte sectors). */
@@ -405,4 +414,33 @@ pub fn init_metadata(
     let metadata = UbiMetadata::new(stripe_sector_count_shift);
     metadata.write(&mut ch)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_device::bdev_test::TestBlockDevice;
+
+    #[test]
+    fn test_invalid_queue_size() {
+        let options = Options {
+            path: "test.img".to_string(),
+            image_path: None,
+            metadata_path: None,
+            io_debug_path: None,
+            socket: "sock".to_string(),
+            num_queues: 1,
+            queue_size: 30,
+            seg_size_max: 65536,
+            seg_count_max: 4,
+            poll_queue_timeout_us: 1000,
+            skip_sync: false,
+            copy_on_read: false,
+            encryption_key: None,
+        };
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let result = UbiBlkBackend::new(&options, mem, block_device);
+        assert!(matches!(result, Err(VhostUserBlockError::InvalidParameter { .. })));
+    }
 }

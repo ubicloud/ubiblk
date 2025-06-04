@@ -24,7 +24,7 @@ mod bdev_sync;
 mod bdev_uring;
 
 #[cfg(test)]
-mod bdev_test;
+pub(crate) mod bdev_test;
 
 pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_lazy::LazyBlockDevice;

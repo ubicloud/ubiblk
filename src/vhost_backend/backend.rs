@@ -313,7 +313,7 @@ fn start_block_backend(
 
     info!("Backend is created!");
 
-    let stripe_featcher_thread = match maybe_stripe_fetcher.as_ref() {
+    let stripe_fetcher_thread = match maybe_stripe_fetcher.as_ref() {
         Some(stripe_fetcher) => {
             let stripe_fetcher_clone = stripe_fetcher.clone();
             let handle = std::thread::Builder::new()
@@ -353,7 +353,7 @@ fn start_block_backend(
 
     info!("Finished shutting down worker threads!");
 
-    if let Some(handle) = stripe_featcher_thread {
+    if let Some(handle) = stripe_fetcher_thread {
         info!("Shutting down stripe fetcher thread ...");
         if let Err(e) = stripe_fetcher_killfd.write(1) {
             error!("Error shutting down stripe fetcher thread: {:?}", e);

@@ -103,3 +103,12 @@ init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \
 - `-u, --unlink-kek`: (Optional) Delete the KEK file after use.
 - `-s, --stripe-sector-count-shift`: (Optional) Stripe size as a power of two
   sectors (default: `11`).
+
+## replay-log
+
+`replay-log` replays READ and WRITE operations stored in an I/O debug log onto a
+disk image. The log is produced by the backend when `io_debug_path` is set.
+
+```bash
+replay-log --log io_debug.log --disk disk.img
+```

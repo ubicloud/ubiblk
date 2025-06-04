@@ -431,6 +431,7 @@ impl StripeMetadataManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_device::bdev_failing::FailingBlockDevice;
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::VhostUserBlockError;
 
@@ -517,6 +518,32 @@ mod tests {
             result,
             Err(VhostUserBlockError::MetadataError { .. })
         ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_poll_flush_failed_write() -> Result<()> {
+        let metadata_dev = FailingBlockDevice::new(40 * 1024 * 1024);
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let source_sector_count = 29 * stripe_sector_count + 4;
+
+        {
+            let mut ch = metadata_dev.create_channel()?;
+            UbiMetadata::new(stripe_sector_count_shift)
+                .write(&mut ch)
+                .unwrap();
+        }
+
+        let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
+
+        metadata_dev.fail_next_write();
+
+        manager.set_stripe_status(0, StripeStatus::Fetched);
+
+        manager.start_flush().unwrap();
+        assert_eq!(manager.poll_flush(), Some(false));
 
         Ok(())
     }

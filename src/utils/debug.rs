@@ -86,4 +86,16 @@ mod tests {
         let expected = b"Hello".to_vec();
         assert_eq!(decode_hex(hex).unwrap(), expected);
     }
+
+    #[test]
+    fn test_decode_hex_odd_len() {
+        let hex = "abc";
+        assert!(decode_hex(hex).is_err());
+    }
+
+    #[test]
+    fn test_decode_hex_non_hex_chars() {
+        let hex = "zz";
+        assert!(decode_hex(hex).is_err());
+    }
 }

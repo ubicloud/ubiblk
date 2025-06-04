@@ -266,7 +266,7 @@ mod tests {
                 VhostUserBlockError::IoError { source: e }
             })?;
         let path = tmpfile.path().to_owned();
-        let result = UringBlockDevice::new(path.clone(), 8, false);
+        let result = UringBlockDevice::new(path, 8, false);
         assert!(result.is_err());
         Ok(())
     }

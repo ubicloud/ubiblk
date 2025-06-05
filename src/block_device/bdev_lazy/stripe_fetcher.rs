@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use super::super::*;
 use super::stripe_metadata_manager::StartFlushResult;
 pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
-use crate::Result;
+use crate::{Result, VhostUserBlockError};
 use log::{debug, error, info};
 use vmm_sys_util::eventfd::EventFd;
 

@@ -67,6 +67,10 @@ fn default_copy_on_read() -> bool {
     false
 }
 
+fn default_device_id() -> String {
+    "ubiblk".to_string()
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Options {
     pub path: String,
@@ -98,6 +102,9 @@ pub struct Options {
 
     #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
+
+    #[serde(default = "default_device_id")]
+    pub device_id: String,
 }
 
 #[cfg(test)]
@@ -185,5 +192,6 @@ mod tests {
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert!(!options.copy_on_read);
+        assert_eq!(options.device_id, "ubiblk".to_string());
     }
 }

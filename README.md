@@ -50,6 +50,7 @@ The configuration YAML must define:
 - `copy_on_read`: (Optional) Copy stripes from the image only when accessed.
 - `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
 - `io_debug_path`: (Optional) Path for I/O debug log.
+- `device_id`: (Optional) Identifier returned to the guest for GET_ID.
 
 **Examples:**
 ```bash
@@ -73,6 +74,7 @@ poll_queue_timeout_us: 500               # Integer: poll timeout in microseconds
 io_debug_path: "/tmp/io_debug.log"       # Optional: path for I/O debug log
 skip_sync: false                         # Optional: skip flush handling
 copy_on_read: false                      # Optional: copy stripes on first read
+device_id: "ubiblk"                      # Optional: device identifier
 encryption_key:                          # Optional: AES‐XTS keys (base64 encoded)
   - "x74Yhe/ovgxY4BrBaM6Wm/9firf9k/N+ayvGsskBo+hjQtrL+nslCDC5oR/HpSDL"
   - "TJn65Jb//AYqu/a8zlpb0IlXC4vwFQ5DtbQkMTeliEAwafr0DEH+5hNro8FuVzQ+"

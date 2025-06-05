@@ -437,10 +437,14 @@ mod tests {
             skip_sync: false,
             copy_on_read: false,
             encryption_key: None,
+            device_id: "ubiblk".to_string(),
         };
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let result = UbiBlkBackend::new(&options, mem, block_device);
-        assert!(matches!(result, Err(VhostUserBlockError::InvalidParameter { .. })));
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::InvalidParameter { .. })
+        ));
     }
 }

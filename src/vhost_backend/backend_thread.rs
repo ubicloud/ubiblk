@@ -45,6 +45,7 @@ pub struct UbiBlkBackendThread {
     request_slots: Vec<RequestSlot>,
     io_debug_file: Option<fs::File>,
     skip_sync: bool,
+    device_id: String,
 }
 
 impl UbiBlkBackendThread {
@@ -96,6 +97,7 @@ impl UbiBlkBackendThread {
             request_slots,
             io_debug_file,
             skip_sync: options.skip_sync,
+            device_id: options.device_id.clone(),
         })
     }
 
@@ -339,7 +341,7 @@ impl UbiBlkBackendThread {
         vring: &mut Vring<'_>,
     ) {
         let (data_addr, _) = request.data_descriptors[0];
-        let serial = "some_id";
+        let serial = &self.device_id;
         let mem = desc_chain.memory();
         let status = if let Err(_) = mem.write_slice(serial.as_bytes(), data_addr) {
             VIRTIO_BLK_S_IOERR

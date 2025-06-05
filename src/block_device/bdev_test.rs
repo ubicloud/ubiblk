@@ -131,6 +131,7 @@ mod tests {
     use super::*;
 
     #[test]
+    // Validate that a basic read operation succeeds on a new channel.
     fn test_io_channel() {
         let device = TestBlockDevice::new(1024 * 1024);
         let mut channel = device.create_channel().unwrap();
@@ -142,5 +143,58 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, 1);
         assert_eq!(results[0].1, true);
+    }
+
+    #[test]
+    // Exercise read, write and flush operations and verify metrics.
+    fn test_read_write_and_flush_metrics() {
+        let device = TestBlockDevice::new(2 * SECTOR_SIZE as u64);
+        let mut channel = device.create_channel().unwrap();
+
+        let pattern = vec![0x55u8; SECTOR_SIZE];
+        let write_buf: SharedBuffer = Rc::new(RefCell::new(pattern.clone()));
+        channel.add_write(0, 1, write_buf.clone(), 1);
+        channel.add_flush(2);
+        channel.submit().unwrap();
+        let mut results = channel.poll();
+        results.sort_by_key(|x| x.0);
+        assert_eq!(results, vec![(1, true), (2, true)]);
+
+        let read_buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        channel.add_read(0, 1, read_buf.clone(), 3);
+        channel.submit().unwrap();
+        let results = channel.poll();
+        assert_eq!(results, vec![(3, true)]);
+        assert_eq!(*read_buf.borrow(), pattern);
+
+        let metrics = device.metrics.read().unwrap();
+        assert_eq!(metrics.reads, 1);
+        assert_eq!(metrics.writes, 1);
+        assert_eq!(metrics.flushes, 1);
+        drop(metrics);
+        assert_eq!(device.flushes(), 1);
+    }
+
+    #[test]
+    // Trigger out-of-bounds operations and verify helper methods work.
+    fn test_overflow_operations_and_helpers() {
+        let device = TestBlockDevice::new(SECTOR_SIZE as u64);
+        let mut channel = device.create_channel().unwrap();
+
+        let buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        channel.add_read(1, 1, buf.clone(), 1);
+        channel.add_write(1, 1, buf.clone(), 2);
+        channel.submit().unwrap();
+        let mut results = channel.poll();
+        results.sort_by_key(|x| x.0);
+        assert_eq!(results, vec![(1, false), (2, false)]);
+
+        // Test direct read/write helpers
+        let pattern = vec![1u8, 2, 3, 4];
+        let len = pattern.len();
+        device.write(0, &pattern, len);
+        let mut out = vec![0u8; len];
+        device.read(0, &mut out, len);
+        assert_eq!(out, pattern);
     }
 }

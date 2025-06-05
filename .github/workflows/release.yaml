@@ -48,8 +48,11 @@ jobs:
       - name: Add musl target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Run tests
-        run: cargo test --all
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - name: Run tests with coverage
+        run: cargo llvm-cov --fail-under-lines 51 --ignore-filename-regex src/bin/
 
       - name: Build project
         if: github.event_name == 'workflow_dispatch' && github.ref_type == 'tag'

@@ -382,6 +382,8 @@ mod tests {
     use crate::block_device::bdev_test::{TestBlockDevice, TestDeviceMetrics};
     use crate::VhostUserBlockError;
 
+    // Verify that updating stripe status values persists to disk after a flush
+    // and that stripe metadata helpers return expected values.
     #[test]
     fn test_stripe_metadata_manager() -> Result<()> {
         let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
@@ -444,6 +446,7 @@ mod tests {
         Ok(())
     }
 
+    // Loading metadata with a corrupted magic header should return an error.
     #[test]
     fn test_metadata_magic_mismatch() -> Result<()> {
         let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
@@ -582,6 +585,8 @@ mod tests {
         }
     }
 
+    // Calling start_flush when no metadata changes have occurred should
+    // immediately return `NoChanges` and avoid issuing a flush command.
     #[test]
     fn test_start_flush_no_changes() -> Result<()> {
         let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
@@ -602,6 +607,8 @@ mod tests {
         Ok(())
     }
 
+    // Attempting to start a new flush while one is already running should
+    // generate a metadata error and complete the original flush successfully.
     #[test]
     fn test_start_flush_already_in_progress() -> Result<()> {
         let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
@@ -629,6 +636,8 @@ mod tests {
         Ok(())
     }
 
+    // If the metadata write portion of a flush fails the flush should report a
+    // failure on the first poll.
     #[test]
     fn test_poll_flush_write_fail() -> Result<()> {
         let base_dev = TestBlockDevice::new(40 * 1024 * 1024);
@@ -650,6 +659,8 @@ mod tests {
         Ok(())
     }
 
+    // If the write succeeds but the subsequent flush operation fails it should
+    // be reported via poll.
     #[test]
     fn test_poll_flush_flush_fail() -> Result<()> {
         let base_dev = TestBlockDevice::new(40 * 1024 * 1024);
@@ -669,6 +680,173 @@ mod tests {
         assert_eq!(manager.poll_flush(), None);
         assert_eq!(manager.poll_flush(), Some(false));
 
+        Ok(())
+    }
+
+    #[derive(Clone, Copy)]
+    enum BadReadMode {
+        NoResult,
+        WrongId,
+        Fail,
+    }
+
+    struct BadReadIoChannel {
+        mem: std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
+        metrics: std::sync::Arc<std::sync::RwLock<TestDeviceMetrics>>,
+        finished_requests: Vec<(usize, bool)>,
+        mode: BadReadMode,
+    }
+
+    impl IoChannel for BadReadIoChannel {
+        fn add_read(
+            &mut self,
+            sector_offset: u64,
+            sector_count: u32,
+            buf: SharedBuffer,
+            id: usize,
+        ) {
+            let mem = self.mem.read().unwrap();
+            let mut buf = buf.borrow_mut();
+            let len = sector_count as usize * SECTOR_SIZE;
+            let start = sector_offset as usize * SECTOR_SIZE;
+            let end = start + len;
+            if end > mem.len() {
+                self.finished_requests.push((id, false));
+                return;
+            }
+
+            buf.copy_from_slice(&mem[start..end]);
+            self.metrics.write().unwrap().reads += 1;
+            match self.mode {
+                BadReadMode::NoResult => {}
+                BadReadMode::WrongId => self.finished_requests.push((id + 1, true)),
+                BadReadMode::Fail => self.finished_requests.push((id, false)),
+            }
+        }
+
+        fn add_write(&mut self, _: u64, _: u32, _: SharedBuffer, _: usize) {}
+        fn add_flush(&mut self, _: usize) {}
+        fn submit(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn poll(&mut self) -> Vec<(usize, bool)> {
+            let res = self.finished_requests.clone();
+            self.finished_requests.clear();
+            res
+        }
+        fn busy(&mut self) -> bool {
+            false
+        }
+    }
+
+    struct BadReadBlockDevice {
+        base: TestBlockDevice,
+        mode: BadReadMode,
+    }
+
+    impl BadReadBlockDevice {
+        fn from_base(base: TestBlockDevice, mode: BadReadMode) -> Self {
+            Self { base, mode }
+        }
+    }
+
+    impl BlockDevice for BadReadBlockDevice {
+        fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
+            Ok(Box::new(BadReadIoChannel {
+                mem: self.base.mem.clone(),
+                metrics: self.base.metrics.clone(),
+                finished_requests: Vec::new(),
+                mode: self.mode.clone(),
+            }))
+        }
+
+        fn sector_count(&self) -> u64 {
+            BlockDevice::sector_count(&self.base)
+        }
+    }
+
+    // Receiving a flush completion when no flush is in progress should report an error.
+    #[test]
+    fn test_poll_flush_without_pending_flush() -> Result<()> {
+        let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let source_sector_count = 4 * stripe_sector_count;
+
+        let mut ch = metadata_dev.create_channel()?;
+        UbiMetadata::new(stripe_sector_count_shift)
+            .write(&mut ch)
+            .unwrap();
+
+        let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
+        manager.channel = Box::new(FailingIoChannel {
+            mem: metadata_dev.mem.clone(),
+            finished_requests: vec![(METADATA_FLUSH_ID, true)],
+            metrics: metadata_dev.metrics.clone(),
+            fail_writes: false,
+            fail_flushes: false,
+        });
+        assert_eq!(manager.poll_flush(), Some(false));
+        Ok(())
+    }
+
+    // Loading metadata should fail if no results are returned from the read operation.
+    #[test]
+    fn test_load_metadata_no_results() -> Result<()> {
+        let base = TestBlockDevice::new(40 * 1024 * 1024);
+        let shift = 11;
+        let stripe_sector_count = 1 << shift;
+        let source_sector_count = 4 * stripe_sector_count;
+
+        let mut ch = base.create_channel()?;
+        UbiMetadata::new(shift).write(&mut ch).unwrap();
+
+        let dev = BadReadBlockDevice::from_base(base, BadReadMode::NoResult);
+        let result = StripeMetadataManager::new(&dev, source_sector_count);
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::MetadataError { .. })
+        ));
+        Ok(())
+    }
+
+    // Loading metadata should fail if the returned read id does not match the expected value.
+    #[test]
+    fn test_load_metadata_id_mismatch() -> Result<()> {
+        let base = TestBlockDevice::new(40 * 1024 * 1024);
+        let shift = 11;
+        let stripe_sector_count = 1 << shift;
+        let source_sector_count = 4 * stripe_sector_count;
+
+        let mut ch = base.create_channel()?;
+        UbiMetadata::new(shift).write(&mut ch).unwrap();
+
+        let dev = BadReadBlockDevice::from_base(base, BadReadMode::WrongId);
+        let result = StripeMetadataManager::new(&dev, source_sector_count);
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::MetadataError { .. })
+        ));
+        Ok(())
+    }
+
+    // Loading metadata should fail if the read operation itself fails.
+    #[test]
+    fn test_load_metadata_read_fail() -> Result<()> {
+        let base = TestBlockDevice::new(40 * 1024 * 1024);
+        let shift = 11;
+        let stripe_sector_count = 1 << shift;
+        let source_sector_count = 4 * stripe_sector_count;
+
+        let mut ch = base.create_channel()?;
+        UbiMetadata::new(shift).write(&mut ch).unwrap();
+
+        let dev = BadReadBlockDevice::from_base(base, BadReadMode::Fail);
+        let result = StripeMetadataManager::new(&dev, source_sector_count);
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::MetadataError { .. })
+        ));
         Ok(())
     }
 }

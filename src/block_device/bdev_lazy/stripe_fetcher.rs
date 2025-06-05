@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use super::super::*;
 use super::stripe_metadata_manager::StartFlushResult;
 pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
-use crate::Result;
+use crate::{Result, VhostUserBlockError};
 use log::{debug, error, info};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -60,7 +60,8 @@ impl StripeFetcher {
     ) -> Result<Self> {
         let fetch_source_channel = source_dev.create_channel()?;
         let fetch_target_channel = target_dev.create_channel()?;
-        let metadata_manager = StripeMetadataManager::new(metadata_dev, source_dev.sector_count())?;
+        let metadata_manager =
+            StripeMetadataManager::new(metadata_dev, source_dev.sector_count())?;
         let fetch_buffers = (0..MAX_CONCURRENT_FETCHES)
             .map(|_| FetchBuffer {
                 used_for: None,
@@ -69,6 +70,11 @@ impl StripeFetcher {
             .collect();
         let source_sector_count = source_dev.sector_count();
         let target_sector_count = target_dev.sector_count();
+        if target_sector_count < source_sector_count {
+            return Err(VhostUserBlockError::InvalidParameter {
+                description: "target device too small".into(),
+            });
+        }
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,
@@ -331,6 +337,7 @@ mod tests {
     use crate::block_device::bdev_lazy::stripe_metadata_manager::UbiMetadata;
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::vhost_backend::SECTOR_SIZE;
+    use crate::VhostUserBlockError;
 
     #[test]
     fn test_stripe_fetcher() {
@@ -450,6 +457,30 @@ mod tests {
 
         for i in 0..NUM_FLUSHES {
             assert!(completed[i], "Flush {} was not completed", i);
+        }
+    }
+
+    #[test]
+    fn test_target_device_too_small() {
+        let source_dev = TestBlockDevice::new(4 * 1024 * 1024);
+        let target_dev = TestBlockDevice::new(2 * 1024 * 1024);
+        let metadata_dev = TestBlockDevice::new(8 * 1024 * 1024);
+
+        let stripe_sector_count_shift = 11;
+        let mut ch = metadata_dev
+            .create_channel()
+            .expect("Failed to create channel");
+        UbiMetadata::new(stripe_sector_count_shift)
+            .write(&mut ch)
+            .unwrap();
+
+        let killfd = EventFd::new(0).unwrap();
+        let res = StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd);
+        match res {
+            Err(VhostUserBlockError::InvalidParameter { description }) => {
+                assert_eq!(description, "target device too small");
+            }
+            _ => panic!("Expected InvalidParameter error"),
         }
     }
 }

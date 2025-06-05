@@ -270,4 +270,101 @@ mod tests {
         assert!(result.is_err());
         Ok(())
     }
+
+    #[test]
+    fn create_channel_invalid_queue_size() -> Result<()> {
+        let mut tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        tmpfile
+            .as_file_mut()
+            .set_len(SECTOR_SIZE as u64)
+            .map_err(|e| {
+                error!("Failed to set temporary file size: {}", e);
+                VhostUserBlockError::IoError { source: e }
+            })?;
+
+        let path = tmpfile.path().to_owned();
+        let bdev = UringBlockDevice::new(path.clone(), u32::MAX as usize + 1, false)?;
+        let result = bdev.create_channel();
+        assert!(matches!(result, Err(VhostUserBlockError::InvalidParameter { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn queue_full_returns_error() -> Result<()> {
+        let mut tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        tmpfile
+            .as_file_mut()
+            .set_len((SECTOR_SIZE * 2) as u64)
+            .map_err(|e| {
+                error!("Failed to set temporary file size: {}", e);
+                VhostUserBlockError::IoError { source: e }
+            })?;
+
+        let path = tmpfile.path().to_owned();
+        let bdev = UringBlockDevice::new(path.clone(), 1, false)?;
+        let mut chan = bdev.create_channel()?;
+
+        let buf1 = Rc::new(RefCell::new(vec![0x55u8; SECTOR_SIZE]));
+        let buf2 = Rc::new(RefCell::new(vec![0x66u8; SECTOR_SIZE]));
+
+        chan.add_write(0, 1, buf1.clone(), 1);
+        chan.add_write(1, 1, buf2.clone(), 2);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(2, false), (1, true)]);
+
+        // verify first write succeeded
+        let read_back = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        chan.add_read(0, 1, read_back.clone(), 3);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(3, true)]);
+        assert_eq!(*read_back.borrow(), *buf1.borrow());
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_sector_io() -> Result<()> {
+        let mut tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let sector_count = 4;
+        tmpfile
+            .as_file_mut()
+            .set_len((SECTOR_SIZE * sector_count) as u64)
+            .map_err(|e| {
+                error!("Failed to set temporary file size: {}", e);
+                VhostUserBlockError::IoError { source: e }
+            })?;
+
+        let path = tmpfile.path().to_owned();
+        let bdev = UringBlockDevice::new(path.clone(), 8, false)?;
+        let mut chan = bdev.create_channel()?;
+
+        let pattern: Vec<u8> = (0..SECTOR_SIZE * sector_count)
+            .map(|i| (i % 256) as u8)
+            .collect();
+        let write_buf = Rc::new(RefCell::new(pattern.clone()));
+        chan.add_write(0, sector_count as u32, write_buf.clone(), 1);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(1, true)]);
+
+        let read_buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE * sector_count]));
+        chan.add_read(0, sector_count as u32, read_buf.clone(), 2);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(2, true)]);
+        assert_eq!(*read_buf.borrow(), pattern);
+
+        Ok(())
+    }
 }

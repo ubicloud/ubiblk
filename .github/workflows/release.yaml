@@ -52,7 +52,7 @@ jobs:
         run: cargo install cargo-llvm-cov --locked
 
       - name: Run tests with coverage
-        run: cargo llvm-cov --fail-under-lines 63 --ignore-filename-regex src/bin/
+        run: cargo llvm-cov --fail-under-lines 70 --ignore-filename-regex src/bin/
 
       - name: Build project
         if: github.event_name == 'workflow_dispatch' && github.ref_type == 'tag'

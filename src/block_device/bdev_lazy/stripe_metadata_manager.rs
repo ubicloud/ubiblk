@@ -379,7 +379,7 @@ impl StripeMetadataManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::block_device::bdev_test::{TestBlockDevice, TestDeviceMetrics};
     use crate::VhostUserBlockError;
 
     #[test]
@@ -461,7 +461,213 @@ mod tests {
         metadata_dev.write(0, &bad_magic, UBI_MAGIC_SIZE);
 
         let result = StripeMetadataManager::new(&metadata_dev, source_sector_count);
-        assert!(matches!(result, Err(VhostUserBlockError::MetadataError { .. })));
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::MetadataError { .. })
+        ));
+
+        Ok(())
+    }
+
+    struct FailingIoChannel {
+        mem: std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
+        finished_requests: Vec<(usize, bool)>,
+        metrics: std::sync::Arc<std::sync::RwLock<TestDeviceMetrics>>,
+        fail_writes: bool,
+        fail_flushes: bool,
+    }
+
+    impl IoChannel for FailingIoChannel {
+        fn add_read(
+            &mut self,
+            sector_offset: u64,
+            sector_count: u32,
+            buf: SharedBuffer,
+            id: usize,
+        ) {
+            let mem = self.mem.read().unwrap();
+            let mut buf = buf.borrow_mut();
+            let len = sector_count as usize * SECTOR_SIZE;
+            let start = sector_offset as usize * SECTOR_SIZE;
+            let end = start + len;
+            if end > mem.len() {
+                self.finished_requests.push((id, false));
+                return;
+            }
+
+            buf.copy_from_slice(&mem[start..end]);
+            self.finished_requests.push((id, true));
+            self.metrics.write().unwrap().reads += 1;
+        }
+
+        fn add_write(
+            &mut self,
+            sector_offset: u64,
+            sector_count: u32,
+            buf: SharedBuffer,
+            id: usize,
+        ) {
+            if self.fail_writes {
+                self.finished_requests.push((id, false));
+                return;
+            }
+            let mut mem = self.mem.write().unwrap();
+            let buf = buf.borrow();
+            let len = sector_count as usize * SECTOR_SIZE;
+            let start = sector_offset as usize * SECTOR_SIZE;
+            let end = start + len;
+            if end > mem.len() {
+                self.finished_requests.push((id, false));
+                return;
+            }
+
+            mem[start..end].copy_from_slice(&buf);
+            self.finished_requests.push((id, true));
+            self.metrics.write().unwrap().writes += 1;
+        }
+
+        fn add_flush(&mut self, id: usize) {
+            if self.fail_flushes {
+                self.finished_requests.push((id, false));
+            } else {
+                self.finished_requests.push((id, true));
+                self.metrics.write().unwrap().flushes += 1;
+            }
+        }
+
+        fn submit(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn poll(&mut self) -> Vec<(usize, bool)> {
+            let finished_requests = self.finished_requests.clone();
+            self.finished_requests.clear();
+            finished_requests
+        }
+
+        fn busy(&mut self) -> bool {
+            false
+        }
+    }
+
+    struct FailingBlockDevice {
+        base: TestBlockDevice,
+        fail_writes: bool,
+        fail_flushes: bool,
+    }
+
+    impl FailingBlockDevice {
+        fn from_base(base: TestBlockDevice, fail_writes: bool, fail_flushes: bool) -> Self {
+            Self {
+                base,
+                fail_writes,
+                fail_flushes,
+            }
+        }
+    }
+
+    impl BlockDevice for FailingBlockDevice {
+        fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
+            Ok(Box::new(FailingIoChannel {
+                mem: self.base.mem.clone(),
+                finished_requests: Vec::new(),
+                metrics: self.base.metrics.clone(),
+                fail_writes: self.fail_writes,
+                fail_flushes: self.fail_flushes,
+            }))
+        }
+
+        fn sector_count(&self) -> u64 {
+            BlockDevice::sector_count(&self.base)
+        }
+    }
+
+    #[test]
+    fn test_start_flush_no_changes() -> Result<()> {
+        let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let source_sector_count = 10 * stripe_sector_count;
+
+        let mut ch = metadata_dev.create_channel()?;
+        UbiMetadata::new(stripe_sector_count_shift)
+            .write(&mut ch)
+            .unwrap();
+
+        let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
+        let res = manager.start_flush()?;
+        assert!(matches!(res, StartFlushResult::NoChanges));
+        assert_eq!(metadata_dev.flushes(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_start_flush_already_in_progress() -> Result<()> {
+        let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let source_sector_count = 8 * stripe_sector_count;
+
+        let mut ch = metadata_dev.create_channel()?;
+        UbiMetadata::new(stripe_sector_count_shift)
+            .write(&mut ch)
+            .unwrap();
+
+        let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
+        manager.set_stripe_status(0, StripeStatus::Fetched);
+        assert!(matches!(manager.start_flush()?, StartFlushResult::Started));
+        let res = manager.start_flush();
+        assert!(matches!(
+            res,
+            Err(VhostUserBlockError::MetadataError { .. })
+        ));
+        assert_eq!(manager.poll_flush(), None);
+        assert_eq!(manager.poll_flush(), Some(true));
+        assert_eq!(metadata_dev.flushes(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_poll_flush_write_fail() -> Result<()> {
+        let base_dev = TestBlockDevice::new(40 * 1024 * 1024);
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let source_sector_count = 4 * stripe_sector_count;
+
+        let mut ch = base_dev.create_channel()?;
+        UbiMetadata::new(stripe_sector_count_shift)
+            .write(&mut ch)
+            .unwrap();
+
+        let metadata_dev = FailingBlockDevice::from_base(base_dev, true, false);
+        let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
+        manager.set_stripe_status(0, StripeStatus::Fetched);
+        assert!(matches!(manager.start_flush()?, StartFlushResult::Started));
+        assert_eq!(manager.poll_flush(), Some(false));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_poll_flush_flush_fail() -> Result<()> {
+        let base_dev = TestBlockDevice::new(40 * 1024 * 1024);
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let source_sector_count = 4 * stripe_sector_count;
+
+        let mut ch = base_dev.create_channel()?;
+        UbiMetadata::new(stripe_sector_count_shift)
+            .write(&mut ch)
+            .unwrap();
+
+        let metadata_dev = FailingBlockDevice::from_base(base_dev, false, true);
+        let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
+        manager.set_stripe_status(0, StripeStatus::Fetched);
+        assert!(matches!(manager.start_flush()?, StartFlushResult::Started));
+        assert_eq!(manager.poll_flush(), None);
+        assert_eq!(manager.poll_flush(), Some(false));
 
         Ok(())
     }

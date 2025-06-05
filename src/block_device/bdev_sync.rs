@@ -141,12 +141,14 @@ impl SyncBlockDevice {
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, rc::Rc};
+    use std::os::fd::FromRawFd;
 
     use tempfile::NamedTempFile;
 
     use super::*;
 
     #[test]
+    // Verify basic read and write operations succeed on a read/write device.
     fn create_channel_and_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {}", e);
@@ -178,6 +180,7 @@ mod tests {
     }
 
     #[test]
+    // Ensure writes fail when the device is opened read-only.
     fn create_channel_and_basic_io_readonly() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {}", e);
@@ -198,5 +201,100 @@ mod tests {
         assert_eq!(result, vec![(1, false)]);
 
         Ok(())
+    }
+
+    #[test]
+    // Opening a non-existent file for a channel should fail.
+    fn sync_io_channel_new_fail() {
+        let path = Path::new("/this/does/not/exist");
+        assert!(SyncIoChannel::new(path, false).is_err());
+    }
+
+    #[test]
+    // Creating a device with a size not aligned to sectors should error.
+    fn device_new_invalid_size() {
+        let tmpfile = NamedTempFile::new().unwrap();
+        tmpfile.as_file().write_all(&[0u8; 1]).unwrap();
+        let path = tmpfile.path().to_path_buf();
+        assert!(matches!(SyncBlockDevice::new(path, false), Err(VhostUserBlockError::InvalidParameter { .. })));
+    }
+
+    #[test]
+    // Trigger error paths for out-of-bounds reads and writes.
+    fn read_and_write_error_paths() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        tmpfile.as_file().set_len(SECTOR_SIZE as u64).unwrap();
+
+        let path = tmpfile.path();
+        let mut chan = SyncIoChannel::new(path, false)?;
+
+        let read_buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        chan.add_read(1, 1, read_buf.clone(), 1);
+        chan.submit()?;
+        assert_eq!(chan.poll(), vec![(1, false)]);
+
+        let mut ro_chan = SyncIoChannel::new(path, true)?;
+        let write_buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        ro_chan.add_write(0, 1, write_buf.clone(), 2);
+        ro_chan.submit()?;
+        assert_eq!(ro_chan.poll(), vec![(2, false)]);
+        Ok(())
+    }
+
+    #[test]
+    // Use a pipe to provoke seek failures during read/write operations.
+    // std::mem::forget prevents the pipe file descriptor from being closed twice.
+    fn seek_error_paths() -> Result<()> {
+        let mut fds = [0; 2];
+        unsafe { libc::pipe(fds.as_mut_ptr()) };
+        let file = unsafe { File::from_raw_fd(fds[1]) };
+        let _r = unsafe { File::from_raw_fd(fds[0]) };
+        let mut chan = SyncIoChannel { file: Arc::new(Mutex::new(file)), finished_requests: Vec::new() };
+        let buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        chan.add_read(0, 1, buf.clone(), 1);
+        chan.submit()?;
+        assert_eq!(chan.poll(), vec![(1, false)]);
+        chan.add_write(0, 1, buf.clone(), 2);
+        chan.submit()?;
+        assert_eq!(chan.poll(), vec![(2, false)]);
+        std::mem::forget(chan);
+        Ok(())
+    }
+
+    #[test]
+    // Test successful flush operations and that the channel never reports busy.
+    fn flush_and_busy() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let path = tmpfile.path();
+        let mut chan = SyncIoChannel::new(path, false)?;
+        assert!(!chan.busy());
+        chan.add_flush(1);
+        chan.submit()?;
+        assert_eq!(chan.poll(), vec![(1, true)]);
+
+        if let Ok(mut err_chan) = SyncIoChannel::new(Path::new("/dev/full"), false) {
+            err_chan.add_flush(2);
+            err_chan.submit()?;
+            assert_eq!(err_chan.poll(), vec![(2, false)]);
+        }
+        Ok(())
+    }
+
+    #[test]
+    // Validate error handling on device creation and sector count reporting.
+    fn block_device_error_and_sector_count() {
+        let path = PathBuf::from("/no/such/file");
+        assert!(matches!(SyncBlockDevice::new(path, false), Err(VhostUserBlockError::IoError { .. })));
+
+        let tmpfile = NamedTempFile::new().unwrap();
+        tmpfile.as_file().set_len((SECTOR_SIZE * 2) as u64).unwrap();
+        let device = SyncBlockDevice::new(tmpfile.path().to_path_buf(), false).unwrap();
+        assert_eq!(device.sector_count(), 2);
     }
 }

@@ -112,3 +112,14 @@ disk image. The log is produced by the backend when `io_debug_path` is set.
 ```bash
 replay-log --log io_debug.log --disk disk.img
 ```
+
+## Coverage
+
+The project uses [cargo-tarpaulin](https://github.com/xd009642/tarpaulin) to generate test coverage.
+To produce a local report run:
+
+```bash
+cargo tarpaulin --out Html
+```
+
+Coverage is also collected in CI via `.github/workflows/coverage.yaml` and uploaded to Codecov.

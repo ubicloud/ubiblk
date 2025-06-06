@@ -80,6 +80,28 @@ encryption_key:                          # Optional: AES‐XTS keys (base64 enco
   - "TJn65Jb//AYqu/a8zlpb0IlXC4vwFQ5DtbQkMTeliEAwafr0DEH+5hNro8FuVzQ+"
 ```
 
+## Lazy Stripe Fetching
+
+When `image_path` and `metadata_path` are provided, the backend copies data
+from the image to the base device in units called *stripes*. The size of a
+stripe is `2^stripe-sector-count-shift` sectors and the status of every stripe
+is recorded in the metadata file. This allows the backend to resume fetching
+after a restart.
+
+If a write operation is issued to a stripe that has not been fetched yet, the
+backend will first copy the stripe from the image to the base device and then
+perform the write operation. However, reads are handled differently based on
+`copy_on_read`:
+
+- **`copy_on_read = false`** – A read never triggers a fetch. Read from an
+  unfetched stripe will read directly from the image.
+- **`copy_on_read = true`** – A read from an unfetched stripe triggers a fetch
+  and completes once the stripe has been copied to the base device.
+
+The metadata is created with `init-metadata` and stored at `metadata_path`.  It
+contains a magic header and a byte for each stripe indicating whether that
+stripe has been fetched.
+
 ## Key Encryption Key (KEK) File
 The keys in the configuration file can be encrypted using a KEK file. The KEK file should contain the encryption key in base64 format. The backend will use this key to decrypt the block device keys at runtime.
 
@@ -93,7 +115,10 @@ auth_data: "dm0zamdlejhfMA=="       # Base64 encoded auth data
 ## init-metadata
 
 Initialises the metadata file required when running the backend in lazy stripe
-fetch mode.
+fetch mode. The tool creates the binary metadata at `metadata_path` using the
+`UbiMetadata` layout, which stores a magic identifier, version fields and a byte
+for each stripe indicating whether it has been fetched. This file may reside on
+a regular file or block device and is loaded by the backend on startup.
 
 ```bash
 init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \

@@ -118,7 +118,10 @@ impl SyncBlockDevice {
             Ok(metadata) => {
                 let size = metadata.len();
                 if size % SECTOR_SIZE as u64 != 0 {
-                    error!("File size is not a multiple of sector size");
+                    error!(
+                        "File {} size is not a multiple of sector size",
+                        path.display()
+                    );
                     return Err(VhostUserBlockError::InvalidParameter {
                         description: "File size is not a multiple of sector size".to_string(),
                     });
@@ -140,8 +143,8 @@ impl SyncBlockDevice {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc};
     use std::os::fd::FromRawFd;
+    use std::{cell::RefCell, rc::Rc};
 
     use tempfile::NamedTempFile;
 
@@ -216,7 +219,10 @@ mod tests {
         let tmpfile = NamedTempFile::new().unwrap();
         tmpfile.as_file().write_all(&[0u8; 1]).unwrap();
         let path = tmpfile.path().to_path_buf();
-        assert!(matches!(SyncBlockDevice::new(path, false), Err(VhostUserBlockError::InvalidParameter { .. })));
+        assert!(matches!(
+            SyncBlockDevice::new(path, false),
+            Err(VhostUserBlockError::InvalidParameter { .. })
+        ));
     }
 
     #[test]
@@ -252,7 +258,10 @@ mod tests {
         unsafe { libc::pipe(fds.as_mut_ptr()) };
         let file = unsafe { File::from_raw_fd(fds[1]) };
         let _r = unsafe { File::from_raw_fd(fds[0]) };
-        let mut chan = SyncIoChannel { file: Arc::new(Mutex::new(file)), finished_requests: Vec::new() };
+        let mut chan = SyncIoChannel {
+            file: Arc::new(Mutex::new(file)),
+            finished_requests: Vec::new(),
+        };
         let buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
         chan.add_read(0, 1, buf.clone(), 1);
         chan.submit()?;
@@ -290,7 +299,10 @@ mod tests {
     // Validate error handling on device creation and sector count reporting.
     fn block_device_error_and_sector_count() {
         let path = PathBuf::from("/no/such/file");
-        assert!(matches!(SyncBlockDevice::new(path, false), Err(VhostUserBlockError::IoError { .. })));
+        assert!(matches!(
+            SyncBlockDevice::new(path, false),
+            Err(VhostUserBlockError::IoError { .. })
+        ));
 
         let tmpfile = NamedTempFile::new().unwrap();
         tmpfile.as_file().set_len((SECTOR_SIZE * 2) as u64).unwrap();

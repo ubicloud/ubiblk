@@ -100,7 +100,7 @@ impl IoChannel for UringIoChannel {
 
     fn submit(&mut self) -> Result<()> {
         if let Err(e) = self.ring.submit() {
-            error!("Failed to submit IO request");
+            error!("Failed to submit IO request: {}", e);
             return Err(VhostUserBlockError::IoError { source: e });
         }
         Ok(())
@@ -169,7 +169,10 @@ impl UringBlockDevice {
             Ok(metadata) => {
                 let size = metadata.len();
                 if size % SECTOR_SIZE as u64 != 0 {
-                    error!("File size is not a multiple of sector size");
+                    error!(
+                        "File {} size is not a multiple of sector size",
+                        path.display()
+                    );
                     return Err(VhostUserBlockError::InvalidParameter {
                         description: "File size is not a multiple of sector size".to_string(),
                     });

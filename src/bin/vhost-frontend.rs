@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use ubiblk::utils::{
-    block::{print_features, VirtioBlockConfig},
+    block::{features_to_str, VirtioBlockConfig},
     memory::allocate_hugepage_memory,
 };
 use vhost::{
@@ -184,7 +184,7 @@ fn setup_frontend(socket: &Path) -> Result<Frontend, Box<dyn std::error::Error>>
     println!("Getting features");
     frontend.set_hdr_flags(VhostUserHeaderFlag::NEED_REPLY);
     let features = frontend.get_features()?;
-    print_features(features);
+    print!("{}", features_to_str(features));
 
     println!("Setting features");
     frontend.set_hdr_flags(VhostUserHeaderFlag::empty());

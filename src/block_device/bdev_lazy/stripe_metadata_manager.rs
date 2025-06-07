@@ -113,7 +113,10 @@ impl UbiMetadata {
             for (id, success) in ch.poll() {
                 if id == METADATA_WRITE_ID {
                     if !success {
-                        error!("Failed to write metadata");
+                        error!(
+                            "Failed to write metadata after submitting {} sectors",
+                            sectors
+                        );
                         return Err(VhostUserBlockError::IoError {
                             source: std::io::Error::new(
                                 std::io::ErrorKind::Other,
@@ -151,7 +154,7 @@ impl UbiMetadata {
                     info!("Metadata flushed successfully");
                     break;
                 } else {
-                    error!("Unexpected ID: {}", id);
+                    error!("Unexpected completion ID: {}, expected 0", id);
                     return Err(VhostUserBlockError::IoError {
                         source: std::io::Error::new(
                             std::io::ErrorKind::Other,
@@ -163,7 +166,10 @@ impl UbiMetadata {
         }
 
         if !written {
-            error!("Timeout while writing metadata");
+            error!(
+                "Timeout while writing metadata after {} seconds",
+                timeout.as_secs()
+            );
             return Err(VhostUserBlockError::IoError {
                 source: std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -172,7 +178,10 @@ impl UbiMetadata {
             });
         }
         if !flushed {
-            error!("Timeout while flushing metadata");
+            error!(
+                "Timeout while flushing metadata after {} seconds",
+                timeout.as_secs()
+            );
             return Err(VhostUserBlockError::IoError {
                 source: std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -307,11 +316,11 @@ impl StripeMetadataManager {
             } else if id == METADATA_FLUSH_ID {
                 match (self.metadata_version_being_flushed, success) {
                     (None, _) => {
-                        error!("Flush ID received without a pending flush");
+                        error!("Flush completion received without a pending flush");
                         return Some(false);
                     }
-                    (Some(_), false) => {
-                        error!("Metadata flush failed");
+                    (Some(version), false) => {
+                        error!("Metadata flush for version {} failed", version);
                         self.metadata_version_being_flushed = None;
                         return Some(false);
                     }
@@ -345,7 +354,10 @@ impl StripeMetadataManager {
         }
 
         if results.len() != 1 {
-            error!("Failed to read metadata");
+            error!(
+                "Failed to read metadata: expected 1 result, got {}",
+                results.len()
+            );
             return Err(VhostUserBlockError::MetadataError {
                 description: format!("Expected 1 result, got {}", results.len()),
             });
@@ -353,7 +365,7 @@ impl StripeMetadataManager {
 
         let (id, success) = results.pop().unwrap();
         if !success || id != 0 {
-            error!("Failed to read metadata");
+            error!("Failed to read metadata: id {}, success {}", id, success);
             return Err(VhostUserBlockError::MetadataError {
                 description: format!("Failed to read metadata, id: {}, success: {}", id, success),
             });
@@ -372,7 +384,10 @@ impl StripeMetadataManager {
         let metadata: Box<UbiMetadata> = unsafe { metadata.assume_init() };
 
         if metadata.magic != *UBI_MAGIC {
-            error!("Metadata magic mismatch!");
+            error!(
+                "Metadata magic mismatch: expected {:?}, found {:?}",
+                UBI_MAGIC, metadata.magic
+            );
             return Err(VhostUserBlockError::MetadataError {
                 description: format!(
                     "Metadata magic mismatch! Expected: {:?}, Found: {:?}",

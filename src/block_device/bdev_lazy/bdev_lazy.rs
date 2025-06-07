@@ -85,7 +85,10 @@ impl LazyIoChannel {
                 self.sender
                     .send(StripeFetcherRequest::Fetch(stripe_id))
                     .map_err(|e| {
-                        error!("Failed to send fetch request: {}", e);
+                        error!(
+                            "Failed to send fetch request for stripe {}: {}",
+                            stripe_id, e
+                        );
                         VhostUserBlockError::ChannelError
                     })?;
             }
@@ -113,7 +116,7 @@ impl LazyIoChannel {
                     if success {
                         self.base.add_flush(flush_id);
                         if let Err(e) = self.base.submit() {
-                            error!("Failed to submit flush request: {}", e);
+                            error!("Failed to submit flush request {}: {}", flush_id, e);
                             self.finished_requests.push((flush_id, false));
                         }
                     } else {
@@ -157,7 +160,11 @@ impl LazyIoChannel {
 
         if !added_requests.is_empty() {
             if let Err(e) = self.base.submit() {
-                error!("Failed to submit queued requests: {}", e);
+                error!(
+                    "Failed to submit {} queued requests: {}",
+                    added_requests.len(),
+                    e
+                );
                 for id in added_requests {
                     self.finished_requests.push((id, false));
                 }
@@ -185,7 +192,10 @@ impl IoChannel for LazyIoChannel {
             image_channel.add_read(sector_offset, sector_count, buf, id);
         } else {
             if let Err(e) = self.start_stripe_fetches(&request) {
-                error!("Failed to send fetch request: {}", e);
+                error!(
+                    "Failed to send fetch request for stripe range {}-{}: {}",
+                    request.stripe_id_first, request.stripe_id_last, e
+                );
                 self.finished_requests.push((id, false));
             } else {
                 self.queued_rw_requests.borrow_mut().push_back(request);
@@ -210,7 +220,10 @@ impl IoChannel for LazyIoChannel {
                 .add_write(sector_offset, sector_count, buf.clone(), id);
         } else {
             if let Err(e) = self.start_stripe_fetches(&request) {
-                error!("Failed to send fetch request: {}", e);
+                error!(
+                    "Failed to send fetch request for stripe range {}-{}: {}",
+                    request.stripe_id_first, request.stripe_id_last, e
+                );
                 self.finished_requests.push((id, false));
             } else {
                 self.queued_rw_requests.borrow_mut().push_back(request);

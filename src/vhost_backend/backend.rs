@@ -288,7 +288,7 @@ fn build_block_device(
         options.direct_io,
     )
     .map_err(|e| {
-        error!("Failed to create block device: {:?}", e);
+        error!("Failed to create block device at {}: {:?}", path, e);
         e
     })?;
 

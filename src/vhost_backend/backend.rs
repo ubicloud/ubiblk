@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     block_device::UringBlockDevice,
-    utils::block::{print_features, VirtioBlockConfig},
+    utils::block::{features_to_str, VirtioBlockConfig},
     VhostUserBlockError,
 };
 use crate::{
@@ -119,14 +119,12 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
             | (1 << VIRTIO_RING_F_INDIRECT_DESC) // https://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-330003
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
 
-        print!("avail_features: ");
-        print_features(avail_features);
+        info!("avail_features: {}", features_to_str(avail_features).trim_end());
         avail_features
     }
 
     fn acked_features(&self, features: u64) {
-        info!("acked_features: 0x{:x}", features);
-        print_features(features);
+        info!("acked_features: 0x{:x} {}", features, features_to_str(features).trim_end());
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
@@ -418,5 +416,3 @@ pub fn init_metadata(
 
 #[cfg(test)]
 mod backend_tests;
-
-

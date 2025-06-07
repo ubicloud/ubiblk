@@ -75,13 +75,13 @@ pub fn features_to_str(features: u64) -> String {
     let mut first = true;
     let mut output = format!("Features (0x{:x}): ", features);
     for (feature, name) in all_features.iter() {
-        if remaining_features & ((1 as u64) << *feature) != 0 {
+        if remaining_features & (1u64 << *feature) != 0 {
             if !first {
                 output.push_str(" | ");
             }
             output.push_str(name);
             first = false;
-            remaining_features &= !((1 as u64) << *feature);
+            remaining_features &= !(1u64 << *feature);
         }
     }
     if remaining_features != 0 {

@@ -37,7 +37,7 @@ pub struct VirtioBlockGeometry {
 // Ensure VirtioBlockConfig is safe for ByteValued
 unsafe impl ByteValued for VirtioBlockConfig {}
 
-pub fn print_features(features: u64) {
+pub fn features_to_str(features: u64) -> String {
     let all_features = [
         (VIRTIO_F_ACCESS_PLATFORM, "VIRTIO_F_ACCESS_PLATFORM"),
         (VIRTIO_F_ADMIN_VQ, "VIRTIO_F_ADMIN_VQ"),
@@ -73,22 +73,51 @@ pub fn print_features(features: u64) {
 
     let mut remaining_features = features;
     let mut first = true;
-    print!("Features (0x{:x}): ", features);
+    let mut output = format!("Features (0x{:x}): ", features);
     for (feature, name) in all_features.iter() {
         if remaining_features & ((1 as u64) << *feature) != 0 {
             if !first {
-                print!(" | ");
+                output.push_str(" | ");
             }
-            print!("{}", name);
+            output.push_str(name);
             first = false;
             remaining_features &= !((1 as u64) << *feature);
         }
     }
     if remaining_features != 0 {
         if !first {
-            print!(" | ");
+            output.push_str(" | ");
         }
-        print!("0x{:x}", remaining_features);
+        output.push_str(&format!("0x{:x}", remaining_features));
     }
-    println!();
+    output.push('\n');
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_features_to_str_none() {
+        assert_eq!(features_to_str(0), "Features (0x0): \n");
+    }
+
+    #[test]
+    fn test_features_to_str_known() {
+        let features = 1u64 << VIRTIO_BLK_F_FLUSH;
+        let expected = format!("Features (0x{:x}): VIRTIO_BLK_F_FLUSH\n", features);
+        assert_eq!(features_to_str(features), expected);
+    }
+
+    #[test]
+    fn test_features_to_str_mixed() {
+        let unknown = 1u64 << 63;
+        let features = (1u64 << VIRTIO_BLK_F_FLUSH) | (1u64 << VIRTIO_BLK_F_DISCARD) | unknown;
+        let expected = format!(
+            "Features (0x{:x}): VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_DISCARD | 0x{:x}\n",
+            features, unknown
+        );
+        assert_eq!(features_to_str(features), expected);
+    }
 }

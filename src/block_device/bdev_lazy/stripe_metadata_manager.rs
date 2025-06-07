@@ -182,7 +182,7 @@ impl StripeMetadataManager {
     }
 
     pub fn stripe_sector_count(&self) -> u64 {
-        (1 as u64) << self.metadata.stripe_sector_count_shift
+        1u64 << self.metadata.stripe_sector_count_shift
     }
 
     pub fn stripe_status(&self, stripe_id: usize) -> StripeStatus {

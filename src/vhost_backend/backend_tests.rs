@@ -1,15 +1,17 @@
 #[cfg(test)]
 mod tests {
-    use super::super::{init_metadata, start_block_backend, UbiBlkBackend};
-    use crate::vhost_backend::{CipherMethod, KeyEncryptionCipher, Options, SECTOR_SIZE};
     use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::vhost_backend::{
+        init_metadata, start_block_backend, CipherMethod, KeyEncryptionCipher, Options,
+        UbiBlkBackend, SECTOR_SIZE,
+    };
     use crate::VhostUserBlockError;
     use tempfile::NamedTempFile;
-    use vmm_sys_util::epoll::EventSet;
-    use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
-    use virtio_bindings::virtio_blk::VIRTIO_BLK_F_FLUSH;
     use vhost::vhost_user::message::VhostUserProtocolFeatures;
     use vhost_user_backend::VhostUserBackend;
+    use virtio_bindings::virtio_blk::VIRTIO_BLK_F_FLUSH;
+    use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
+    use vmm_sys_util::epoll::EventSet;
 
     fn default_options(path: String) -> Options {
         Options {
@@ -38,7 +40,10 @@ mod tests {
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let result = UbiBlkBackend::new(&opts, mem, block_device);
-        assert!(matches!(result, Err(VhostUserBlockError::InvalidParameter { .. })));
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::InvalidParameter { .. })
+        ));
     }
 
     /// Ensure a backend can be created with valid parameters and exposes expected features.
@@ -65,7 +70,7 @@ mod tests {
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend = UbiBlkBackend::new(&opts, mem, block_device).unwrap();
         backend.set_event_idx(true);
-        for thread in backend.threads.iter() {
+        for thread in backend.threads().iter() {
             assert!(thread.lock().unwrap().event_idx);
         }
     }
@@ -99,7 +104,15 @@ mod tests {
         tmp.as_file().set_len(SECTOR_SIZE as u64 * 8).unwrap();
         let mut opts = default_options(tmp.path().to_string_lossy().to_string());
         opts.image_path = Some("img2".to_string());
-        let res = start_block_backend(&opts, KeyEncryptionCipher { method: CipherMethod::None, key: None, init_vector: None, auth_data: None });
+        let res = start_block_backend(
+            &opts,
+            KeyEncryptionCipher {
+                method: CipherMethod::None,
+                key: None,
+                init_vector: None,
+                auth_data: None,
+            },
+        );
         assert!(res.is_err());
     }
 
@@ -107,7 +120,16 @@ mod tests {
     #[test]
     fn init_metadata_missing_path() {
         let opts = default_options("img".to_string());
-        let res = init_metadata(&opts, KeyEncryptionCipher { method: CipherMethod::None, key: None, init_vector: None, auth_data: None }, 4);
+        let res = init_metadata(
+            &opts,
+            KeyEncryptionCipher {
+                method: CipherMethod::None,
+                key: None,
+                init_vector: None,
+                auth_data: None,
+            },
+            4,
+        );
         assert!(res.is_err());
     }
 }

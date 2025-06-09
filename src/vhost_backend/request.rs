@@ -169,7 +169,7 @@ mod tests {
     use super::*;
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
     use virtio_queue::{Descriptor as SplitDescriptor, Queue, QueueOwnedT};
-    use vm_memory::{GuestAddress, GuestMemoryAtomic, GuestMemoryMmap, GuestAddressSpace, Address};
+    use vm_memory::{Address, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 
     type GuestMemory = GuestMemoryMmap<()>;
 
@@ -238,7 +238,13 @@ mod tests {
         mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
         let descs = [
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
-            SplitDescriptor::new(data.0, 512, VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16, 2).into(),
+            SplitDescriptor::new(
+                data.0,
+                512,
+                VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
+                2,
+            )
+            .into(),
             SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
         ];
         let mut chain = build_chain(&mem, &descs);
@@ -267,11 +273,20 @@ mod tests {
         mem.write_obj::<u32>(VIRTIO_BLK_T_OUT, hdr).unwrap();
         mem.write_obj::<u64>(0, hdr.unchecked_add(8)).unwrap();
         let descs = [
-            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16, 1).into(),
+            SplitDescriptor::new(
+                hdr.0,
+                16,
+                VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
+                1,
+            )
+            .into(),
             SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
         ];
         let mut chain = build_chain(&mem, &descs);
-        assert!(matches!(Request::parse(&mut chain), Err(Error::UnexpectedWriteOnlyDescriptor)));
+        assert!(matches!(
+            Request::parse(&mut chain),
+            Err(Error::UnexpectedWriteOnlyDescriptor)
+        ));
 
         // missing data descriptor for OUT
         mem.write_obj::<u32>(VIRTIO_BLK_T_OUT, hdr).unwrap();
@@ -280,17 +295,29 @@ mod tests {
             SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
         ];
         let mut chain = build_chain(&mem, &descs);
-        assert!(matches!(Request::parse(&mut chain), Err(Error::DescriptorChainTooShort)));
+        assert!(matches!(
+            Request::parse(&mut chain),
+            Err(Error::DescriptorChainTooShort)
+        ));
 
         // unexpected write-only data descriptor for OUT
         mem.write_obj::<u32>(VIRTIO_BLK_T_OUT, hdr).unwrap();
         let descs = [
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
-            SplitDescriptor::new(data.0, 512, VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16, 2).into(),
+            SplitDescriptor::new(
+                data.0,
+                512,
+                VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
+                2,
+            )
+            .into(),
             SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
         ];
         let mut chain = build_chain(&mem, &descs);
-        assert!(matches!(Request::parse(&mut chain), Err(Error::UnexpectedWriteOnlyDescriptor)));
+        assert!(matches!(
+            Request::parse(&mut chain),
+            Err(Error::UnexpectedWriteOnlyDescriptor)
+        ));
 
         // unexpected read-only data descriptor for IN
         mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
@@ -300,26 +327,47 @@ mod tests {
             SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
         ];
         let mut chain = build_chain(&mem, &descs);
-        assert!(matches!(Request::parse(&mut chain), Err(Error::UnexpectedReadOnlyDescriptor)));
+        assert!(matches!(
+            Request::parse(&mut chain),
+            Err(Error::UnexpectedReadOnlyDescriptor)
+        ));
 
         // status not write only
         mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
         let descs = [
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
-            SplitDescriptor::new(data.0, 512, VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16, 2).into(),
+            SplitDescriptor::new(
+                data.0,
+                512,
+                VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
+                2,
+            )
+            .into(),
             SplitDescriptor::new(status.0, 1, VRING_DESC_F_NEXT as u16, 0).into(),
         ];
         let mut chain = build_chain(&mem, &descs);
-        assert!(matches!(Request::parse(&mut chain), Err(Error::UnexpectedReadOnlyDescriptor)));
+        assert!(matches!(
+            Request::parse(&mut chain),
+            Err(Error::UnexpectedReadOnlyDescriptor)
+        ));
 
         // status len too small
         mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
         let descs = [
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
-            SplitDescriptor::new(data.0, 512, VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16, 2).into(),
+            SplitDescriptor::new(
+                data.0,
+                512,
+                VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
+                2,
+            )
+            .into(),
             SplitDescriptor::new(status.0, 0, VRING_DESC_F_WRITE as u16, 0).into(),
         ];
         let mut chain = build_chain(&mem, &descs);
-        assert!(matches!(Request::parse(&mut chain), Err(Error::DescriptorLengthTooSmall)));
+        assert!(matches!(
+            Request::parse(&mut chain),
+            Err(Error::DescriptorLengthTooSmall)
+        ));
     }
 }

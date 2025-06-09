@@ -461,7 +461,10 @@ mod tests {
         metadata_dev.write(0, &bad_magic, UBI_MAGIC_SIZE);
 
         let result = StripeMetadataManager::new(&metadata_dev, source_sector_count);
-        assert!(matches!(result, Err(VhostUserBlockError::MetadataError { .. })));
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::MetadataError { .. })
+        ));
 
         Ok(())
     }

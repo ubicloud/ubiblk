@@ -34,7 +34,7 @@ use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
 
-struct UbiBlkBackend {
+pub struct UbiBlkBackend {
     threads: Vec<Mutex<UbiBlkBackendThread>>,
     config: VirtioBlockConfig,
     queues_per_thread: Vec<u64>,
@@ -42,8 +42,15 @@ struct UbiBlkBackend {
     options: Options,
 }
 
+#[cfg(test)]
+impl UbiBlkBackend {
+    pub fn threads(&self) -> &Vec<Mutex<UbiBlkBackendThread>> {
+        &self.threads
+    }
+}
+
 impl<'a> UbiBlkBackend {
-    fn new(
+    pub fn new(
         options: &Options,
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         block_device: Box<dyn BlockDevice>,
@@ -119,12 +126,19 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
             | (1 << VIRTIO_RING_F_INDIRECT_DESC) // https://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-330003
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
 
-        info!("avail_features: {}", features_to_str(avail_features).trim_end());
+        info!(
+            "avail_features: {}",
+            features_to_str(avail_features).trim_end()
+        );
         avail_features
     }
 
     fn acked_features(&self, features: u64) {
-        info!("acked_features: 0x{:x} {}", features, features_to_str(features).trim_end());
+        info!(
+            "acked_features: 0x{:x} {}",
+            features,
+            features_to_str(features).trim_end()
+        );
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
@@ -259,7 +273,7 @@ fn build_block_device(
     Ok(block_device)
 }
 
-fn start_block_backend(
+pub fn start_block_backend(
     options: &Options,
     kek: KeyEncryptionCipher,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -413,6 +427,3 @@ pub fn init_metadata(
     metadata.write(&mut ch)?;
     Ok(())
 }
-
-#[cfg(test)]
-mod backend_tests;

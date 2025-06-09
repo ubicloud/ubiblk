@@ -60,8 +60,7 @@ impl StripeFetcher {
     ) -> Result<Self> {
         let fetch_source_channel = source_dev.create_channel()?;
         let fetch_target_channel = target_dev.create_channel()?;
-        let metadata_manager =
-            StripeMetadataManager::new(metadata_dev, source_dev.sector_count())?;
+        let metadata_manager = StripeMetadataManager::new(metadata_dev, source_dev.sector_count())?;
         let fetch_buffers = (0..MAX_CONCURRENT_FETCHES)
             .map(|_| FetchBuffer {
                 used_for: None,

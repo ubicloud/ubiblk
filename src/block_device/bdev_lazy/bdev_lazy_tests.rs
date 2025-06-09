@@ -1,7 +1,12 @@
 #[cfg(test)]
 mod tests {
-    use crate::block_device::{bdev_lazy::{LazyBlockDevice, UbiMetadata, StripeFetcher, stripe_fetcher::SharedStripeFetcher},
-                             bdev_test::TestBlockDevice, IoChannel, BlockDevice};
+    use crate::block_device::{
+        bdev_lazy::{
+            stripe_fetcher::SharedStripeFetcher, LazyBlockDevice, StripeFetcher, UbiMetadata,
+        },
+        bdev_test::TestBlockDevice,
+        BlockDevice, IoChannel,
+    };
     use crate::vhost_backend::SECTOR_SIZE;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -79,7 +84,10 @@ mod tests {
         let results = drive(&fetcher, &mut chan);
         assert_eq!(results, vec![(2, true)]);
         let start = stripe_sectors as usize * SECTOR_SIZE;
-        assert_eq!(&target_mem.read().unwrap()[start..start + write_data.len()], write_data);
+        assert_eq!(
+            &target_mem.read().unwrap()[start..start + write_data.len()],
+            write_data
+        );
 
         let flush_id = 3;
         chan.add_flush(flush_id);
@@ -118,7 +126,12 @@ mod tests {
             StripeFetcher::new(&image_dev, &target_dev, &metadata_dev, killfd).unwrap(),
         ));
 
-        let lazy = LazyBlockDevice::new(Box::new(target_dev), Some(Box::new(image_dev)), fetcher.clone()).unwrap();
+        let lazy = LazyBlockDevice::new(
+            Box::new(target_dev),
+            Some(Box::new(image_dev)),
+            fetcher.clone(),
+        )
+        .unwrap();
         let mut chan = lazy.create_channel().unwrap();
 
         let read_buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
@@ -139,7 +152,10 @@ mod tests {
         let results = drive(&fetcher, &mut chan);
         assert_eq!(results, vec![(2, true)]);
         let start = stripe_sectors as usize * SECTOR_SIZE;
-        assert_eq!(&target_mem.read().unwrap()[start..start + write_data.len()], write_data);
+        assert_eq!(
+            &target_mem.read().unwrap()[start..start + write_data.len()],
+            write_data
+        );
 
         let flush_id = 3;
         chan.add_flush(flush_id);

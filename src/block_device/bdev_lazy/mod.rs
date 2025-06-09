@@ -7,4 +7,4 @@ pub use stripe_fetcher::StripeFetcher;
 pub use stripe_metadata_manager::UbiMetadata;
 
 #[cfg(test)]
-mod lazy_block_device_tests;
+mod bdev_lazy_tests;

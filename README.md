@@ -139,3 +139,11 @@ disk image. The log is produced by the backend when `io_debug_path` is set.
 ```bash
 replay-log --log io_debug.log --disk disk.img
 ```
+
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 or
+later (AGPL-3.0-or-later), unless otherwise stated.
+
+Some portions of the code are derived from third-party projects, and retain
+their original licenses. See comments in source files for details.

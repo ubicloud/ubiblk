@@ -101,6 +101,21 @@ impl<'a> UbiBlkBackend {
     }
 }
 
+// This impl is mostly based on CloudHypervisor's vhost_user_block/src/lib.rs,
+// which has the following copyright notice:
+//
+// > Copyright 2019 Red Hat, Inc. All Rights Reserved.
+// >
+// > Portions Copyright 2019 Intel Corporation. All Rights Reserved.
+// >
+// > Portions Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// >
+// > Portions Copyright 2017 The Chromium OS Authors. All rights reserved.
+// >
+// > SPDX-License-Identifier: (Apache-2.0 AND BSD-3-Clause)
+//
+// You can find CloudHypervisor's code at
+// https://github.com/cloud-hypervisor/cloud-hypervisor
 impl<'a> VhostUserBackend for UbiBlkBackend {
     type Bitmap = BitmapMmapRegion;
     type Vring = VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>;

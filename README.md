@@ -2,12 +2,13 @@
 
 A block device utilities collection for virtualized environments.
 
-
 ## Building
 
-This requires `isa-l_crypto`:
+1. Install Rust and Cargo:
+   - Follow the instructions at [rustup.rs](https://rustup.rs/).
+2. Install `isa-l_crypto`:
 
-```
+```bash
 sudo apt-get install autoconf libtool nasm clang
 git clone https://github.com/intel/isa-l_crypto
 cd isa-l_crypto/
@@ -17,17 +18,22 @@ make -j32
 sudo make install
 ```
 
-## vhost-frontend
+3. Build the project:
 
-A small command-line tool that can connect to a vhost-user-blk backend and run
-through the different frontend stages.  See
-[docs/vhost-frontend.md](docs/vhost-frontend.md) for full documentation.
+```bash
+cargo build --release
+```
+
+4. Run the tests:
+
+```bash
+cargo test
+```
 
 ## vhost-backend
 
-The `vhost-backend` utility launches a vhost-user-blk backend based on a YAML configuration file.
-It now supports advanced features such as lazy stripe fetching for efficient I/O, integrated block encryption via KEK,
-and configurable I/O debug logging.
+The `vhost-backend` utility launches a vhost-user-blk backend based on a YAML
+configuration file.
 
 **Usage:**
 ```bash
@@ -85,8 +91,7 @@ encryption_key:                          # Optional: AES‐XTS keys (base64 enco
 When `image_path` and `metadata_path` are provided, the backend copies data
 from the image to the base device in units called *stripes*. The size of a
 stripe is `2^stripe-sector-count-shift` sectors and the status of every stripe
-is recorded in the metadata file. This allows the backend to resume fetching
-after a restart.
+is recorded in the metadata file.
 
 If a write operation is issued to a stripe that has not been fetched yet, the
 backend will first copy the stripe from the image to the base device and then
@@ -131,7 +136,16 @@ init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \
 - `-s, --stripe-sector-count-shift`: (Optional) Stripe size as a power of two
   sectors (default: `11`).
 
-## replay-log
+
+## Developer Tools
+
+#### vhost-frontend
+
+A small command-line tool that can connect to a vhost-user-blk backend and run
+through the different frontend stages.  See
+[docs/vhost-frontend.md](docs/vhost-frontend.md) for full documentation.
+
+#### replay-log
 
 `replay-log` replays READ and WRITE operations stored in an I/O debug log onto a
 disk image. The log is produced by the backend when `io_debug_path` is set.

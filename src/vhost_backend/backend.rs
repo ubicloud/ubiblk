@@ -276,7 +276,7 @@ fn build_block_device(
     let mut block_device: Box<dyn BlockDevice> =
         block_device::UringBlockDevice::new(PathBuf::from(&path), options.queue_size, false)
             .map_err(|e| {
-                error!("Failed to create block device: {:?}", e);
+                error!("Failed to create block device at {}: {:?}", path, e);
                 e
             })?;
 

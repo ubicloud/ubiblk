@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Deserializer, Serialize};
+use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 use serde_with::{base64::Base64, serde_as};
 
 fn decode_encryption_keys<'de, D>(deserializer: D) -> Result<Option<(Vec<u8>, Vec<u8>)>, D::Error>
@@ -71,6 +72,20 @@ fn default_device_id() -> String {
     "ubiblk".to_string()
 }
 
+fn deserialize_device_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    if s.len() > VIRTIO_BLK_ID_BYTES as usize {
+        return Err(serde::de::Error::custom(format!(
+            "device_id exceeds maximum of {} bytes",
+            VIRTIO_BLK_ID_BYTES
+        )));
+    }
+    Ok(s)
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Options {
     pub path: String,
@@ -103,7 +118,7 @@ pub struct Options {
     #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
 
-    #[serde(default = "default_device_id")]
+    #[serde(default = "default_device_id", deserialize_with = "deserialize_device_id")]
     pub device_id: String,
 }
 
@@ -193,5 +208,23 @@ mod tests {
         let options: Options = from_str(yaml).unwrap();
         assert!(!options.copy_on_read);
         assert_eq!(options.device_id, "ubiblk".to_string());
+    }
+
+    #[test]
+    fn test_device_id_length() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        device_id: "12345678901234567890"
+        "#;
+        let options: Options = from_str(yaml).unwrap();
+        assert_eq!(options.device_id, "12345678901234567890".to_string());
+
+        let yaml_too_long = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        device_id: "123456789012345678901"
+        "#;
+        assert!(from_str::<Options>(yaml_too_long).is_err());
     }
 }

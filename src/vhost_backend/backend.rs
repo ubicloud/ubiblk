@@ -440,5 +440,48 @@ pub fn init_metadata(
     let mut ch = metadata_bdev.create_channel()?;
     let metadata = UbiMetadata::new(stripe_sector_count_shift);
     metadata.write(&mut ch)?;
+
+    // Flush metadata to ensure it is durably written to disk.
+    const FLUSH_ID: usize = 1;
+    ch.add_flush(FLUSH_ID);
+    ch.submit()?;
+
+    let timeout = std::time::Duration::from_secs(5);
+    let start_time = std::time::Instant::now();
+    let mut completed = false;
+    while start_time.elapsed() < timeout && !completed {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        for (id, success) in ch.poll() {
+            if id == FLUSH_ID {
+                if !success {
+                    return Err(Box::new(VhostUserBlockError::IoError {
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "Failed to flush metadata",
+                        ),
+                    }));
+                }
+                completed = true;
+                break;
+            } else {
+                return Err(Box::new(VhostUserBlockError::IoError {
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Unexpected ID: {}", id),
+                    ),
+                }));
+            }
+        }
+    }
+
+    if !completed {
+        return Err(Box::new(VhostUserBlockError::IoError {
+            source: std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Timeout while flushing metadata",
+            ),
+        }));
+    }
+
     Ok(())
 }

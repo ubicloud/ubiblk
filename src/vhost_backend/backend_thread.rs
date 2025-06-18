@@ -340,10 +340,20 @@ impl UbiBlkBackendThread {
         desc_chain: DescChain,
         vring: &mut Vring<'_>,
     ) {
-        let (data_addr, _) = request.data_descriptors[0];
-        let serial = &self.device_id;
+        let (data_addr, data_len) = request.data_descriptors[0];
         let mem = desc_chain.memory();
-        let status = if let Err(_) = mem.write_slice(serial.as_bytes(), data_addr) {
+
+        if data_len < VIRTIO_BLK_ID_BYTES {
+            self.complete_io(vring, &desc_chain, request.status_addr, VIRTIO_BLK_S_IOERR as u8);
+            return;
+        }
+
+        let mut buf = [0u8; VIRTIO_BLK_ID_BYTES as usize];
+        let serial_bytes = self.device_id.as_bytes();
+        let copy_len = core::cmp::min(serial_bytes.len(), buf.len());
+        buf[..copy_len].copy_from_slice(&serial_bytes[..copy_len]);
+
+        let status = if mem.write_slice(&buf, data_addr).is_err() {
             VIRTIO_BLK_S_IOERR
         } else {
             VIRTIO_BLK_S_OK

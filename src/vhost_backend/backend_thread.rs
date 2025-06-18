@@ -8,6 +8,7 @@ use super::Options;
 use super::{request::*, SECTOR_SIZE};
 use crate::block_device::IoChannel;
 use crate::block_device::SharedBuffer;
+use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{Result, VhostUserBlockError};
 
 use libc::EFD_NONBLOCK;
@@ -46,6 +47,7 @@ pub struct UbiBlkBackendThread {
     io_debug_file: Option<fs::File>,
     skip_sync: bool,
     device_id: String,
+    alignment: usize,
 }
 
 impl UbiBlkBackendThread {
@@ -53,13 +55,17 @@ impl UbiBlkBackendThread {
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         io_channel: Box<dyn IoChannel>,
         options: &Options,
+        alignment: usize,
     ) -> Result<Self> {
         let buf_size = options.seg_count_max * options.seg_size_max;
         let request_slots: Vec<RequestSlot> = (0..options.queue_size)
             .map(|_| RequestSlot {
                 used: false,
                 request_type: RequestType::None,
-                buffer: Rc::new(RefCell::new(vec![0; buf_size as usize])),
+                buffer: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+                    buf_size as usize,
+                    alignment,
+                ))),
                 len: buf_size as usize,
                 status_addr: GuestAddress(0),
                 request_sector: 0,
@@ -98,6 +104,7 @@ impl UbiBlkBackendThread {
             io_debug_file,
             skip_sync: options.skip_sync,
             device_id: options.device_id.clone(),
+            alignment,
         })
     }
 
@@ -118,7 +125,10 @@ impl UbiBlkBackendThread {
         self.request_slots.push(RequestSlot {
             used: true,
             request_type: request.request_type,
-            buffer: Rc::new(RefCell::new(vec![0; len])),
+            buffer: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+                len,
+                self.alignment,
+            ))),
             len,
             request_sector: request.sector,
             request_len: len,
@@ -344,7 +354,12 @@ impl UbiBlkBackendThread {
         let mem = desc_chain.memory();
 
         if data_len < VIRTIO_BLK_ID_BYTES {
-            self.complete_io(vring, &desc_chain, request.status_addr, VIRTIO_BLK_S_IOERR as u8);
+            self.complete_io(
+                vring,
+                &desc_chain,
+                request.status_addr,
+                VIRTIO_BLK_S_IOERR as u8,
+            );
             return;
         }
 

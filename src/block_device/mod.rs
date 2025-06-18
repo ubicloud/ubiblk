@@ -1,7 +1,8 @@
+use crate::utils::aligned_buffer::AlignedBuf;
 use crate::Result;
 use std::{cell::RefCell, rc::Rc};
 
-pub type SharedBuffer = Rc<RefCell<Vec<u8>>>;
+pub type SharedBuffer = Rc<RefCell<AlignedBuf>>;
 
 pub trait IoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);

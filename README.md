@@ -54,6 +54,7 @@ The configuration YAML must define:
 - `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
 - `skip_sync`: (Optional) Skip flush handling for faster operation.
 - `copy_on_read`: (Optional) Copy stripes from the image only when accessed.
+- `direct_io`: (Optional) Use direct I/O (O_DIRECT) when accessing files. When enabled, request buffers are aligned to the larger of 4096 bytes or the host filesystem block size.
 - `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
 - `io_debug_path`: (Optional) Path for I/O debug log.
 - `device_id`: (Optional) Identifier returned to the guest for GET_ID.
@@ -80,6 +81,7 @@ poll_queue_timeout_us: 500               # Integer: poll timeout in microseconds
 io_debug_path: "/tmp/io_debug.log"       # Optional: path for I/O debug log
 skip_sync: false                         # Optional: skip flush handling
 copy_on_read: false                      # Optional: copy stripes on first read
+direct_io: false                         # Optional: use O_DIRECT
 device_id: "ubiblk"                      # Optional: device identifier
 encryption_key:                          # Optional: AES‐XTS keys (base64 encoded)
   - "x74Yhe/ovgxY4BrBaM6Wm/9firf9k/N+ayvGsskBo+hjQtrL+nslCDC5oR/HpSDL"

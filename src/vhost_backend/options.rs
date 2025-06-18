@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Deserializer, Serialize};
-use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 use serde_with::{base64::Base64, serde_as};
+use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 
 fn decode_encryption_keys<'de, D>(deserializer: D) -> Result<Option<(Vec<u8>, Vec<u8>)>, D::Error>
 where
@@ -68,6 +68,10 @@ fn default_copy_on_read() -> bool {
     false
 }
 
+fn default_direct_io() -> bool {
+    false
+}
+
 fn default_device_id() -> String {
     "ubiblk".to_string()
 }
@@ -115,10 +119,16 @@ pub struct Options {
     #[serde(default = "default_copy_on_read")]
     pub copy_on_read: bool,
 
+    #[serde(default = "default_direct_io")]
+    pub direct_io: bool,
+
     #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
 
-    #[serde(default = "default_device_id", deserialize_with = "deserialize_device_id")]
+    #[serde(
+        default = "default_device_id",
+        deserialize_with = "deserialize_device_id"
+    )]
     pub device_id: String,
 }
 
@@ -207,6 +217,7 @@ mod tests {
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert!(!options.copy_on_read);
+        assert!(!options.direct_io);
         assert_eq!(options.device_id, "ubiblk".to_string());
     }
 
@@ -226,5 +237,16 @@ mod tests {
         device_id: "123456789012345678901"
         "#;
         assert!(from_str::<Options>(yaml_too_long).is_err());
+    }
+
+    #[test]
+    fn test_direct_io_enabled() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        direct_io: true
+        "#;
+        let options: Options = from_str(yaml).unwrap();
+        assert!(options.direct_io);
     }
 }

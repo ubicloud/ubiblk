@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::block_device::SharedBuffer;
     use crate::block_device::{
         bdev_lazy::{
             stripe_fetcher::SharedStripeFetcher, LazyBlockDevice, StripeFetcher, UbiMetadata,
@@ -7,6 +8,7 @@ mod tests {
         bdev_test::TestBlockDevice,
         BlockDevice, IoChannel,
     };
+    use crate::utils::aligned_buffer::AlignedBuf;
     use crate::vhost_backend::SECTOR_SIZE;
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -62,23 +64,23 @@ mod tests {
 
         let killfd = EventFd::new(0).unwrap();
         let fetcher = Arc::new(Mutex::new(
-            StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd).unwrap(),
+            StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
         ));
 
         let lazy = LazyBlockDevice::new(Box::new(target_dev), None, fetcher.clone()).unwrap();
         let mut chan = lazy.create_channel().unwrap();
 
-        let read_buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
         let results = drive(&fetcher, &mut chan);
         assert_eq!(results, vec![(1, true)]);
-        assert_eq!(&read_buf.borrow()[..data.len()], data);
+        assert_eq!(&read_buf.borrow().as_slice()[..data.len()], data);
         assert_eq!(&target_mem.read().unwrap()[0..data.len()], data);
 
         let write_data = b"queued_write";
-        let write_buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
-        write_buf.borrow_mut()[..write_data.len()].copy_from_slice(write_data);
+        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(stripe_sectors, 1, write_buf.clone(), 2);
         chan.submit().unwrap();
         let results = drive(&fetcher, &mut chan);
@@ -123,7 +125,7 @@ mod tests {
 
         let killfd = EventFd::new(0).unwrap();
         let fetcher = Arc::new(Mutex::new(
-            StripeFetcher::new(&image_dev, &target_dev, &metadata_dev, killfd).unwrap(),
+            StripeFetcher::new(&image_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
         ));
 
         let lazy = LazyBlockDevice::new(
@@ -134,19 +136,19 @@ mod tests {
         .unwrap();
         let mut chan = lazy.create_channel().unwrap();
 
-        let read_buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
         let results = drive(&fetcher, &mut chan);
         assert_eq!(results, vec![(1, true)]);
-        assert_eq!(&read_buf.borrow()[..data.len()], data);
+        assert_eq!(&read_buf.borrow().as_slice()[..data.len()], data);
         assert_ne!(&target_mem.read().unwrap()[0..data.len()], data);
         assert_eq!(image_metrics.read().unwrap().reads, 1);
         assert_eq!(target_metrics.read().unwrap().reads, 0);
 
         let write_data = b"write_after_fetch";
-        let write_buf: Rc<RefCell<Vec<u8>>> = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
-        write_buf.borrow_mut()[..write_data.len()].copy_from_slice(write_data);
+        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(stripe_sectors, 1, write_buf.clone(), 2);
         chan.submit().unwrap();
         let results = drive(&fetcher, &mut chan);

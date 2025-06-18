@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
     use crate::vhost_backend::{
         init_metadata, start_block_backend, CipherMethod, KeyEncryptionCipher, Options,
         UbiBlkBackend, SECTOR_SIZE,
@@ -27,6 +28,7 @@ mod tests {
             poll_queue_timeout_us: 1000,
             skip_sync: false,
             copy_on_read: false,
+            direct_io: false,
             encryption_key: None,
             device_id: "ubiblk".to_string(),
         }
@@ -39,7 +41,7 @@ mod tests {
         opts.queue_size = 30;
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let result = UbiBlkBackend::new(&opts, mem, block_device);
+        let result = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT);
         assert!(matches!(
             result,
             Err(VhostUserBlockError::InvalidParameter { .. })
@@ -52,7 +54,7 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device).unwrap();
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
         assert_eq!(backend.num_queues(), 1);
         assert_eq!(backend.max_queue_size(), 32);
 
@@ -68,7 +70,7 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device).unwrap();
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
         backend.set_event_idx(true);
         for thread in backend.threads().iter() {
             assert!(thread.lock().unwrap().event_idx);
@@ -81,7 +83,7 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device).unwrap();
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
         let err = backend.handle_event(0, EventSet::OUT, &[], 0).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
@@ -92,7 +94,7 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device).unwrap();
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
         let err = backend.handle_event(1, EventSet::IN, &[], 0).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }

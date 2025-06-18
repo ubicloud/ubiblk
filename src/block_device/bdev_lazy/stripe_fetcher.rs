@@ -6,6 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use super::super::*;
 use super::stripe_metadata_manager::StartFlushResult;
 pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
+use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{Result, VhostUserBlockError};
 use log::{debug, error, info};
 use vmm_sys_util::eventfd::EventFd;
@@ -57,6 +58,7 @@ impl StripeFetcher {
         target_dev: &dyn BlockDevice,
         metadata_dev: &dyn BlockDevice,
         killfd: EventFd,
+        alignment: usize,
     ) -> Result<Self> {
         let fetch_source_channel = source_dev.create_channel()?;
         let fetch_target_channel = target_dev.create_channel()?;
@@ -64,7 +66,10 @@ impl StripeFetcher {
         let fetch_buffers = (0..MAX_CONCURRENT_FETCHES)
             .map(|_| FetchBuffer {
                 used_for: None,
-                buf: Rc::new(RefCell::new(vec![0u8; STRIPE_SIZE])),
+                buf: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+                    STRIPE_SIZE,
+                    alignment,
+                ))),
             })
             .collect();
         let source_sector_count = source_dev.sector_count();
@@ -354,7 +359,7 @@ mod tests {
 
         let killfd = EventFd::new(0).unwrap();
         let mut stripe_fetcher =
-            StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd).unwrap();
+            StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap();
 
         let (req_sender, req_receiver) = std::sync::mpsc::channel();
         let (resp_sender, resp_receiver) = std::sync::mpsc::channel();
@@ -474,7 +479,7 @@ mod tests {
             .unwrap();
 
         let killfd = EventFd::new(0).unwrap();
-        let res = StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd);
+        let res = StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd, 512);
         match res {
             Err(VhostUserBlockError::InvalidParameter { description }) => {
                 assert_eq!(description, "target device too small");

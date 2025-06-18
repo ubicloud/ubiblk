@@ -17,8 +17,11 @@ use crate::{
 
 use super::{backend_thread::UbiBlkBackendThread, KeyEncryptionCipher, Options};
 use crate::block_device::UbiMetadata;
+use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
 use crate::Result;
 use log::{debug, error, info};
+use nix::sys::statfs::statfs;
+use std::path::Path;
 use vhost::vhost_user::message::*;
 use vhost_user_backend::{
     bitmap::BitmapMmapRegion, VhostUserBackend, VhostUserDaemon, VringRwLock, VringT,
@@ -54,6 +57,7 @@ impl<'a> UbiBlkBackend {
         options: &Options,
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         block_device: Box<dyn BlockDevice>,
+        alignment: usize,
     ) -> Result<Self> {
         if options.queue_size == 0 || !options.queue_size.is_power_of_two() {
             return Err(VhostUserBlockError::InvalidParameter {
@@ -83,8 +87,12 @@ impl<'a> UbiBlkBackend {
         let mut threads: Vec<Mutex<UbiBlkBackendThread>> = Vec::new();
         for i in 0..options.num_queues {
             let io_channel = block_device.create_channel()?;
-            let thread: Mutex<UbiBlkBackendThread> =
-                Mutex::new(UbiBlkBackendThread::new(mem.clone(), io_channel, options)?);
+            let thread: Mutex<UbiBlkBackendThread> = Mutex::new(UbiBlkBackendThread::new(
+                mem.clone(),
+                io_channel,
+                options,
+                alignment,
+            )?);
             threads.push(thread);
             queues_per_thread.push(0b1 << i);
         }
@@ -273,12 +281,16 @@ fn build_block_device(
     options: &Options,
     kek: KeyEncryptionCipher,
 ) -> Result<Box<dyn BlockDevice>> {
-    let mut block_device: Box<dyn BlockDevice> =
-        block_device::UringBlockDevice::new(PathBuf::from(&path), options.queue_size, false)
-            .map_err(|e| {
-                error!("Failed to create block device: {:?}", e);
-                e
-            })?;
+    let mut block_device: Box<dyn BlockDevice> = block_device::UringBlockDevice::new(
+        PathBuf::from(&path),
+        options.queue_size,
+        false,
+        options.direct_io,
+    )
+    .map_err(|e| {
+        error!("Failed to create block device: {:?}", e);
+        e
+    })?;
 
     if let Some((key1, key2)) = &options.encryption_key {
         block_device =
@@ -294,6 +306,12 @@ pub fn start_block_backend(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
+    let mut alignment = BUFFER_ALIGNMENT;
+    if options.direct_io {
+        let stat = statfs(Path::new(&options.path))?;
+        alignment = std::cmp::max(alignment, stat.block_size() as usize);
+    }
+
     let base_block_device = build_block_device(&options.path, options, kek.clone())?;
 
     let stripe_fetcher_killfd = EventFd::new(libc::EFD_NONBLOCK)?;
@@ -308,12 +326,14 @@ pub fn start_block_backend(
             let metadata_path = options.metadata_path.as_ref().unwrap();
             let metadata_dev = build_block_device(&metadata_path, options, kek)?;
             let readonly = true;
-            let image_bdev = UringBlockDevice::new(PathBuf::from(path), 64, readonly)?;
+            let image_bdev =
+                UringBlockDevice::new(PathBuf::from(path), 64, readonly, options.direct_io)?;
             let stripe_fetcher = StripeFetcher::new(
                 &*image_bdev,
                 &*base_block_device,
                 &*metadata_dev,
                 stripe_fetcher_killfd.try_clone()?,
+                alignment,
             )?;
             Some((Arc::new(Mutex::new(stripe_fetcher)), image_bdev))
         }
@@ -340,7 +360,7 @@ pub fn start_block_backend(
     };
 
     let backend = Arc::new(
-        UbiBlkBackend::new(&options, mem.clone(), block_device).map_err(|e| {
+        UbiBlkBackend::new(&options, mem.clone(), block_device, alignment).map_err(|e| {
             error!("Failed to create UbiBlkBackend: {:?}", e);
             Box::new(e)
         })?,

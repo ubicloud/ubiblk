@@ -1,4 +1,6 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
+#[cfg(test)]
+use crate::utils::aligned_buffer::AlignedBuf;
 use crate::vhost_backend::SECTOR_SIZE;
 use crate::{Result, VhostUserBlockError};
 use log::error;
@@ -39,7 +41,7 @@ impl IoChannel for SyncIoChannel {
             self.finished_requests.push((id, false));
             return;
         }
-        if let Err(e) = file.read_exact(&mut buf[..len]) {
+        if let Err(e) = file.read_exact(&mut buf.as_mut_slice()[..len]) {
             error!("Error reading from sector {}: {}", sector_offset, e);
             self.finished_requests.push((id, false));
             return;
@@ -58,7 +60,7 @@ impl IoChannel for SyncIoChannel {
             self.finished_requests.push((id, false));
             return;
         }
-        if let Err(e) = file.write_all(&buf[..len]) {
+        if let Err(e) = file.write_all(&buf.as_slice()[..len]) {
             error!("Error writing to sector {}: {}", sector_offset, e);
             self.finished_requests.push((id, false));
             return;
@@ -162,19 +164,23 @@ mod tests {
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(pattern.clone()));
+        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf
+            .borrow_mut()
+            .as_mut_slice()
+            .copy_from_slice(&pattern);
         chan.add_write(0, 1, write_buf.clone(), 1);
         chan.submit()?;
         let result = chan.poll();
         assert_eq!(result, vec![(1, true)]);
 
         // Read it back
-        let read_buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = chan.poll();
         assert_eq!(result, vec![(2, true)]);
-        assert_eq!(*read_buf.borrow(), pattern);
+        assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
 
         Ok(())
     }
@@ -194,7 +200,11 @@ mod tests {
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(pattern.clone()));
+        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf
+            .borrow_mut()
+            .as_mut_slice()
+            .copy_from_slice(&pattern);
         chan.add_write(0, 1, write_buf.clone(), 1);
         chan.submit()?;
         let result = chan.poll();
@@ -234,13 +244,13 @@ mod tests {
         let path = tmpfile.path();
         let mut chan = SyncIoChannel::new(path, false)?;
 
-        let read_buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(1, 1, read_buf.clone(), 1);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(1, false)]);
 
         let mut ro_chan = SyncIoChannel::new(path, true)?;
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         ro_chan.add_write(0, 1, write_buf.clone(), 2);
         ro_chan.submit()?;
         assert_eq!(ro_chan.poll(), vec![(2, false)]);
@@ -259,7 +269,7 @@ mod tests {
             file: Arc::new(Mutex::new(file)),
             finished_requests: Vec::new(),
         };
-        let buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, buf.clone(), 1);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(1, false)]);

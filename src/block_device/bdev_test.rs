@@ -1,5 +1,6 @@
 use std::sync::{Arc, RwLock};
 
+use crate::utils::aligned_buffer::AlignedBuf;
 use crate::vhost_backend::SECTOR_SIZE;
 
 use super::*;
@@ -28,7 +29,7 @@ impl IoChannel for TestIoChannel {
             return;
         }
 
-        buf.copy_from_slice(&mem[start..end]);
+        buf.as_mut_slice().copy_from_slice(&mem[start..end]);
         self.finished_requests.push((_id, true));
         self.metrics.write().unwrap().reads += 1;
     }
@@ -44,7 +45,7 @@ impl IoChannel for TestIoChannel {
             return;
         }
 
-        mem[start..end].copy_from_slice(&buf);
+        mem[start..end].copy_from_slice(buf.as_slice());
         self.finished_requests.push((_id, true));
         self.metrics.write().unwrap().writes += 1;
     }
@@ -136,7 +137,7 @@ mod tests {
         let device = TestBlockDevice::new(1024 * 1024);
         let mut channel = device.create_channel().unwrap();
 
-        let buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         channel.add_read(0, 1, buf.clone(), 1);
         channel.submit().unwrap();
         let results = channel.poll();
@@ -152,7 +153,11 @@ mod tests {
         let mut channel = device.create_channel().unwrap();
 
         let pattern = vec![0x55u8; SECTOR_SIZE];
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(pattern.clone()));
+        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf
+            .borrow_mut()
+            .as_mut_slice()
+            .copy_from_slice(&pattern);
         channel.add_write(0, 1, write_buf.clone(), 1);
         channel.add_flush(2);
         channel.submit().unwrap();
@@ -160,12 +165,12 @@ mod tests {
         results.sort_by_key(|x| x.0);
         assert_eq!(results, vec![(1, true), (2, true)]);
 
-        let read_buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         channel.add_read(0, 1, read_buf.clone(), 3);
         channel.submit().unwrap();
         let results = channel.poll();
         assert_eq!(results, vec![(3, true)]);
-        assert_eq!(*read_buf.borrow(), pattern);
+        assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
 
         let metrics = device.metrics.read().unwrap();
         assert_eq!(metrics.reads, 1);
@@ -181,7 +186,7 @@ mod tests {
         let device = TestBlockDevice::new(SECTOR_SIZE as u64);
         let mut channel = device.create_channel().unwrap();
 
-        let buf: SharedBuffer = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         channel.add_read(1, 1, buf.clone(), 1);
         channel.add_write(1, 1, buf.clone(), 2);
         channel.submit().unwrap();

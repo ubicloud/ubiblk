@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+use crate::utils::aligned_buffer::AlignedBuf;
 use crate::vhost_backend::{CipherMethod, KeyEncryptionCipher, SECTOR_SIZE};
 use crate::{Result, VhostUserBlockError};
 use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
@@ -325,10 +327,10 @@ mod tests {
         );
 
         let sample_data = "Hello, world!".as_bytes();
-        let buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
 
         for i in 0..2 {
-            buf.borrow_mut()[0..sample_data.len()].copy_from_slice(sample_data);
+            buf.borrow_mut().as_mut_slice()[0..sample_data.len()].copy_from_slice(sample_data);
             channel.add_write(i, 1, buf.clone(), 12);
             channel.submit().expect("Failed to submit write request");
             while channel.busy() {
@@ -344,7 +346,7 @@ mod tests {
 
         for i in 0..2 {
             let read_id = 34;
-            buf.borrow_mut().fill(0);
+            buf.borrow_mut().as_mut_slice().fill(0);
             channel.add_read(i, 1, buf.clone(), read_id);
             channel.submit().expect("Failed to submit read request");
 
@@ -354,7 +356,7 @@ mod tests {
 
             let poll_results = channel.poll();
             assert_eq!(poll_results, vec![(read_id, true)]);
-            assert_eq!(&buf.borrow()[0..sample_data.len()], sample_data);
+            assert_eq!(&buf.borrow().as_slice()[0..sample_data.len()], sample_data);
         }
 
         assert_eq!(metrics.read().unwrap().reads, 2);

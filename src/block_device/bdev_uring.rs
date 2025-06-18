@@ -1,4 +1,6 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
+#[cfg(test)]
+use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use io_uring::IoUring;
 use log::error;
@@ -6,6 +8,7 @@ use nix::errno::Errno;
 use std::{
     fs::{File, OpenOptions},
     os::fd::AsRawFd,
+    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
 };
 
@@ -18,15 +21,16 @@ struct UringIoChannel {
 }
 
 impl UringIoChannel {
-    fn new(path: &str, queue_size: usize, readonly: bool) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(!readonly)
-            .open(path)
-            .map_err(|e| {
-                error!("Failed to open file {}: {}", path, e);
-                VhostUserBlockError::IoError { source: e }
-            })?;
+    fn new(path: &str, queue_size: usize, readonly: bool, direct_io: bool) -> Result<Self> {
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(!readonly);
+        if direct_io {
+            opts.custom_flags(libc::O_DIRECT);
+        }
+        let file = opts.open(path).map_err(|e| {
+            error!("Failed to open file {}: {}", path, e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
         let io_uring_entries: u32 = queue_size.try_into().map_err(|_| {
             error!("Invalid queue size: {}", queue_size);
             VhostUserBlockError::InvalidParameter {
@@ -135,6 +139,7 @@ pub struct UringBlockDevice {
     sector_count: u64,
     queue_size: usize,
     readonly: bool,
+    direct_io: bool,
 }
 
 impl BlockDevice for UringBlockDevice {
@@ -143,6 +148,7 @@ impl BlockDevice for UringBlockDevice {
             self.path.to_string_lossy().as_ref(),
             self.queue_size,
             self.readonly,
+            self.direct_io,
         )?;
         Ok(Box::new(channel))
     }
@@ -153,7 +159,12 @@ impl BlockDevice for UringBlockDevice {
 }
 
 impl UringBlockDevice {
-    pub fn new(path: PathBuf, queue_size: usize, readonly: bool) -> Result<Box<Self>> {
+    pub fn new(
+        path: PathBuf,
+        queue_size: usize,
+        readonly: bool,
+        direct_io: bool,
+    ) -> Result<Box<Self>> {
         match std::fs::metadata(&path) {
             Ok(metadata) => {
                 let size = metadata.len();
@@ -169,6 +180,7 @@ impl UringBlockDevice {
                     sector_count,
                     queue_size,
                     readonly,
+                    direct_io,
                 }))
             }
             Err(e) => {
@@ -205,24 +217,28 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let block_dev = UringBlockDevice::new(path.clone(), 8, false)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 8, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(pattern.clone()));
+        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf
+            .borrow_mut()
+            .as_mut_slice()
+            .copy_from_slice(&pattern);
         chan.add_write(0, 1, write_buf.clone(), 1);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);
         assert_eq!(result, vec![(1, true)]);
 
         // Read it back
-        let read_buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);
         assert_eq!(result, vec![(2, true)]);
-        assert_eq!(*read_buf.borrow(), pattern);
+        assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
 
         Ok(())
     }
@@ -236,18 +252,19 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let block_dev = UringBlockDevice::new(path.clone(), 8, true)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 8, true, false)?;
         let mut chan = block_dev.create_channel()?;
 
         // Read sector 0
-        let read_buf = Rc::new(RefCell::new(vec![0u8; SECTOR_SIZE]));
+        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);
         assert_eq!(result, vec![(2, true)]);
 
         // Attempt to write should fail
-        let write_buf = Rc::new(RefCell::new(vec![0xABu8; SECTOR_SIZE]));
+        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf.borrow_mut().as_mut_slice().fill(0xABu8);
         chan.add_write(0, 1, write_buf.clone(), 1);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);
@@ -272,7 +289,7 @@ mod tests {
                 VhostUserBlockError::IoError { source: e }
             })?;
         let path = tmpfile.path().to_owned();
-        let result = UringBlockDevice::new(path, 8, false);
+        let result = UringBlockDevice::new(path, 8, false, false);
         assert!(result.is_err());
         Ok(())
     }
@@ -282,7 +299,7 @@ mod tests {
     fn new_invalid_path_fails() -> Result<()> {
         let mut path = std::env::temp_dir();
         path.push("ubiblk_nonexistent_file");
-        let result = UringBlockDevice::new(path, 8, false);
+        let result = UringBlockDevice::new(path, 8, false, false);
         assert!(result.is_err());
         Ok(())
     }
@@ -295,11 +312,12 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let block_dev = UringBlockDevice::new(path.clone(), 8, false)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 8, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
         // Queue a write followed by a flush and ensure busy() reflects it.
-        let write_buf = Rc::new(RefCell::new(vec![0xCDu8; SECTOR_SIZE]));
+        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf.borrow_mut().as_mut_slice().fill(0xCDu8);
         chan.add_write(0, 1, write_buf.clone(), 1);
         chan.add_flush(2);
         assert!(chan.busy());
@@ -321,13 +339,72 @@ mod tests {
         })?;
         let path = tmpfile.path().to_owned();
         // Queue size of one allows only a single in-flight request.
-        let block_dev = UringBlockDevice::new(path.clone(), 1, false)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 1, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
-        let write_buf1 = Rc::new(RefCell::new(vec![0xAAu8; SECTOR_SIZE]));
+        let write_buf1 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf1.borrow_mut().as_mut_slice().fill(0xAAu8);
         chan.add_write(0, 1, write_buf1.clone(), 1);
         // Second request should fail to queue.
-        let write_buf2 = Rc::new(RefCell::new(vec![0xBBu8; SECTOR_SIZE]));
+        let write_buf2 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf2.borrow_mut().as_mut_slice().fill(0xBBu8);
+        chan.add_write(1, 1, write_buf2.clone(), 2);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert!(result.contains(&(1, true)));
+        assert!(result.contains(&(2, false)));
+        Ok(())
+    }
+
+    // Verify that direct I/O works for basic read and write operations.
+    #[test]
+    fn direct_io_basic_io() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let path = tmpfile.path().to_owned();
+        let block_dev = UringBlockDevice::new(path.clone(), 8, false, true)?;
+        let mut chan = block_dev.create_channel()?;
+
+        let pattern = vec![0xACu8; SECTOR_SIZE];
+        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf
+            .borrow_mut()
+            .as_mut_slice()
+            .copy_from_slice(&pattern);
+        chan.add_write(0, 1, write_buf.clone(), 1);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(1, true)]);
+
+        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        chan.add_read(0, 1, read_buf.clone(), 2);
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(2, true)]);
+        assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
+
+        Ok(())
+    }
+
+    // Ensure queue overflow handling also works when direct I/O is enabled.
+    #[test]
+    fn direct_io_queue_overflow() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let path = tmpfile.path().to_owned();
+        let block_dev = UringBlockDevice::new(path.clone(), 1, false, true)?;
+        let mut chan = block_dev.create_channel()?;
+
+        let write_buf1 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf1.borrow_mut().as_mut_slice().fill(0xAAu8);
+        chan.add_write(0, 1, write_buf1.clone(), 1);
+
+        let write_buf2 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf2.borrow_mut().as_mut_slice().fill(0xBBu8);
         chan.add_write(1, 1, write_buf2.clone(), 2);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);

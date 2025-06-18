@@ -1,6 +1,7 @@
 use std::{cell::RefCell, mem::MaybeUninit, ptr::copy_nonoverlapping, rc::Rc};
 
 use super::super::*;
+use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error, info};
 
@@ -93,7 +94,7 @@ impl UbiMetadata {
     pub fn write(&self, ch: &mut Box<dyn IoChannel>) -> Result<()> {
         let metadata_size = std::mem::size_of::<UbiMetadata>();
         let sectors = (metadata_size + SECTOR_SIZE - 1) / SECTOR_SIZE;
-        let buf = Rc::new(RefCell::new(vec![0u8; sectors * SECTOR_SIZE]));
+        let buf = Rc::new(RefCell::new(AlignedBuf::new(sectors * SECTOR_SIZE)));
         unsafe {
             let src = &*self as *const UbiMetadata as *const u8;
             let dst = buf.borrow_mut().as_mut_ptr();
@@ -174,7 +175,7 @@ impl StripeMetadataManager {
             channel,
             metadata,
             stripe_status_vec,
-            metadata_buf: Rc::new(RefCell::new(vec![0u8; metadata_buf_size])),
+            metadata_buf: Rc::new(RefCell::new(AlignedBuf::new(metadata_buf_size))),
             metadata_version_current: 0,
             metadata_version_flushed: 0,
             metadata_version_being_flushed: None,
@@ -294,8 +295,8 @@ impl StripeMetadataManager {
         info!("Loading metadata from device");
 
         let sector_count = (std::mem::size_of::<UbiMetadata>() + SECTOR_SIZE - 1) / SECTOR_SIZE;
-        let buf: Rc<RefCell<Vec<u8>>> =
-            Rc::new(RefCell::new(vec![0u8; sector_count * SECTOR_SIZE]));
+        let buf: Rc<RefCell<AlignedBuf>> =
+            Rc::new(RefCell::new(AlignedBuf::new(sector_count * SECTOR_SIZE)));
         io_channel.add_read(0, sector_count as u32, buf.clone(), 0);
         io_channel.submit()?;
 

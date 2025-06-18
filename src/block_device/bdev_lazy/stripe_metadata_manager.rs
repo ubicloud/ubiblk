@@ -95,21 +95,23 @@ impl UbiMetadata {
         let metadata_size = std::mem::size_of::<UbiMetadata>();
         let sectors = (metadata_size + SECTOR_SIZE - 1) / SECTOR_SIZE;
         let buf = Rc::new(RefCell::new(AlignedBuf::new(sectors * SECTOR_SIZE)));
+
         unsafe {
             let src = &*self as *const UbiMetadata as *const u8;
             let dst = buf.borrow_mut().as_mut_ptr();
             copy_nonoverlapping(src, dst, metadata_size);
         }
-        ch.add_write(0, sectors as u32, buf.clone(), 0);
+        ch.add_write(0, sectors as u32, buf.clone(), METADATA_WRITE_ID);
         ch.submit()?;
 
         let timeout = std::time::Duration::from_secs(5);
         let start_time = std::time::Instant::now();
-        let mut completed = false;
-        while start_time.elapsed() < timeout && !completed {
+        let mut written = false;
+        let mut flushed = false;
+        while start_time.elapsed() < timeout && !flushed {
             std::thread::sleep(std::time::Duration::from_millis(1));
             for (id, success) in ch.poll() {
-                if id == 0 {
+                if id == METADATA_WRITE_ID {
                     if !success {
                         error!("Failed to write metadata");
                         return Err(VhostUserBlockError::IoError {
@@ -118,9 +120,35 @@ impl UbiMetadata {
                                 "Failed to write metadata",
                             ),
                         });
+                    } else if written {
+                        error!("Write ID received multiple times");
+                        return Err(VhostUserBlockError::IoError {
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "Write ID received multiple times",
+                            ),
+                        });
                     }
 
-                    completed = true;
+                    info!("Metadata written successfully, flushing...");
+
+                    ch.add_flush(METADATA_FLUSH_ID);
+                    ch.submit()?;
+
+                    written = true;
+                    break;
+                } else if id == METADATA_FLUSH_ID {
+                    if !success {
+                        error!("Failed to flush metadata");
+                        return Err(VhostUserBlockError::IoError {
+                            source: std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "Failed to flush metadata",
+                            ),
+                        });
+                    }
+                    flushed = true;
+                    info!("Metadata flushed successfully");
                     break;
                 } else {
                     error!("Unexpected ID: {}", id);
@@ -134,7 +162,7 @@ impl UbiMetadata {
             }
         }
 
-        if !completed {
+        if !written {
             error!("Timeout while writing metadata");
             return Err(VhostUserBlockError::IoError {
                 source: std::io::Error::new(
@@ -143,7 +171,15 @@ impl UbiMetadata {
                 ),
             });
         }
-        info!("Metadata written successfully");
+        if !flushed {
+            error!("Timeout while flushing metadata");
+            return Err(VhostUserBlockError::IoError {
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Timeout while flushing metadata",
+                ),
+            });
+        }
 
         Ok(())
     }
@@ -420,11 +456,11 @@ mod tests {
         let stripe_status_vec = manager.stripe_status_vec();
         assert_eq!(stripe_status_vec.stripe_count, stripe_count as u64);
 
-        assert_eq!(metadata_dev.flushes(), 0);
+        assert_eq!(metadata_dev.flushes(), 1);
         manager.start_flush().unwrap();
         assert_eq!(manager.poll_flush(), None);
         assert_eq!(manager.poll_flush(), Some(true));
-        assert_eq!(metadata_dev.flushes(), 1);
+        assert_eq!(metadata_dev.flushes(), 2);
 
         for i in 0..UBI_MAX_STRIPES {
             let offset = manager.metadata.stripe_headers_offset(i);

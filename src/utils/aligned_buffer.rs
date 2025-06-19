@@ -12,6 +12,7 @@ pub struct AlignedBuf {
     vec: Vec<u8>,
     offset: usize,
     len: usize,
+    alignment: usize,
 }
 
 impl AlignedBuf {
@@ -22,15 +23,21 @@ impl AlignedBuf {
 
     /// Create a new zeroed buffer with a specific alignment.
     pub fn new_with_alignment(len: usize, align: usize) -> Self {
-        let align = if align & (align - 1) != 0 {
-            panic!("Alignment must be a power of two, got: {}", align);
-        } else {
+        assert!(
+            align != 0 && align.is_power_of_two(),
+            "Alignment must be non-zero and a power of two, got: {}",
             align
-        };
+        );
+        let alignment = align;
         let vec = vec![0u8; len + align];
         let ptr = vec.as_ptr() as usize;
         let offset = (align - (ptr % align)) % align;
-        AlignedBuf { vec, offset, len }
+        AlignedBuf {
+            vec,
+            offset,
+            len,
+            alignment,
+        }
     }
 
     pub fn as_ptr(&self) -> *const u8 {
@@ -56,7 +63,7 @@ impl AlignedBuf {
 
 impl Clone for AlignedBuf {
     fn clone(&self) -> Self {
-        let mut new = AlignedBuf::new_with_alignment(self.len, BUFFER_ALIGNMENT);
+        let mut new = AlignedBuf::new_with_alignment(self.len, self.alignment);
         new.as_mut_slice().copy_from_slice(self.as_slice());
         new
     }
@@ -89,8 +96,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Alignment must be a power of two")]
+    #[should_panic(expected = "Alignment must be non-zero and a power of two")]
     fn test_invalid_alignment() {
         let _ = AlignedBuf::new_with_alignment(1024, 3000);
+    }
+
+    #[test]
+    #[should_panic(expected = "Alignment must be non-zero and a power of two")]
+    fn test_zero_alignment() {
+        let _ = AlignedBuf::new_with_alignment(1024, 0);
+    }
+
+    #[test]
+    fn test_clone_preserves_alignment() {
+        let len = 1024;
+        let buf = AlignedBuf::new_with_alignment(len, 8192);
+        let mut cloned = buf.clone();
+        assert_eq!(cloned.len(), len);
+        assert_eq!(cloned.as_ptr() as usize % 8192, 0);
+        assert_eq!(cloned.as_mut_ptr() as usize % 8192, 0);
     }
 }

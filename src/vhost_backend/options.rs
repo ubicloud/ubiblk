@@ -69,7 +69,7 @@ fn default_copy_on_read() -> bool {
 }
 
 fn default_direct_io() -> bool {
-    false
+    true
 }
 
 fn default_device_id() -> String {
@@ -210,14 +210,14 @@ mod tests {
     }
 
     #[test]
-    fn test_default_copy_on_read() {
+    fn test_default_values() {
         let yaml = r#"
         path: "/path/to/image"
         socket: "/path/to/socket"
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert!(!options.copy_on_read);
-        assert!(!options.direct_io);
+        assert!(options.direct_io);
         assert_eq!(options.device_id, "ubiblk".to_string());
     }
 

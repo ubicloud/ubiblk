@@ -48,6 +48,9 @@ jobs:
       - name: Add musl target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
 

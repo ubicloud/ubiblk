@@ -171,7 +171,8 @@ impl Request {
 mod tests {
     use super::*;
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
-    use virtio_queue::{Descriptor as SplitDescriptor, Queue, QueueOwnedT};
+    use virtio_queue::desc::split::Descriptor as SplitDescriptor;
+    use virtio_queue::{Queue, QueueOwnedT};
     use vm_memory::{Address, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 
     type GuestMemory = GuestMemoryMmap<()>;
@@ -184,12 +185,15 @@ mod tests {
 
     fn build_chain(
         mem: &GuestMemory,
-        descs: &[virtio_queue::Descriptor],
+        descs: &[SplitDescriptor],
     ) -> DescriptorChain<GuestMemoryLoadGuard<GuestMemory>> {
+        use virtio_queue::desc::RawDescriptor;
         use virtio_queue::mock::MockSplitQueue;
 
         let vq = MockSplitQueue::new(mem, 16);
-        vq.add_desc_chains(descs, 0).unwrap();
+        let raw_descs: Vec<RawDescriptor> =
+            descs.iter().cloned().map(RawDescriptor::from).collect();
+        vq.add_desc_chains(&raw_descs, 0).unwrap();
         let mut queue: Queue = vq.create_queue().unwrap();
         let atomic = GuestMemoryAtomic::new(mem.clone());
         let mut iter = queue.iter(atomic.memory()).unwrap();

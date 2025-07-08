@@ -117,7 +117,7 @@ impl IoChannel for UringIoChannel {
                     let id = entry.user_data();
                     if result < 0 {
                         finished_requests.push((id as usize, false));
-                        error!("IO request failed: {}", Errno::from_i32(-result));
+                        error!("IO request failed: {}", Errno::from_raw(-result));
                     } else {
                         finished_requests.push((id as usize, true));
                     }

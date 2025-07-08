@@ -216,7 +216,9 @@ fn get_config(frontend: &mut Frontend) -> Result<VirtioBlockConfig, Box<dyn std:
 
     // deserialize data
     let output_buf: &[u8] = data.as_ref();
-    let cfg: VirtioBlockConfig = bincode::deserialize(output_buf).unwrap();
+    let (cfg, _): (VirtioBlockConfig, usize) =
+        bincode::serde::decode_from_slice(output_buf, bincode::config::standard())
+            .map_err(|e| format!("Failed to deserialize block config: {}", e))?;
     Ok(cfg)
 }
 

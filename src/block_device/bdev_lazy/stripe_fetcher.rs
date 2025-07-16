@@ -7,7 +7,7 @@ use super::super::*;
 use super::stripe_metadata_manager::StartFlushResult;
 pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
 use crate::utils::aligned_buffer::AlignedBuf;
-use crate::{Result, VhostUserBlockError};
+use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error, info};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -24,7 +24,6 @@ pub enum StripeFetcherResponse {
 }
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
-const STRIPE_SIZE: usize = 1024 * 1024; // 1MB
 
 pub type SharedStripeFetcher = Arc<Mutex<StripeFetcher>>;
 
@@ -63,11 +62,20 @@ impl StripeFetcher {
         let fetch_source_channel = source_dev.create_channel()?;
         let fetch_target_channel = target_dev.create_channel()?;
         let metadata_manager = StripeMetadataManager::new(metadata_dev, source_dev.sector_count())?;
+
+        let stripe_sector_count = metadata_manager.stripe_sector_count();
+        if stripe_sector_count > (usize::MAX as u64 / SECTOR_SIZE as u64) {
+            return Err(VhostUserBlockError::InvalidParameter {
+                description: "stripe size exceeds addressable memory".into(),
+            });
+        }
+        let stripe_size = stripe_sector_count as usize * SECTOR_SIZE;
+
         let fetch_buffers = (0..MAX_CONCURRENT_FETCHES)
             .map(|_| FetchBuffer {
                 used_for: None,
                 buf: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
-                    STRIPE_SIZE,
+                    stripe_size,
                     alignment,
                 ))),
             })
@@ -349,7 +357,7 @@ mod tests {
         let target_dev = TestBlockDevice::new(29 * 1024 * 1024 + 3 * 1024);
         let metadata_dev = TestBlockDevice::new(8 * 1024 * 1024);
 
-        let stripe_sector_count_shift = 11;
+        let stripe_sector_count_shift = 12;
         let mut ch = metadata_dev
             .create_channel()
             .expect("Failed to create channel");

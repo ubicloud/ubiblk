@@ -1,5 +1,5 @@
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
     // Link to the static version of isa-l_crypto
@@ -8,6 +8,9 @@ fn main() {
 
     // The header file for ISA-L Crypto
     let header = "/usr/include/isa-l_crypto.h";
+    if !Path::new(header).exists() {
+        panic!("ISA-L Crypto header not found at {}", header);
+    }
 
     // Generate Rust bindings
     let bindings = bindgen::Builder::default()

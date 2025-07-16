@@ -7,7 +7,7 @@ use super::super::*;
 use super::stripe_metadata_manager::StartFlushResult;
 pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
 use crate::utils::aligned_buffer::AlignedBuf;
-use crate::{Result, VhostUserBlockError};
+use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error, info};
 use vmm_sys_util::eventfd::EventFd;
 
@@ -24,7 +24,6 @@ pub enum StripeFetcherResponse {
 }
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
-const STRIPE_SIZE: usize = 1024 * 1024; // 1MB
 
 pub type SharedStripeFetcher = Arc<Mutex<StripeFetcher>>;
 
@@ -63,11 +62,21 @@ impl StripeFetcher {
         let fetch_source_channel = source_dev.create_channel()?;
         let fetch_target_channel = target_dev.create_channel()?;
         let metadata_manager = StripeMetadataManager::new(metadata_dev, source_dev.sector_count())?;
+
+        let stripe_size_u64 = metadata_manager
+            .stripe_sector_count()
+            .checked_mul(SECTOR_SIZE as u64)
+            .ok_or_else(|| VhostUserBlockError::InvalidParameter {
+                description: "stripe size too large".to_string(),
+            })?;
+
+        let stripe_size = stripe_size_u64 as usize;
+
         let fetch_buffers = (0..MAX_CONCURRENT_FETCHES)
             .map(|_| FetchBuffer {
                 used_for: None,
                 buf: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
-                    STRIPE_SIZE,
+                    stripe_size,
                     alignment,
                 ))),
             })
@@ -345,11 +354,12 @@ mod tests {
 
     #[test]
     fn test_stripe_fetcher() {
-        let source_dev = TestBlockDevice::new(29 * 1024 * 1024 + 3 * 1024);
-        let target_dev = TestBlockDevice::new(29 * 1024 * 1024 + 3 * 1024);
+        let stripe_sector_count_shift = 12;
+        let stripe_size = (1u64 << stripe_sector_count_shift) * SECTOR_SIZE as u64;
+        let source_dev = TestBlockDevice::new(29 * stripe_size + 3 * 1024);
+        let target_dev = TestBlockDevice::new(29 * stripe_size + 3 * 1024);
         let metadata_dev = TestBlockDevice::new(8 * 1024 * 1024);
 
-        let stripe_sector_count_shift = 11;
         let mut ch = metadata_dev
             .create_channel()
             .expect("Failed to create channel");

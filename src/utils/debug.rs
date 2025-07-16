@@ -44,8 +44,7 @@ pub fn encode_hex(data: &[u8], len: usize) -> String {
     data[..len.min(data.len())]
         .iter()
         .map(|byte| format!("{:02x}", byte))
-        .collect::<Vec<String>>()
-        .join("")
+        .collect::<String>()
 }
 
 pub fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {

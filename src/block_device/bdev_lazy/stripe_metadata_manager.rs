@@ -213,7 +213,7 @@ impl StripeMetadataManager {
     pub fn new(metadata_dev: &dyn BlockDevice, source_sector_count: u64) -> Result<Box<Self>> {
         let mut channel = metadata_dev.create_channel()?;
         let metadata = Self::load_metadata(&mut channel)?;
-        let stripe_status_vec = Self::create_stripe_status_vec(&metadata, source_sector_count);
+        let stripe_status_vec = Self::create_stripe_status_vec(&metadata, source_sector_count)?;
         let metadata_size = std::mem::size_of::<UbiMetadata>();
         let metadata_buf_size = ((metadata_size + SECTOR_SIZE - 1) / SECTOR_SIZE) * SECTOR_SIZE;
         Ok(Box::new(StripeMetadataManager {
@@ -404,7 +404,7 @@ impl StripeMetadataManager {
     fn create_stripe_status_vec(
         metadata: &Box<UbiMetadata>,
         source_sector_count: u64,
-    ) -> StripeStatusVec {
+    ) -> Result<StripeStatusVec> {
         let v = metadata
             .stripe_headers
             .iter()
@@ -419,12 +419,18 @@ impl StripeMetadataManager {
         let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
         let stripe_count = (source_sector_count + stripe_sector_count - 1) / stripe_sector_count;
 
-        StripeStatusVec {
+        if stripe_count as usize > UBI_MAX_STRIPES {
+            return Err(VhostUserBlockError::InvalidParameter {
+                description: "source sector count exceeds maximum stripe count".to_string(),
+            });
+        }
+
+        Ok(StripeStatusVec {
             data: v,
             stripe_sector_count,
             source_sector_count,
             stripe_count,
-        }
+        })
     }
 }
 
@@ -544,6 +550,27 @@ mod tests {
 
         manager.start_flush().unwrap();
         assert_eq!(manager.poll_flush(), Some(false));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_stripe_count_overflow() -> Result<()> {
+        let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
+        let stripe_sector_count_shift = 0u8;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+        let source_sector_count = (UBI_MAX_STRIPES as u64 + 1) * stripe_sector_count;
+
+        let mut ch = metadata_dev.create_channel()?;
+        UbiMetadata::new(stripe_sector_count_shift)
+            .write(&mut ch)
+            .unwrap();
+
+        let result = StripeMetadataManager::new(&metadata_dev, source_sector_count);
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::InvalidParameter { .. })
+        ));
 
         Ok(())
     }

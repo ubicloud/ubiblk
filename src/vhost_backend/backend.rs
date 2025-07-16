@@ -183,7 +183,10 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
     fn set_event_idx(&self, enabled: bool) {
         info!("set_event_idx: {}", enabled);
         for thread in self.threads.iter() {
-            thread.lock().unwrap().event_idx = enabled;
+            match thread.lock() {
+                Ok(mut guard) => guard.event_idx = enabled,
+                Err(_) => error!("Failed to lock backend thread"),
+            }
         }
     }
 
@@ -205,7 +208,9 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
             ));
         }
 
-        let mut thread = self.threads[thread_id].lock().unwrap();
+        let mut thread = self.threads[thread_id].lock().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::Other, "Failed to lock backend thread")
+        })?;
         match device_event {
             0 => {
                 let mut vring = vrings[0].get_mut();
@@ -230,7 +235,12 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
                         vring
                             .get_queue_mut()
                             .enable_notification(self.mem.memory().deref())
-                            .unwrap();
+                            .map_err(|e| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    format!("enable_notification failed: {:?}", e),
+                                )
+                            })?;
                         if !thread.process_queue(&mut vring) {
                             break;
                         }
@@ -254,14 +264,10 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
     }
 
     fn exit_event(&self, thread_index: usize) -> Option<EventFd> {
-        Some(
-            self.threads[thread_index]
-                .lock()
-                .unwrap()
-                .kill_evt
-                .try_clone()
-                .unwrap(),
-        )
+        match self.threads[thread_index].lock() {
+            Ok(thread) => thread.kill_evt.try_clone().ok(),
+            Err(_) => None,
+        }
     }
 
     fn queues_per_thread(&self) -> Vec<u64> {
@@ -323,7 +329,11 @@ pub fn start_block_backend(
                         .to_string(),
                 }));
             }
-            let metadata_path = options.metadata_path.as_ref().unwrap();
+            let metadata_path = options.metadata_path.as_ref().ok_or_else(|| {
+                Box::new(VhostUserBlockError::InvalidParameter {
+                    description: "metadata_path is required".to_string(),
+                }) as Box<dyn std::error::Error>
+            })?;
             let metadata_dev = build_block_device(&metadata_path, options, kek)?;
             let readonly = true;
             let image_bdev =
@@ -374,7 +384,11 @@ pub fn start_block_backend(
             let handle = std::thread::Builder::new()
                 .name("stripe-fetcher".to_string())
                 .spawn(move || {
-                    stripe_fetcher_clone.lock().unwrap().run();
+                    if let Ok(mut fetcher) = stripe_fetcher_clone.lock() {
+                        fetcher.run();
+                    } else {
+                        error!("Failed to lock stripe fetcher");
+                    }
                 })?;
             Some(handle)
         }
@@ -401,8 +415,13 @@ pub fn start_block_backend(
     info!("Finished serving socket!");
 
     for thread in backend.threads.iter() {
-        if let Err(e) = thread.lock().unwrap().kill_evt.write(1) {
-            error!("Error shutting down worker thread: {:?}", e)
+        match thread.lock() {
+            Ok(thread_guard) => {
+                if let Err(e) = thread_guard.kill_evt.write(1) {
+                    error!("Error shutting down worker thread: {:?}", e)
+                }
+            }
+            Err(_) => error!("Failed to lock backend thread for shutdown"),
         }
     }
 
@@ -414,7 +433,9 @@ pub fn start_block_backend(
             error!("Error shutting down stripe fetcher thread: {:?}", e);
         }
         info!("Waiting for stripe fetcher thread to join ...");
-        handle.join().unwrap();
+        handle.join().map_err(|_| {
+            Box::new(VhostUserBlockError::BackendThreadFailure) as Box<dyn std::error::Error>
+        })?;
         info!("Stripe fetcher thread joined");
     } else {
         info!("No stripe fetcher thread to join");

@@ -165,6 +165,12 @@ impl UringBlockDevice {
         readonly: bool,
         direct_io: bool,
     ) -> Result<Box<Self>> {
+        if !queue_size.is_power_of_two() {
+            error!("Invalid queue size: {}", queue_size);
+            return Err(VhostUserBlockError::InvalidParameter {
+                description: "queue_size must be a positive power of two".to_string(),
+            });
+        }
         match std::fs::metadata(&path) {
             Ok(metadata) => {
                 let size = metadata.len();
@@ -304,6 +310,38 @@ mod tests {
         path.push("ubiblk_nonexistent_file");
         let result = UringBlockDevice::new(path, 8, false, false);
         assert!(result.is_err());
+        Ok(())
+    }
+
+    // Providing a queue size that is not a positive power of two should fail.
+    #[test]
+    fn new_invalid_queue_size_fails() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let path = tmpfile.path().to_owned();
+        let result = UringBlockDevice::new(path, 3, false, false);
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::InvalidParameter { .. })
+        ));
+        Ok(())
+    }
+
+    // Queue size zero should also be rejected.
+    #[test]
+    fn new_zero_queue_size_fails() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {}", e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let path = tmpfile.path().to_owned();
+        let result = UringBlockDevice::new(path, 0, false, false);
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::InvalidParameter { .. })
+        ));
         Ok(())
     }
 

@@ -1,4 +1,7 @@
-use std::{cell::RefCell, mem::MaybeUninit, ptr::copy_nonoverlapping, rc::Rc};
+use roaring::RoaringBitmap;
+use std::{
+    cell::RefCell, collections::HashSet, mem::MaybeUninit, ptr::copy_nonoverlapping, rc::Rc,
+};
 
 use super::super::*;
 use crate::utils::aligned_buffer::AlignedBuf;
@@ -23,7 +26,9 @@ const METADATA_FLUSH_ID: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct StripeStatusVec {
-    pub data: Vec<StripeStatus>,
+    pub fetched: RoaringBitmap,
+    pub queued: HashSet<u32>,
+    pub fetching: HashSet<u32>,
     pub stripe_sector_count: u64,
     pub source_sector_count: u64,
     pub stripe_count: u64,
@@ -36,15 +41,44 @@ impl StripeStatusVec {
     }
 
     pub fn stripe_status(&self, stripe_id: usize) -> StripeStatus {
-        if (stripe_id as u64) < self.stripe_count {
-            self.data[stripe_id]
-        } else {
+        if (stripe_id as u64) >= self.stripe_count {
+            return StripeStatus::Fetched;
+        }
+
+        let sid = stripe_id as u32;
+        if self.fetched.contains(sid) {
             StripeStatus::Fetched
+        } else if self.fetching.contains(&sid) {
+            StripeStatus::Fetching
+        } else if self.queued.contains(&sid) {
+            StripeStatus::Queued
+        } else {
+            StripeStatus::NotFetched
         }
     }
 
     pub fn set_stripe_status(&mut self, stripe_id: usize, status: StripeStatus) {
-        self.data[stripe_id] = status;
+        let sid = stripe_id as u32;
+        match status {
+            StripeStatus::Fetched => {
+                self.fetched.insert(sid);
+                self.queued.remove(&sid);
+                self.fetching.remove(&sid);
+            }
+            StripeStatus::NotFetched => {
+                self.fetched.remove(sid);
+                self.queued.remove(&sid);
+                self.fetching.remove(&sid);
+            }
+            StripeStatus::Queued => {
+                self.queued.insert(sid);
+                self.fetching.remove(&sid);
+            }
+            StripeStatus::Fetching => {
+                self.fetching.insert(sid);
+                self.queued.remove(&sid);
+            }
+        }
     }
 
     pub fn stripe_sector_count(&self, stripe_id: usize) -> u32 {
@@ -405,22 +439,19 @@ impl StripeMetadataManager {
         metadata: &Box<UbiMetadata>,
         source_sector_count: u64,
     ) -> StripeStatusVec {
-        let v = metadata
-            .stripe_headers
-            .iter()
-            .map(|header| {
-                if *header == 0 {
-                    StripeStatus::NotFetched
-                } else {
-                    StripeStatus::Fetched
-                }
-            })
-            .collect::<Vec<StripeStatus>>();
+        let mut fetched = RoaringBitmap::new();
+        for (i, header) in metadata.stripe_headers.iter().enumerate() {
+            if *header != 0 {
+                fetched.insert(i as u32);
+            }
+        }
         let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
         let stripe_count = (source_sector_count + stripe_sector_count - 1) / stripe_sector_count;
 
         StripeStatusVec {
-            data: v,
+            fetched,
+            queued: HashSet::new(),
+            fetching: HashSet::new(),
             stripe_sector_count,
             source_sector_count,
             stripe_count,

@@ -43,7 +43,7 @@ mod tests {
     /// and that queued writes are committed once the fetch completes.
     #[test]
     fn test_copy_on_read_true() {
-        let stripe_shift = 11u8;
+        let stripe_shift = 12u8;
         let stripe_sectors = 1u64 << stripe_shift;
         let dev_size = stripe_sectors * SECTOR_SIZE as u64 * 4;
 
@@ -103,7 +103,7 @@ mod tests {
     /// disabled and that writes and flushes still operate on the target device.
     #[test]
     fn test_copy_on_read_false() {
-        let stripe_shift = 11u8;
+        let stripe_shift = 12u8;
         let stripe_sectors = 1u64 << stripe_shift;
         let dev_size = stripe_sectors * SECTOR_SIZE as u64 * 4;
 

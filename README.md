@@ -141,12 +141,6 @@ init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \
 
 ## Developer Tools
 
-#### vhost-frontend
-
-A small command-line tool that can connect to a vhost-user-blk backend and run
-through the different frontend stages.  See
-[docs/vhost-frontend.md](docs/vhost-frontend.md) for full documentation.
-
 #### replay-log
 
 `replay-log` replays READ and WRITE operations stored in an I/O debug log onto a

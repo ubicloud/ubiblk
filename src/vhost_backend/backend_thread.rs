@@ -407,21 +407,25 @@ impl UbiBlkBackendThread {
         self.poll_io(vring);
         busy = busy || self.io_channel.busy();
 
-        let mut needs_signalling = false;
-        if self.event_idx {
-            if vring
+        let needs_signalling = if self.event_idx {
+            match vring
                 .get_queue_mut()
                 .needs_notification(self.mem.memory().deref())
-                .unwrap()
             {
-                needs_signalling = true;
+                Ok(need) => need,
+                Err(e) => {
+                    error!("needs_notification failed: {:?}", e);
+                    true
+                }
             }
         } else {
-            needs_signalling = true;
-        }
+            true
+        };
 
         if needs_signalling {
-            vring.signal_used_queue().unwrap();
+            if let Err(e) = vring.signal_used_queue() {
+                error!("failed to signal used queue: {:?}", e);
+            }
         }
 
         busy

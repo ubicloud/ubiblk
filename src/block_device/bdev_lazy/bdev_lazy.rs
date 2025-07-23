@@ -190,16 +190,14 @@ impl IoChannel for LazyIoChannel {
             self.base.add_read(sector_offset, sector_count, buf, id);
         } else if let Some(image_channel) = &mut self.image {
             image_channel.add_read(sector_offset, sector_count, buf, id);
+        } else if let Err(e) = self.start_stripe_fetches(&request) {
+            error!(
+                "Failed to send fetch request for stripe range {}-{}: {}",
+                request.stripe_id_first, request.stripe_id_last, e
+            );
+            self.finished_requests.push((id, false));
         } else {
-            if let Err(e) = self.start_stripe_fetches(&request) {
-                error!(
-                    "Failed to send fetch request for stripe range {}-{}: {}",
-                    request.stripe_id_first, request.stripe_id_last, e
-                );
-                self.finished_requests.push((id, false));
-            } else {
-                self.queued_rw_requests.borrow_mut().push_back(request);
-            }
+            self.queued_rw_requests.borrow_mut().push_back(request);
         }
     }
 
@@ -218,16 +216,14 @@ impl IoChannel for LazyIoChannel {
         if fetched {
             self.base
                 .add_write(sector_offset, sector_count, buf.clone(), id);
+        } else if let Err(e) = self.start_stripe_fetches(&request) {
+            error!(
+                "Failed to send fetch request for stripe range {}-{}: {}",
+                request.stripe_id_first, request.stripe_id_last, e
+            );
+            self.finished_requests.push((id, false));
         } else {
-            if let Err(e) = self.start_stripe_fetches(&request) {
-                error!(
-                    "Failed to send fetch request for stripe range {}-{}: {}",
-                    request.stripe_id_first, request.stripe_id_last, e
-                );
-                self.finished_requests.push((id, false));
-            } else {
-                self.queued_rw_requests.borrow_mut().push_back(request);
-            }
+            self.queued_rw_requests.borrow_mut().push_back(request);
         }
     }
 
@@ -274,8 +270,8 @@ impl IoChannel for LazyIoChannel {
         };
         self.base.busy()
             || image_busy
-            || self.queued_rw_requests.borrow().len() > 0
-            || self.flush_requests.len() > 0
+            || !self.queued_rw_requests.borrow().is_empty()
+            || !self.flush_requests.is_empty()
     }
 }
 

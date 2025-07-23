@@ -85,7 +85,7 @@ impl StripeFetcher {
             metadata_manager,
             fetch_queue: VecDeque::new(),
             req_mpsc_pairs: vec![],
-            fetch_buffers: fetch_buffers,
+            fetch_buffers,
             stripes_fetched: 0,
             pending_flush_requests: vec![],
             inprogress_flush_requests: vec![],
@@ -186,7 +186,7 @@ impl StripeFetcher {
             .min(self.target_sector_count - stripe_sector_offset);
 
         self.fetch_target_channel.add_write(
-            stripe_sector_offset as u64,
+            stripe_sector_offset,
             stripe_sector_count as u32,
             buf,
             buffer_idx,
@@ -295,7 +295,7 @@ impl StripeFetcher {
             self.finish_flush(success);
         }
 
-        if self.pending_flush_requests.len() > 0 && self.inprogress_flush_requests.is_empty() {
+        if !self.pending_flush_requests.is_empty() && self.inprogress_flush_requests.is_empty() {
             self.inprogress_flush_requests = self.pending_flush_requests.clone();
             self.pending_flush_requests.clear();
 

@@ -65,8 +65,7 @@ impl CryptIoChannel {
         for i in 0..sector_count as usize {
             let sector = sector_start + i as u64;
             let mut tweak = self.get_initial_tweak(sector);
-            let sector_data =
-                &mut buf[(i * SECTOR_SIZE) as usize..((i + 1) * SECTOR_SIZE) as usize];
+            let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
             unsafe {
                 XTS_AES_256_dec(
                     self.key2.as_mut_ptr(),
@@ -84,8 +83,7 @@ impl CryptIoChannel {
         for i in 0..sector_count as usize {
             let sector = sector_start + i as u64;
             let mut tweak = self.get_initial_tweak(sector);
-            let sector_data =
-                &mut buf[((i * SECTOR_SIZE) as usize)..((i + 1) * SECTOR_SIZE) as usize];
+            let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
             unsafe {
                 XTS_AES_256_enc(
                     self.key2.as_mut_ptr(),
@@ -165,7 +163,7 @@ pub struct CryptBlockDevice {
 impl BlockDevice for CryptBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
         let base_channel = self.base.create_channel()?;
-        let crypt_channel = CryptIoChannel::new(base_channel, self.key1.clone(), self.key2.clone());
+        let crypt_channel = CryptIoChannel::new(base_channel, self.key1, self.key2);
         Ok(Box::new(crypt_channel))
     }
 
@@ -182,11 +180,7 @@ impl CryptBlockDevice {
         kek: KeyEncryptionCipher,
     ) -> Result<Box<Self>> {
         let (key1, key2) = decrypt_keys(key1, key2, kek)?;
-        Ok(Box::new(CryptBlockDevice {
-            base,
-            key1: key1,
-            key2: key2,
-        }))
+        Ok(Box::new(CryptBlockDevice { base, key1, key2 }))
     }
 }
 

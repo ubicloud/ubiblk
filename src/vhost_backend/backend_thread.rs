@@ -85,6 +85,7 @@ impl UbiBlkBackendThread {
                 let file = fs::OpenOptions::new()
                     .write(true)
                     .create(true)
+                    .truncate(true)
                     .open(path)
                     .map_err(|e| {
                         error!("failed to open io debug file: {:?}", e);
@@ -160,7 +161,6 @@ impl UbiBlkBackendThread {
             .add_used(mem, desc_chain.head_index(), 0);
         if let Err(e) = ret {
             error!("failed to add used descriptor: {:?}", e);
-            return;
         }
     }
 
@@ -186,7 +186,7 @@ impl UbiBlkBackendThread {
     fn poll_io(&mut self, vring: &mut Vring<'_>) {
         let mut finished_reads = vec![];
         for (request_id, success) in self.io_channel.poll() {
-            let req = &self.request_slots[request_id as usize];
+            let req = &self.request_slots[request_id];
             let desc_chain = req.desc_chain.clone().unwrap();
             let mut write_to_guest_failed = false;
             if req.request_type == RequestType::In && success {
@@ -201,12 +201,12 @@ impl UbiBlkBackendThread {
                 VIRTIO_BLK_S_IOERR
             } as u8;
             self.complete_io(vring, &desc_chain, req.status_addr, status);
-            self.put_request_slot(request_id as usize);
+            self.put_request_slot(request_id);
         }
 
-        self.io_debug_file.as_mut().map(|file| {
+        if let Some(file) = self.io_debug_file.as_mut() {
             for request_id in finished_reads {
-                let req = &self.request_slots[request_id as usize];
+                let req = &self.request_slots[request_id];
                 let borrow = req.buffer.borrow();
                 let buf = borrow.as_slice();
                 file.write_fmt(format_args!(
@@ -222,7 +222,7 @@ impl UbiBlkBackendThread {
                     error!("failed to flush io debug file: {:?}", e);
                 });
             }
-        });
+        }
     }
 
     fn request_len(&self, request: &Request) -> usize {
@@ -303,7 +303,7 @@ impl UbiBlkBackendThread {
             return;
         }
 
-        self.io_debug_file.as_mut().map(|file| {
+        if let Some(file) = self.io_debug_file.as_mut() {
             let borrow = self.request_slots[id].buffer.borrow();
             let buf = borrow.as_slice();
             file.write_fmt(format_args!(
@@ -318,7 +318,7 @@ impl UbiBlkBackendThread {
             file.flush().unwrap_or_else(|e| {
                 error!("failed to flush io debug file: {:?}", e);
             });
-        });
+        }
 
         let sector_count = (len / SECTOR_SIZE) as u32;
 

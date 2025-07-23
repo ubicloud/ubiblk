@@ -31,8 +31,7 @@ pub struct StripeStatusVec {
 
 impl StripeStatusVec {
     pub fn sector_to_stripe_id(&self, sector: u64) -> usize {
-        let stripe_id = (sector / self.stripe_sector_count) as usize;
-        stripe_id
+        (sector / self.stripe_sector_count) as usize
     }
 
     pub fn stripe_status(&self, stripe_id: usize) -> StripeStatus {
@@ -93,11 +92,11 @@ impl UbiMetadata {
 
     pub fn write(&self, ch: &mut Box<dyn IoChannel>) -> Result<()> {
         let metadata_size = std::mem::size_of::<UbiMetadata>();
-        let sectors = (metadata_size + SECTOR_SIZE - 1) / SECTOR_SIZE;
+        let sectors = metadata_size.div_ceil(SECTOR_SIZE);
         let buf = Rc::new(RefCell::new(AlignedBuf::new(sectors * SECTOR_SIZE)));
 
         unsafe {
-            let src = &*self as *const UbiMetadata as *const u8;
+            let src = self as *const UbiMetadata as *const u8;
             let dst = buf.borrow_mut().as_mut_ptr();
             copy_nonoverlapping(src, dst, metadata_size);
         }

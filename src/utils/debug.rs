@@ -41,20 +41,11 @@ pub fn hexdump(data: &[u8], len: usize) -> String {
 }
 
 pub fn encode_hex(data: &[u8], len: usize) -> String {
-    data[..len.min(data.len())]
-        .iter()
-        .map(|byte| format!("{:02x}", byte))
-        .collect::<String>()
+    hex::encode(&data[..len.min(data.len())])
 }
 
 pub fn decode_hex(hex: &str) -> Result<Vec<u8>, String> {
-    if hex.len() % 2 != 0 {
-        return Err("Hex string must be even length".into());
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| e.to_string()))
-        .collect()
+    hex::decode(hex).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

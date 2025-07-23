@@ -61,7 +61,7 @@ impl IoChannel for UringIoChannel {
             .build()
             .user_data(id as u64);
         let push_result = unsafe { self.ring.submission().push(&read_e) };
-        if let Err(_) = push_result {
+        if push_result.is_err() {
             self.finished_requests.push((id, false));
             return;
         }
@@ -78,7 +78,7 @@ impl IoChannel for UringIoChannel {
                 .build()
                 .user_data(id as u64);
         let push_result = unsafe { self.ring.submission().push(&write_e) };
-        if let Err(_) = push_result {
+        if push_result.is_err() {
             self.finished_requests.push((id, false));
             return;
         }
@@ -91,7 +91,7 @@ impl IoChannel for UringIoChannel {
             .build()
             .user_data(id as u64);
         let push_result = unsafe { self.ring.submission().push(&flush_e) };
-        if let Err(_) = push_result {
+        if push_result.is_err() {
             self.finished_requests.push((id, false));
             return;
         }

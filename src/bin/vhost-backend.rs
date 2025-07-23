@@ -57,12 +57,7 @@ fn main() {
         process::exit(1);
     }
 
-    let mut kek = KeyEncryptionCipher {
-        method: CipherMethod::None,
-        key: None,
-        init_vector: None,
-        auth_data: None,
-    };
+    let mut kek = KeyEncryptionCipher::default();
 
     if let Some(kek_path) = cmd_arguments.get_one::<String>("kek") {
         let file = match File::open(kek_path) {

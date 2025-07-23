@@ -62,12 +62,7 @@ fn main() {
         }
     };
 
-    let mut kek = KeyEncryptionCipher {
-        method: CipherMethod::None,
-        key: None,
-        init_vector: None,
-        auth_data: None,
-    };
+    let mut kek = KeyEncryptionCipher::default();
 
     let stripe_sector_count_shift = cmd_arguments
         .get_one::<u8>("stripe-sector-count-shift")

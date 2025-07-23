@@ -3,8 +3,8 @@ mod tests {
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
     use crate::vhost_backend::{
-        init_metadata, start_block_backend, CipherMethod, KeyEncryptionCipher, Options,
-        UbiBlkBackend, SECTOR_SIZE,
+        init_metadata, start_block_backend, KeyEncryptionCipher, Options, UbiBlkBackend,
+        SECTOR_SIZE,
     };
     use crate::VhostUserBlockError;
     use tempfile::NamedTempFile;
@@ -106,15 +106,7 @@ mod tests {
         tmp.as_file().set_len(SECTOR_SIZE as u64 * 8).unwrap();
         let mut opts = default_options(tmp.path().to_string_lossy().to_string());
         opts.image_path = Some("img2".to_string());
-        let res = start_block_backend(
-            &opts,
-            KeyEncryptionCipher {
-                method: CipherMethod::None,
-                key: None,
-                init_vector: None,
-                auth_data: None,
-            },
-        );
+        let res = start_block_backend(&opts, KeyEncryptionCipher::default());
         assert!(res.is_err());
     }
 
@@ -122,16 +114,7 @@ mod tests {
     #[test]
     fn init_metadata_missing_path() {
         let opts = default_options("img".to_string());
-        let res = init_metadata(
-            &opts,
-            KeyEncryptionCipher {
-                method: CipherMethod::None,
-                key: None,
-                init_vector: None,
-                auth_data: None,
-            },
-            4,
-        );
+        let res = init_metadata(&opts, KeyEncryptionCipher::default(), 4);
         assert!(res.is_err());
     }
 }

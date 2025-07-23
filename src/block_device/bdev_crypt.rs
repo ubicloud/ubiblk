@@ -297,12 +297,7 @@ mod tests {
 
     #[test]
     fn test_crypt_block_device() {
-        let kek = KeyEncryptionCipher {
-            method: CipherMethod::None,
-            key: None,
-            init_vector: None,
-            auth_data: None,
-        };
+        let kek = KeyEncryptionCipher::default();
         let base = TestBlockDevice::new(1024 * 1024);
         let metrics = base.metrics.clone();
         let mem = base.mem.clone();
@@ -386,12 +381,7 @@ mod tests {
 
     #[test]
     fn test_invalid_key_length() {
-        let kek = KeyEncryptionCipher {
-            method: CipherMethod::None,
-            key: None,
-            init_vector: None,
-            auth_data: None,
-        };
+        let kek = KeyEncryptionCipher::default();
         let base = TestBlockDevice::new(1024 * 1024);
         let key1 = [
             1, 35, 69, 103, 137, 171, 205, 239, 1, 35, 69, 103, 137, 171, 205, 239, 1, 35, 69, 103,
@@ -475,9 +465,7 @@ mod tests {
     fn test_missing_kek_parameters() {
         let kek = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
-            key: None,
-            init_vector: None,
-            auth_data: None,
+            ..Default::default()
         };
         let base = TestBlockDevice::new(1024 * 1024);
         let key1 = vec![0u8; 32];
@@ -544,12 +532,7 @@ mod tests {
             Box::new(base),
             vec![0u8; 32],
             vec![0u8; 32],
-            KeyEncryptionCipher {
-                method: CipherMethod::None,
-                key: None,
-                init_vector: None,
-                auth_data: None,
-            },
+            KeyEncryptionCipher::default(),
         )
         .unwrap();
 

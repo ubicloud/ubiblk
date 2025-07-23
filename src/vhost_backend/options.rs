@@ -40,6 +40,17 @@ pub struct KeyEncryptionCipher {
     pub auth_data: Option<Vec<u8>>,
 }
 
+impl Default for KeyEncryptionCipher {
+    fn default() -> Self {
+        Self {
+            method: CipherMethod::None,
+            key: None,
+            init_vector: None,
+            auth_data: None,
+        }
+    }
+}
+
 fn default_poll_queue_timeout_us() -> u128 {
     1000
 }

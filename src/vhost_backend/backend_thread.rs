@@ -190,7 +190,7 @@ impl UbiBlkBackendThread {
             let desc_chain = req.desc_chain.clone().unwrap();
             let mut write_to_guest_failed = false;
             if req.request_type == RequestType::In && success {
-                if let Err(_) = self.write_to_guest(req) {
+                if self.write_to_guest(req).is_err() {
                     write_to_guest_failed = true;
                 }
                 finished_reads.push(request_id);

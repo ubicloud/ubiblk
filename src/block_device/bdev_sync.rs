@@ -71,11 +71,11 @@ impl IoChannel for SyncIoChannel {
 
     fn add_flush(&mut self, id: usize) {
         let mut file = self.file.lock().unwrap();
-        if let Err(_) = file.flush() {
+        if file.flush().is_err() {
             self.finished_requests.push((id, false));
             return;
         }
-        if let Err(_) = file.sync_all() {
+        if file.sync_all().is_err() {
             self.finished_requests.push((id, false));
             return;
         }

@@ -109,7 +109,7 @@ impl UbiMetadata {
         let mut flushed = false;
         while start_time.elapsed() < timeout && !flushed {
             std::thread::sleep(std::time::Duration::from_millis(1));
-            for (id, success) in ch.poll() {
+            if let Some((id, success)) = ch.poll().into_iter().next() {
                 if id == METADATA_WRITE_ID {
                     if !success {
                         error!(
@@ -117,18 +117,12 @@ impl UbiMetadata {
                             sectors
                         );
                         return Err(VhostUserBlockError::IoError {
-                            source: std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                "Failed to write metadata",
-                            ),
+                            source: std::io::Error::other("Failed to write metadata"),
                         });
                     } else if written {
                         error!("Write ID received multiple times");
                         return Err(VhostUserBlockError::IoError {
-                            source: std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                "Write ID received multiple times",
-                            ),
+                            source: std::io::Error::other("Write ID received multiple times"),
                         });
                     }
 
@@ -138,27 +132,19 @@ impl UbiMetadata {
                     ch.submit()?;
 
                     written = true;
-                    break;
                 } else if id == METADATA_FLUSH_ID {
                     if !success {
                         error!("Failed to flush metadata");
                         return Err(VhostUserBlockError::IoError {
-                            source: std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                "Failed to flush metadata",
-                            ),
+                            source: std::io::Error::other("Failed to flush metadata"),
                         });
                     }
                     flushed = true;
                     info!("Metadata flushed successfully");
-                    break;
                 } else {
                     error!("Unexpected completion ID: {}, expected 0", id);
                     return Err(VhostUserBlockError::IoError {
-                        source: std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("Unexpected ID: {}", id),
-                        ),
+                        source: std::io::Error::other(format!("Unexpected ID: {}", id)),
                     });
                 }
             }

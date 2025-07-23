@@ -1,4 +1,4 @@
-use clap::{Arg, Command};
+use clap::Parser;
 use log::{error, info};
 use std::{
     fs::{File, OpenOptions},
@@ -10,43 +10,35 @@ fn first_difference<T: PartialEq>(a: &[T], b: &[T]) -> Option<usize> {
     a.iter().zip(b.iter()).position(|(x, y)| x != y)
 }
 
+#[derive(Parser)]
+#[command(name = "replay-log", version, author, about = "Replay a log file.")]
+struct Args {
+    /// Path to the log file
+    #[arg(short, long)]
+    log: String,
+
+    /// Disk path
+    #[arg(short, long)]
+    disk: String,
+}
+
 fn main() {
-    let cmd_arguments = Command::new("replay-log")
-        .version(env!("CARGO_PKG_VERSION"))
-        .author(env!("CARGO_PKG_AUTHORS"))
-        .about("Replay a log file.")
-        .arg(
-            Arg::new("log")
-                .short('l')
-                .long("log")
-                .required(true)
-                .help("Path to the log file."),
-        )
-        .arg(
-            Arg::new("disk")
-                .short('d')
-                .long("disk")
-                .required(true)
-                .help("Disk path."),
-        )
-        .get_matches();
+    let args = Args::parse();
 
     env_logger::init();
 
-    let log_path = cmd_arguments.get_one::<String>("log").unwrap();
-    let disk_path = cmd_arguments.get_one::<String>("disk").unwrap();
-    let log_file = match File::open(log_path) {
+    let log_file = match File::open(&args.log) {
         Ok(file) => file,
         Err(e) => {
-            error!("Error opening log file {}: {}", log_path, e);
+            error!("Error opening log file {}: {}", args.log, e);
             std::process::exit(1);
         }
     };
 
-    let mut disk_file = match OpenOptions::new().read(true).write(true).open(disk_path) {
+    let mut disk_file = match OpenOptions::new().read(true).write(true).open(&args.disk) {
         Ok(file) => file,
         Err(e) => {
-            error!("Error opening disk file {}: {}", disk_path, e);
+            error!("Error opening disk file {}: {}", args.disk, e);
             std::process::exit(1);
         }
     };

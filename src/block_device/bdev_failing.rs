@@ -3,6 +3,7 @@ use crate::block_device::{BlockDevice, IoChannel, SharedBuffer};
 use crate::Result;
 use std::sync::{Arc, Mutex};
 
+#[derive(Default)]
 pub struct FailState {
     fail_next_write: bool,
     fail_next_flush: bool,
@@ -63,10 +64,7 @@ impl FailingBlockDevice {
     pub fn new(size: u64) -> Self {
         FailingBlockDevice {
             inner: TestBlockDevice::new(size),
-            state: Arc::new(Mutex::new(FailState {
-                fail_next_write: false,
-                fail_next_flush: false,
-            })),
+            state: Arc::new(Mutex::new(FailState::default())),
         }
     }
 
@@ -75,8 +73,7 @@ impl FailingBlockDevice {
         state.fail_next_write = true;
     }
 
-    #[allow(dead_code)]
-    fn fail_next_flush(&self) {
+    pub fn fail_next_flush(&self) {
         let mut state = self.state.lock().unwrap();
         state.fail_next_flush = true;
     }

@@ -554,6 +554,32 @@ mod tests {
     }
 
     #[test]
+    fn test_poll_flush_failed_flush() -> Result<()> {
+        let metadata_dev = FailingBlockDevice::new(40 * 1024 * 1024);
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let source_sector_count = 29 * stripe_sector_count + 4;
+
+        {
+            let mut ch = metadata_dev.create_channel()?;
+            UbiMetadata::new(stripe_sector_count_shift)
+                .write(&mut ch)
+                .unwrap();
+        }
+
+        let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
+
+        manager.set_stripe_status(0, StripeStatus::Fetched);
+        metadata_dev.fail_next_flush();
+
+        manager.start_flush().unwrap();
+        assert_eq!(manager.poll_flush(), None);
+        assert_eq!(manager.poll_flush(), Some(false));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_stripe_count_overflow() -> Result<()> {
         let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
         let stripe_sector_count_shift = 0u8;

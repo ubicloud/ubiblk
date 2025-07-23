@@ -333,9 +333,7 @@ impl StripeMetadataManager {
         let mut results = io_channel.poll();
         while io_channel.busy() {
             std::thread::sleep(std::time::Duration::from_millis(1));
-            for result in io_channel.poll() {
-                results.push(result);
-            }
+            results.extend(io_channel.poll());
         }
 
         if results.len() != 1 {

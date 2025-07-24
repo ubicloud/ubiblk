@@ -1,40 +1,40 @@
-pub fn hexdump(data: &[u8], len: usize) -> String {
-    let mut result = String::new();
-    let mut offset = 0;
+use std::fmt::Write;
 
-    while offset < data.len() && offset < len {
-        result.push_str(&format!("{:08x}  ", offset));
+pub fn hexdump(data: &[u8], len: usize) -> String {
+    let len = len.min(data.len());
+    let mut result = String::with_capacity(((len + 15) / 16) * 60);
+
+    for offset in (0..len).step_by(16) {
+        write!(&mut result, "{:08x}  ", offset).unwrap();
 
         let mut hex_part = String::new();
         let mut ascii_part = String::new();
+        let chunk = &data[offset..len.min(offset + 16)];
 
-        for i in 0..16 {
-            let pos = offset + i;
-
-            if pos < data.len() && pos < len {
-                hex_part.push_str(&format!("{:02x} ", data[pos]));
-
-                if data[pos] >= 32 && data[pos] <= 126 {
-                    ascii_part.push(data[pos] as char);
-                } else {
-                    ascii_part.push('.');
-                }
+        for (i, byte) in chunk.iter().enumerate() {
+            write!(&mut hex_part, "{:02x} ", byte).unwrap();
+            ascii_part.push(if byte.is_ascii_graphic() || *byte == b' ' {
+                *byte as char
             } else {
-                hex_part.push_str("   ");
-                ascii_part.push(' ');
-            }
-
+                '.'
+            });
             if i == 7 {
                 hex_part.push(' ');
             }
+        }
+
+        for i in chunk.len()..16 {
+            hex_part.push_str("   ");
+            if i == 7 {
+                hex_part.push(' ');
+            }
+            ascii_part.push(' ');
         }
 
         result.push_str(&hex_part);
         result.push_str(" |");
         result.push_str(&ascii_part);
         result.push_str("|\n");
-
-        offset += 16;
     }
 
     result

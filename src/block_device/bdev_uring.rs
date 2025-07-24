@@ -107,8 +107,7 @@ impl IoChannel for UringIoChannel {
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
-        let mut finished_requests = self.finished_requests.clone();
-        self.finished_requests.clear();
+        let mut finished_requests = std::mem::take(&mut self.finished_requests);
         loop {
             let maybe_entry = { self.ring.completion().next() };
             match maybe_entry {

@@ -34,7 +34,7 @@ struct LazyIoChannel {
     finished_requests: Vec<(usize, bool)>,
     sender: Sender<StripeFetcherRequest>,
     receiver: Receiver<StripeFetcherResponse>,
-    stripe_status_vec: RefCell<StripeStatusVec>,
+    stripe_status_vec: StripeStatusVec,
 }
 
 impl LazyIoChannel {
@@ -53,20 +53,14 @@ impl LazyIoChannel {
             flush_requests: HashSet::new(),
             sender,
             receiver,
-            stripe_status_vec: RefCell::new(stripe_status_vec),
+            stripe_status_vec,
         }
     }
 }
 
 impl LazyIoChannel {
     fn stripe_status(&self, stripe_id: usize) -> StripeStatus {
-        self.stripe_status_vec.borrow().stripe_status(stripe_id)
-    }
-
-    fn set_stripe_status(&self, stripe_id: usize, status: StripeStatus) {
-        self.stripe_status_vec
-            .borrow_mut()
-            .set_stripe_status(stripe_id, status);
+        self.stripe_status_vec.stripe_status(stripe_id)
     }
 
     fn request_stripes_fetched(&self, request: &Request) -> bool {
@@ -78,10 +72,21 @@ impl LazyIoChannel {
         true
     }
 
+    fn request_stripes_failed(&self, request: &Request) -> bool {
+        for stripe_id in request.stripe_id_first..=request.stripe_id_last {
+            if self.stripe_status(stripe_id) == StripeStatus::Failed {
+                return true;
+            }
+        }
+        false
+    }
+
     fn start_stripe_fetches(&mut self, request: &Request) -> Result<()> {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if self.stripe_status(stripe_id) == StripeStatus::NotFetched {
-                self.set_stripe_status(stripe_id, StripeStatus::Fetching);
+            if matches!(
+                self.stripe_status(stripe_id),
+                StripeStatus::NotFetched | StripeStatus::Failed
+            ) {
                 self.sender
                     .send(StripeFetcherRequest::Fetch(stripe_id))
                     .map_err(|e| {
@@ -97,20 +102,14 @@ impl LazyIoChannel {
     }
 
     fn sector_to_stripe_id(&self, sector: u64) -> usize {
-        self.stripe_status_vec.borrow().sector_to_stripe_id(sector)
+        self.stripe_status_vec.sector_to_stripe_id(sector)
     }
 
     fn poll_stripe_fetcher(&mut self) {
         while let Ok(resp) = self.receiver.try_recv() {
             match resp {
-                StripeFetcherResponse::Fetch(stripe_id, success) => {
-                    let status = if success {
-                        StripeStatus::Fetched
-                    } else {
-                        StripeStatus::NotFetched
-                    };
-
-                    self.set_stripe_status(stripe_id, status);
+                StripeFetcherResponse::Fetch(_, _) => {
+                    // fetch status is tracked via shared stripe_status_vec
                 }
                 StripeFetcherResponse::Flush(flush_id, success) => {
                     if success {
@@ -131,6 +130,10 @@ impl LazyIoChannel {
         let mut queued_rw_requests = self.queued_rw_requests.borrow_mut();
         let mut added_requests = vec![];
         while let Some(request) = queued_rw_requests.pop_front() {
+            if self.request_stripes_failed(&request) {
+                self.finished_requests.push((request.id, false));
+                continue;
+            }
             if !self.request_stripes_fetched(&request) {
                 queued_rw_requests.push_front(request);
                 break;
@@ -188,6 +191,8 @@ impl IoChannel for LazyIoChannel {
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
             self.base.add_read(sector_offset, sector_count, buf, id);
+        } else if self.request_stripes_failed(&request) {
+            self.finished_requests.push((id, false));
         } else if let Some(image_channel) = &mut self.image {
             image_channel.add_read(sector_offset, sector_count, buf, id);
         } else if let Err(e) = self.start_stripe_fetches(&request) {
@@ -216,6 +221,8 @@ impl IoChannel for LazyIoChannel {
         if fetched {
             self.base
                 .add_write(sector_offset, sector_count, buf.clone(), id);
+        } else if self.request_stripes_failed(&request) {
+            self.finished_requests.push((id, false));
         } else if let Err(e) = self.start_stripe_fetches(&request) {
             error!(
                 "Failed to send fetch request for stripe range {}-{}: {}",

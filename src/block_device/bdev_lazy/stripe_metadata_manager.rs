@@ -1,4 +1,13 @@
-use std::{cell::RefCell, mem::MaybeUninit, ptr::copy_nonoverlapping, rc::Rc};
+use std::{
+    cell::RefCell,
+    mem::MaybeUninit,
+    ptr::copy_nonoverlapping,
+    rc::Rc,
+    sync::{
+        atomic::{AtomicU64, AtomicU8, Ordering},
+        Arc,
+    },
+};
 
 use super::super::*;
 use crate::utils::aligned_buffer::AlignedBuf;
@@ -12,6 +21,7 @@ pub enum StripeStatus {
     Queued,
     Fetching,
     Fetched,
+    Failed,
 }
 
 const UBI_MAGIC_SIZE: usize = 9;
@@ -23,7 +33,7 @@ const METADATA_FLUSH_ID: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct StripeStatusVec {
-    pub data: Vec<StripeStatus>,
+    pub data: Arc<Vec<AtomicU8>>,
     pub stripe_sector_count: u64,
     pub source_sector_count: u64,
     pub stripe_count: u64,
@@ -36,14 +46,31 @@ impl StripeStatusVec {
 
     pub fn stripe_status(&self, stripe_id: usize) -> StripeStatus {
         if (stripe_id as u64) < self.stripe_count {
-            self.data[stripe_id]
+            match self.data[stripe_id].load(Ordering::Acquire) {
+                0 => StripeStatus::NotFetched,
+                1 => StripeStatus::Queued,
+                2 => StripeStatus::Fetching,
+                3 => StripeStatus::Fetched,
+                4 => StripeStatus::Failed,
+                other => panic!(
+                    "Invalid stripe status value: {} for stripe_id: {}",
+                    other, stripe_id
+                ),
+            }
         } else {
             StripeStatus::Fetched
         }
     }
 
-    pub fn set_stripe_status(&mut self, stripe_id: usize, status: StripeStatus) {
-        self.data[stripe_id] = status;
+    pub fn set_stripe_status(&self, stripe_id: usize, status: StripeStatus) {
+        if (stripe_id as u64) >= self.stripe_count {
+            error!(
+                "Invalid stripe_id: {}. Must be less than stripe_count: {}",
+                stripe_id, self.stripe_count
+            );
+            return;
+        }
+        self.data[stripe_id].store(status as u8, Ordering::Release);
     }
 
     pub fn stripe_sector_count(&self, stripe_id: usize) -> u32 {
@@ -184,7 +211,7 @@ pub struct StripeMetadataManager {
     metadata: Box<UbiMetadata>,
     stripe_status_vec: StripeStatusVec,
     metadata_buf: SharedBuffer,
-    metadata_version_current: u64,
+    metadata_version: Arc<AtomicU64>,
     metadata_version_flushed: u64,
     metadata_version_being_flushed: Option<u64>,
 }
@@ -206,7 +233,7 @@ impl StripeMetadataManager {
             metadata,
             stripe_status_vec,
             metadata_buf: Rc::new(RefCell::new(AlignedBuf::new(metadata_buf_size))),
-            metadata_version_current: 0,
+            metadata_version: Arc::new(AtomicU64::new(0)),
             metadata_version_flushed: 0,
             metadata_version_being_flushed: None,
         }))
@@ -221,14 +248,17 @@ impl StripeMetadataManager {
     }
 
     pub fn set_stripe_status(&mut self, stripe_id: usize, status: StripeStatus) {
-        self.metadata_version_current += 1;
+        let prev = self.stripe_status_vec.stripe_status(stripe_id);
         self.stripe_status_vec.set_stripe_status(stripe_id, status);
         match status {
-            StripeStatus::NotFetched => {
+            StripeStatus::NotFetched | StripeStatus::Failed => {
                 self.metadata.stripe_headers[stripe_id] = 0;
             }
             StripeStatus::Fetched => {
                 self.metadata.stripe_headers[stripe_id] = 1;
+                if prev != StripeStatus::Fetched {
+                    self.metadata_version.fetch_add(1, Ordering::SeqCst);
+                }
             }
             _ => {}
         }
@@ -247,7 +277,8 @@ impl StripeMetadataManager {
     }
 
     pub fn start_flush(&mut self) -> Result<StartFlushResult> {
-        if self.metadata_version_flushed == self.metadata_version_current {
+        let current_version = self.metadata_version.load(Ordering::Acquire);
+        if self.metadata_version_flushed == current_version {
             debug!("No changes to flush");
             return Ok(StartFlushResult::NoChanges);
         }
@@ -258,12 +289,9 @@ impl StripeMetadataManager {
             });
         }
 
-        debug!(
-            "Starting flush for metadata version {}",
-            self.metadata_version_current
-        );
+        debug!("Starting flush for metadata version {}", current_version);
 
-        self.metadata_version_being_flushed = Some(self.metadata_version_current);
+        self.metadata_version_being_flushed = Some(current_version);
 
         let metadata_buf = self.metadata_buf.clone();
         let metadata_size = std::mem::size_of::<UbiMetadata>();
@@ -393,12 +421,12 @@ impl StripeMetadataManager {
             .iter()
             .map(|header| {
                 if *header == 0 {
-                    StripeStatus::NotFetched
+                    AtomicU8::new(StripeStatus::NotFetched as u8)
                 } else {
-                    StripeStatus::Fetched
+                    AtomicU8::new(StripeStatus::Fetched as u8)
                 }
             })
-            .collect::<Vec<StripeStatus>>();
+            .collect::<Vec<AtomicU8>>();
         let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
         let stripe_count = source_sector_count.div_ceil(stripe_sector_count);
 
@@ -409,7 +437,7 @@ impl StripeMetadataManager {
         }
 
         Ok(StripeStatusVec {
-            data: v,
+            data: Arc::new(v),
             stripe_sector_count,
             source_sector_count,
             stripe_count,

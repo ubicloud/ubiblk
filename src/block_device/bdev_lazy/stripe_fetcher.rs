@@ -118,7 +118,7 @@ impl StripeFetcher {
         sender: Sender<StripeFetcherResponse>,
     ) {
         match self.metadata_manager.stripe_status(stripe_id) {
-            StripeStatus::NotFetched => {
+            StripeStatus::NotFetched | StripeStatus::Failed => {
                 debug!("Enqueueing stripe {} for fetch", stripe_id);
                 self.fetch_queue.push_back(stripe_id);
                 self.metadata_manager
@@ -180,7 +180,7 @@ impl StripeFetcher {
             self.stripes_fetched += 1;
         } else {
             self.metadata_manager
-                .set_stripe_status(stripe_id, StripeStatus::NotFetched);
+                .set_stripe_status(stripe_id, StripeStatus::Failed);
         }
     }
 

@@ -52,7 +52,7 @@ impl UbiBlkBackend {
     }
 }
 
-impl<'a> UbiBlkBackend {
+impl UbiBlkBackend {
     pub fn new(
         options: &Options,
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
@@ -124,7 +124,7 @@ impl<'a> UbiBlkBackend {
 //
 // You can find CloudHypervisor's code at
 // https://github.com/cloud-hypervisor/cloud-hypervisor
-impl<'a> VhostUserBackend for UbiBlkBackend {
+impl VhostUserBackend for UbiBlkBackend {
     type Bitmap = BitmapMmapRegion;
     type Vring = VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>;
 
@@ -199,10 +199,10 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
         thread_id: usize,
     ) -> std::result::Result<(), std::io::Error> {
         if evset != EventSet::IN {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Invalid event set: {:?}", evset),
-            ));
+            return Err(std::io::Error::other(format!(
+                "Invalid event set: {:?}",
+                evset
+            )));
         }
 
         let mut thread = self.threads[thread_id].lock().unwrap();
@@ -242,10 +242,10 @@ impl<'a> VhostUserBackend for UbiBlkBackend {
 
                 Ok(())
             }
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Invalid device event: {}", device_event),
-            )),
+            _ => Err(std::io::Error::other(format!(
+                "Invalid device event: {}",
+                device_event
+            ))),
         }
     }
 
@@ -383,19 +383,19 @@ pub fn start_block_backend(
 
     let name = "ubiblk-backend";
     let mut daemon = VhostUserDaemon::new(name.to_string(), backend.clone(), mem).map_err(|e| {
-        Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("VhostUserDaemon::new error: {:?}", e),
-        ))
+        Box::new(std::io::Error::other(format!(
+            "VhostUserDaemon::new error: {:?}",
+            e
+        )))
     })?;
 
     info!("Daemon is created!");
 
     if let Err(e) = daemon.serve(&options.socket) {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("VhostUserDaemon::wait error: {:?}", e),
-        )));
+        return Err(Box::new(std::io::Error::other(format!(
+            "VhostUserDaemon::wait error: {:?}",
+            e
+        ))));
     };
 
     info!("Finished serving socket!");

@@ -59,6 +59,11 @@ impl AlignedBuf {
     pub fn len(&self) -> usize {
         self.len
     }
+
+    /// Returns true if the buffer has a length of zero.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
 }
 
 impl Clone for AlignedBuf {

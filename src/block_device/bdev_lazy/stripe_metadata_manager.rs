@@ -200,7 +200,7 @@ impl StripeMetadataManager {
         let metadata = Self::load_metadata(&mut channel)?;
         let stripe_status_vec = Self::create_stripe_status_vec(&metadata, source_sector_count)?;
         let metadata_size = std::mem::size_of::<UbiMetadata>();
-        let metadata_buf_size = ((metadata_size + SECTOR_SIZE - 1) / SECTOR_SIZE) * SECTOR_SIZE;
+        let metadata_buf_size = metadata_size.div_ceil(SECTOR_SIZE) * SECTOR_SIZE;
         Ok(Box::new(StripeMetadataManager {
             channel,
             metadata,
@@ -235,11 +235,11 @@ impl StripeMetadataManager {
     }
 
     pub fn stripe_source_sector_offset(&self, stripe_id: usize) -> u64 {
-        stripe_id as u64 * self.stripe_sector_count() as u64
+        stripe_id as u64 * self.stripe_sector_count()
     }
 
     pub fn stripe_target_sector_offset(&self, stripe_id: usize) -> u64 {
-        stripe_id as u64 * self.stripe_sector_count() as u64
+        stripe_id as u64 * self.stripe_sector_count()
     }
 
     pub fn stripe_status_vec(&self) -> StripeStatusVec {
@@ -324,7 +324,7 @@ impl StripeMetadataManager {
     fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetadata>> {
         info!("Loading metadata from device");
 
-        let sector_count = (std::mem::size_of::<UbiMetadata>() + SECTOR_SIZE - 1) / SECTOR_SIZE;
+        let sector_count = std::mem::size_of::<UbiMetadata>().div_ceil(SECTOR_SIZE);
         let buf: Rc<RefCell<AlignedBuf>> =
             Rc::new(RefCell::new(AlignedBuf::new(sector_count * SECTOR_SIZE)));
         io_channel.add_read(0, sector_count as u32, buf.clone(), 0);
@@ -385,7 +385,7 @@ impl StripeMetadataManager {
     }
 
     fn create_stripe_status_vec(
-        metadata: &Box<UbiMetadata>,
+        metadata: &UbiMetadata,
         source_sector_count: u64,
     ) -> Result<StripeStatusVec> {
         let v = metadata
@@ -400,7 +400,7 @@ impl StripeMetadataManager {
             })
             .collect::<Vec<StripeStatus>>();
         let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
-        let stripe_count = (source_sector_count + stripe_sector_count - 1) / stripe_sector_count;
+        let stripe_count = source_sector_count.div_ceil(stripe_sector_count);
 
         if stripe_count as usize > UBI_MAX_STRIPES {
             return Err(VhostUserBlockError::InvalidParameter {

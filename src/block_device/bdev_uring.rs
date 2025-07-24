@@ -72,11 +72,10 @@ impl IoChannel for UringIoChannel {
         let buf = buf.borrow();
         let fd = self.file.as_raw_fd();
         let len = sector_count * SECTOR_SIZE as u32;
-        let write_e =
-            io_uring::opcode::Write::new(io_uring::types::Fd(fd), buf.as_ptr(), len as u32)
-                .offset(sector_offset * SECTOR_SIZE as u64)
-                .build()
-                .user_data(id as u64);
+        let write_e = io_uring::opcode::Write::new(io_uring::types::Fd(fd), buf.as_ptr(), len)
+            .offset(sector_offset * SECTOR_SIZE as u64)
+            .build()
+            .user_data(id as u64);
         let push_result = unsafe { self.ring.submission().push(&write_e) };
         if push_result.is_err() {
             self.finished_requests.push((id, false));

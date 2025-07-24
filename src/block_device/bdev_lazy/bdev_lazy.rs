@@ -246,7 +246,7 @@ impl IoChannel for LazyIoChannel {
         self.poll_stripe_fetcher();
         self.process_queued_requests();
 
-        let mut results = self.finished_requests.clone();
+        let mut results = std::mem::take(&mut self.finished_requests);
         results.extend(self.base.poll());
         if let Some(image_channel) = &mut self.image {
             results.extend(image_channel.poll());

@@ -87,9 +87,7 @@ impl IoChannel for SyncIoChannel {
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
-        let finished_requests = self.finished_requests.clone();
-        self.finished_requests.clear();
-        finished_requests
+        std::mem::take(&mut self.finished_requests)
     }
 
     fn busy(&mut self) -> bool {

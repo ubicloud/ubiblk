@@ -231,9 +231,9 @@ mod tests {
         mem.write_obj::<u32>(0, hdr.unchecked_add(4)).unwrap();
         mem.write_obj::<u64>(1, hdr.unchecked_add(8)).unwrap();
         let descs = [
-            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
-            SplitDescriptor::new(data.0, 512, VRING_DESC_F_NEXT as u16, 2).into(),
-            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
+            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
+            SplitDescriptor::new(data.0, 512, VRING_DESC_F_NEXT as u16, 2),
+            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
         let req = Request::parse(&mut chain).unwrap();
@@ -244,15 +244,14 @@ mod tests {
         // IN request
         mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
         let descs = [
-            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
+            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
             SplitDescriptor::new(
                 data.0,
                 512,
                 VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
                 2,
-            )
-            .into(),
-            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
+            ),
+            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
         let req = Request::parse(&mut chain).unwrap();
@@ -261,8 +260,8 @@ mod tests {
         // FLUSH request (no data descriptor)
         mem.write_obj::<u32>(VIRTIO_BLK_T_FLUSH, hdr).unwrap();
         let descs = [
-            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
-            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
+            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
+            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
         let req = Request::parse(&mut chain).unwrap();
@@ -285,9 +284,8 @@ mod tests {
                 16,
                 VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
                 1,
-            )
-            .into(),
-            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
+            ),
+            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
         assert!(matches!(
@@ -298,8 +296,8 @@ mod tests {
         // missing data descriptor for OUT
         mem.write_obj::<u32>(VIRTIO_BLK_T_OUT, hdr).unwrap();
         let descs = [
-            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
-            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
+            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
+            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
         assert!(matches!(
@@ -310,15 +308,14 @@ mod tests {
         // unexpected write-only data descriptor for OUT
         mem.write_obj::<u32>(VIRTIO_BLK_T_OUT, hdr).unwrap();
         let descs = [
-            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
+            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
             SplitDescriptor::new(
                 data.0,
                 512,
                 VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
                 2,
-            )
-            .into(),
-            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
+            ),
+            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
         assert!(matches!(
@@ -329,9 +326,9 @@ mod tests {
         // unexpected read-only data descriptor for IN
         mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
         let descs = [
-            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
-            SplitDescriptor::new(data.0, 512, VRING_DESC_F_NEXT as u16, 2).into(),
-            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0).into(),
+            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
+            SplitDescriptor::new(data.0, 512, VRING_DESC_F_NEXT as u16, 2),
+            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
         assert!(matches!(
@@ -342,15 +339,14 @@ mod tests {
         // status not write only
         mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
         let descs = [
-            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
+            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
             SplitDescriptor::new(
                 data.0,
                 512,
                 VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
                 2,
-            )
-            .into(),
-            SplitDescriptor::new(status.0, 1, VRING_DESC_F_NEXT as u16, 0).into(),
+            ),
+            SplitDescriptor::new(status.0, 1, VRING_DESC_F_NEXT as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
         assert!(matches!(
@@ -361,15 +357,14 @@ mod tests {
         // status len too small
         mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
         let descs = [
-            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1).into(),
+            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
             SplitDescriptor::new(
                 data.0,
                 512,
                 VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
                 2,
-            )
-            .into(),
-            SplitDescriptor::new(status.0, 0, VRING_DESC_F_WRITE as u16, 0).into(),
+            ),
+            SplitDescriptor::new(status.0, 0, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
         assert!(matches!(

@@ -416,15 +416,12 @@ mod tests {
         let mut completed = 0;
         while completed < 2 {
             stripe_fetcher.update();
-            if let Ok(resp) = resp_receiver.try_recv() {
-                match resp {
-                    StripeFetcherResponse::Fetch(stripe_id, success) => {
-                        assert!(success);
-                        assert!(stripe_id == 0 || stripe_id == 3);
-                        completed += 1;
-                    }
-                    _ => {}
-                }
+            if let Ok(StripeFetcherResponse::Fetch(stripe_id, success)) =
+                resp_receiver.try_recv()
+            {
+                assert!(success);
+                assert!(stripe_id == 0 || stripe_id == 3);
+                completed += 1;
             }
         }
 
@@ -456,21 +453,18 @@ mod tests {
         let mut flush_count = 0;
         while flush_count < NUM_FLUSHES {
             stripe_fetcher.update();
-            if let Ok(resp) = resp_receiver.try_recv() {
-                match resp {
-                    StripeFetcherResponse::Flush(flush_id, success) => {
-                        assert!(success);
-                        assert!(flush_id < NUM_FLUSHES);
-                        completed[flush_id] = true;
-                        flush_count += 1;
-                    }
-                    _ => {}
-                }
+            if let Ok(StripeFetcherResponse::Flush(flush_id, success)) =
+                resp_receiver.try_recv()
+            {
+                assert!(success);
+                assert!(flush_id < NUM_FLUSHES);
+                completed[flush_id] = true;
+                flush_count += 1;
             }
         }
 
-        for i in 0..NUM_FLUSHES {
-            assert!(completed[i], "Flush {} was not completed", i);
+        for (i, done) in completed.iter().enumerate().take(NUM_FLUSHES) {
+            assert!(*done, "Flush {} was not completed", i);
         }
     }
 

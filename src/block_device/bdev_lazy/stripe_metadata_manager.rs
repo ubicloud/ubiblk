@@ -428,9 +428,9 @@ mod tests {
     fn test_stripe_metadata_manager() -> Result<()> {
         let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
         let stripe_sector_count_shift = 11;
-        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
         let source_sector_count = 29 * stripe_sector_count + 4;
-        let stripe_count = (source_sector_count + stripe_sector_count - 1) / stripe_sector_count;
+        let stripe_count = source_sector_count.div_ceil(stripe_sector_count);
 
         let mut ch = metadata_dev.create_channel()?;
         UbiMetadata::new(stripe_sector_count_shift)
@@ -443,7 +443,7 @@ mod tests {
         assert_eq!(manager.stripe_source_sector_offset(0), 0);
         assert_eq!(manager.stripe_target_sector_offset(0), 0);
 
-        let stripes_to_fetch = vec![0, 3, 7, 8];
+        let stripes_to_fetch = [0, 3, 7, 8];
 
         for stripe_id in stripes_to_fetch.iter() {
             assert_eq!(manager.stripe_status(*stripe_id), StripeStatus::NotFetched);
@@ -459,7 +459,7 @@ mod tests {
         }
 
         let stripe_status_vec = manager.stripe_status_vec();
-        assert_eq!(stripe_status_vec.stripe_count, stripe_count as u64);
+        assert_eq!(stripe_status_vec.stripe_count, stripe_count);
 
         assert_eq!(metadata_dev.flushes(), 1);
         manager.start_flush().unwrap();

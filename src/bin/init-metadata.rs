@@ -1,6 +1,6 @@
 use clap::Parser;
 use log::error;
-use serde_yaml;
+
 use std::fs::File;
 use std::process;
 use ubiblk::vhost_backend::*;
@@ -59,8 +59,8 @@ fn main() {
 
     let stripe_sector_count_shift = args.stripe_sector_count_shift;
 
-    if stripe_sector_count_shift > STRIPE_SECTOR_COUNT_SHIFT_MAX
-        || stripe_sector_count_shift < STRIPE_SECTOR_COUNT_SHIFT_MIN
+    if !(STRIPE_SECTOR_COUNT_SHIFT_MIN..=STRIPE_SECTOR_COUNT_SHIFT_MAX)
+        .contains(&stripe_sector_count_shift)
     {
         error!(
             "stripe-sector-count-shift must be between {} and {}.",

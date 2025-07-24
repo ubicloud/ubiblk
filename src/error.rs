@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn test_io_error_format() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::Other, "Test IO error");
+        let io_error = std::io::Error::other("Test IO error");
         let error = VhostUserBlockError::IoError { source: io_error };
         assert_eq!(format!("{}", error), "I/O error: Test IO error");
     }
@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn test_io_channel_creation_format() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::Other, "Test IO error");
+        let io_error = std::io::Error::other("Test IO error");
         let error = VhostUserBlockError::IoChannelCreation { source: io_error };
         assert_eq!(
             format!("{}", error),

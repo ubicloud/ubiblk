@@ -1,6 +1,6 @@
 use clap::Parser;
 use log::error;
-use serde_yaml;
+
 use std::fs::File;
 use std::process;
 use ubiblk::vhost_backend::*;

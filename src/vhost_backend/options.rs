@@ -3,7 +3,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_with::{base64::Base64, serde_as};
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 
-fn decode_encryption_keys<'de, D>(deserializer: D) -> Result<Option<(Vec<u8>, Vec<u8>)>, D::Error>
+type OptKeys = Option<(Vec<u8>, Vec<u8>)>;
+
+fn decode_encryption_keys<'de, D>(deserializer: D) -> Result<OptKeys, D::Error>
 where
     D: Deserializer<'de>,
 {

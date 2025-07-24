@@ -324,7 +324,7 @@ pub fn start_block_backend(
                 }));
             }
             let metadata_path = options.metadata_path.as_ref().unwrap();
-            let metadata_dev = build_block_device(&metadata_path, options, kek)?;
+            let metadata_dev = build_block_device(metadata_path, options, kek)?;
             let readonly = true;
             let image_bdev =
                 UringBlockDevice::new(PathBuf::from(path), 64, readonly, options.direct_io)?;
@@ -360,7 +360,7 @@ pub fn start_block_backend(
     };
 
     let backend = Arc::new(
-        UbiBlkBackend::new(&options, mem.clone(), block_device, alignment).map_err(|e| {
+        UbiBlkBackend::new(options, mem.clone(), block_device, alignment).map_err(|e| {
             error!("Failed to create UbiBlkBackend: {:?}", e);
             Box::new(e)
         })?,
@@ -456,7 +456,7 @@ pub fn init_metadata(
             .ok_or_else(|| VhostUserBlockError::InvalidParameter {
                 description: "metadata_path is none".to_string(),
             })?;
-    let metadata_bdev = build_block_device(&metadata_path, config, kek.clone())?;
+    let metadata_bdev = build_block_device(metadata_path, config, kek.clone())?;
     let mut ch = metadata_bdev.create_channel()?;
     let metadata = UbiMetadata::new(stripe_sector_count_shift);
     metadata.write(&mut ch)?;

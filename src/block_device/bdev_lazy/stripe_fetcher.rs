@@ -18,12 +18,6 @@ pub enum StripeFetcherRequest {
     Flush(usize),
 }
 
-#[derive(Debug)]
-pub enum StripeFetcherResponse {
-    Fetch(usize, bool),
-    Flush(usize, bool),
-}
-
 const MAX_CONCURRENT_FETCHES: usize = 16;
 
 pub type SharedStripeFetcher = Arc<Mutex<StripeFetcher>>;
@@ -41,14 +35,12 @@ pub struct StripeFetcher {
     target_sector_count: u64,
     metadata_manager: Box<StripeMetadataManager>,
     fetch_queue: VecDeque<usize>,
-    req_mpsc_pairs: Vec<(
-        Sender<StripeFetcherResponse>,
-        Receiver<StripeFetcherRequest>,
-    )>,
+    req_receiver: Receiver<StripeFetcherRequest>,
+    req_sender: Sender<StripeFetcherRequest>,
     fetch_buffers: Vec<FetchBuffer>,
     stripes_fetched: usize,
-    pending_flush_requests: Vec<(Sender<StripeFetcherResponse>, usize)>,
-    inprogress_flush_requests: Vec<(Sender<StripeFetcherResponse>, usize)>,
+    pending_flush_requests: Vec<usize>,
+    inprogress_flush_requests: Vec<usize>,
     killfd: EventFd,
 }
 
@@ -89,12 +81,15 @@ impl StripeFetcher {
                 description: "target device too small".into(),
             });
         }
+        let (req_sender, req_receiver) = std::sync::mpsc::channel();
+
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,
             metadata_manager,
             fetch_queue: VecDeque::new(),
-            req_mpsc_pairs: vec![],
+            req_receiver,
+            req_sender,
             fetch_buffers,
             stripes_fetched: 0,
             pending_flush_requests: vec![],
@@ -105,23 +100,15 @@ impl StripeFetcher {
         })
     }
 
-    pub fn add_req_mpsc_pair(
-        &mut self,
-        sender: Sender<StripeFetcherResponse>,
-        receiver: Receiver<StripeFetcherRequest>,
-    ) {
-        self.req_mpsc_pairs.push((sender, receiver));
+    pub fn req_sender(&self) -> Sender<StripeFetcherRequest> {
+        self.req_sender.clone()
     }
 
     pub fn shared_flush_state(&self) -> MetadataFlushState {
         self.metadata_manager.shared_flush_state()
     }
 
-    pub fn handle_fetch_request(
-        &mut self,
-        stripe_id: usize,
-        sender: Sender<StripeFetcherResponse>,
-    ) {
+    pub fn handle_fetch_request(&mut self, stripe_id: usize) {
         match self.metadata_manager.stripe_status(stripe_id) {
             StripeStatus::NotFetched | StripeStatus::Failed => {
                 debug!("Enqueueing stripe {} for fetch", stripe_id);
@@ -131,12 +118,6 @@ impl StripeFetcher {
             }
             StripeStatus::Fetched => {
                 debug!("Stripe {} already fetched", stripe_id);
-                if let Err(e) = sender.send(StripeFetcherResponse::Fetch(stripe_id, true)) {
-                    error!(
-                        "Failed to send fetch response for already fetched stripe {}: {:?}",
-                        stripe_id, e
-                    );
-                }
             }
             StripeStatus::Queued | StripeStatus::Fetching => {
                 debug!("Stripe {} is already queued or fetching", stripe_id);
@@ -144,26 +125,24 @@ impl StripeFetcher {
         }
     }
 
-    fn handle_flush_request(&mut self, flush_id: usize, sender: Sender<StripeFetcherResponse>) {
-        self.pending_flush_requests.push((sender.clone(), flush_id));
+    fn handle_flush_request(&mut self, flush_id: usize) {
+        self.pending_flush_requests.push(flush_id);
     }
 
     fn receive_requests(&mut self) {
         let mut requests = Vec::new();
-        for (sender, receiver) in self.req_mpsc_pairs.iter() {
-            if let Ok(request) = receiver.try_recv() {
-                debug!("Received request: {:?}", request);
-                requests.push((request, sender.clone()));
-            }
+        while let Ok(request) = self.req_receiver.try_recv() {
+            debug!("Received request: {:?}", request);
+            requests.push(request);
         }
 
-        for (request, sender) in requests {
+        for request in requests {
             match request {
                 StripeFetcherRequest::Fetch(stripe_id) => {
-                    self.handle_fetch_request(stripe_id, sender);
+                    self.handle_fetch_request(stripe_id);
                 }
                 StripeFetcherRequest::Flush(flush_id) => {
-                    self.handle_flush_request(flush_id, sender);
+                    self.handle_flush_request(flush_id);
                 }
             }
         }
@@ -281,11 +260,6 @@ impl StripeFetcher {
 
     pub fn finish_flush(&mut self, success: bool) {
         debug!("Finishing flush, success={}", success);
-        for (sender, flush_id) in self.inprogress_flush_requests.drain(..) {
-            if let Err(e) = sender.send(StripeFetcherResponse::Flush(flush_id, success)) {
-                error!("Failed to send flush response for id {}: {:?}", flush_id, e);
-            }
-        }
     }
 
     pub fn update(&mut self) {
@@ -293,17 +267,6 @@ impl StripeFetcher {
 
         let mut completed_fetches = self.start_fetches();
         completed_fetches.append(&mut self.poll_fetches());
-
-        for (stripe_id, success) in completed_fetches {
-            for (sender, _) in self.req_mpsc_pairs.iter() {
-                if let Err(e) = sender.send(StripeFetcherResponse::Fetch(stripe_id, success)) {
-                    error!(
-                        "Failed to send fetch response for stripe {}: {:?}",
-                        stripe_id, e
-                    );
-                }
-            }
-        }
 
         if let Some(success) = self.metadata_manager.poll_flush() {
             self.finish_flush(success);
@@ -356,7 +319,6 @@ mod tests {
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::vhost_backend::SECTOR_SIZE;
     use crate::VhostUserBlockError;
-
     #[test]
     fn test_stripe_fetcher() {
         let stripe_sector_count_shift = 12;
@@ -376,10 +338,7 @@ mod tests {
         let mut stripe_fetcher =
             StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap();
 
-        let (req_sender, req_receiver) = std::sync::mpsc::channel();
-        let (resp_sender, resp_receiver) = std::sync::mpsc::channel();
-
-        stripe_fetcher.add_req_mpsc_pair(resp_sender, req_receiver);
+        let req_sender = stripe_fetcher.req_sender();
 
         let buf1 = "some test data".as_bytes();
         let buf2 = "some more test data".as_bytes();
@@ -418,19 +377,10 @@ mod tests {
         req_sender.send(StripeFetcherRequest::Fetch(0)).unwrap();
         req_sender.send(StripeFetcherRequest::Fetch(3)).unwrap();
 
-        let mut completed = 0;
-        while completed < 2 {
+        while stripe_fetcher.metadata_manager.stripe_status(0) != StripeStatus::Fetched
+            || stripe_fetcher.metadata_manager.stripe_status(3) != StripeStatus::Fetched
+        {
             stripe_fetcher.update();
-            if let Ok(resp) = resp_receiver.try_recv() {
-                match resp {
-                    StripeFetcherResponse::Fetch(stripe_id, success) => {
-                        assert!(success);
-                        assert!(stripe_id == 0 || stripe_id == 3);
-                        completed += 1;
-                    }
-                    _ => {}
-                }
-            }
         }
 
         {
@@ -452,30 +402,14 @@ mod tests {
         }
 
         // request flush
-        const NUM_FLUSHES: usize = 10;
-        for i in 0..NUM_FLUSHES {
-            req_sender.send(StripeFetcherRequest::Flush(i)).unwrap();
-        }
+        req_sender.send(StripeFetcherRequest::Flush(0)).unwrap();
 
-        let mut completed = [false; NUM_FLUSHES];
-        let mut flush_count = 0;
-        while flush_count < NUM_FLUSHES {
+        while stripe_fetcher
+            .metadata_manager
+            .shared_flush_state()
+            .needs_flush()
+        {
             stripe_fetcher.update();
-            if let Ok(resp) = resp_receiver.try_recv() {
-                match resp {
-                    StripeFetcherResponse::Flush(flush_id, success) => {
-                        assert!(success);
-                        assert!(flush_id < NUM_FLUSHES);
-                        completed[flush_id] = true;
-                        flush_count += 1;
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        for i in 0..NUM_FLUSHES {
-            assert!(completed[i], "Flush {} was not completed", i);
         }
     }
 

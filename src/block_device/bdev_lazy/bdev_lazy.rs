@@ -1,11 +1,8 @@
-use std::{
-    collections::{HashSet, VecDeque},
-    sync::mpsc::{Receiver, Sender},
-};
+use std::{collections::VecDeque, sync::mpsc::Sender};
 
 use super::super::*;
 use super::stripe_fetcher::{
-    SharedStripeFetcher, StripeFetcherRequest, StripeFetcherResponse, StripeStatus, StripeStatusVec,
+    SharedStripeFetcher, StripeFetcherRequest, StripeStatus, StripeStatusVec,
 };
 use crate::{
     block_device::{bdev_lazy::stripe_metadata_manager::MetadataFlushState, SharedBuffer},
@@ -19,7 +16,7 @@ enum RequestType {
     Out,
 }
 
-struct Request {
+struct RWRequest {
     id: usize,
     type_: RequestType,
     sector_offset: u64,
@@ -29,14 +26,18 @@ struct Request {
     stripe_id_last: usize,
 }
 
+struct FlushRequest {
+    id: usize,
+    pending_metadata_version: u64,
+}
+
 struct LazyIoChannel {
     base: Box<dyn IoChannel>,
     image: Option<Box<dyn IoChannel>>,
-    queued_rw_requests: VecDeque<Request>,
-    flush_requests: HashSet<usize>,
+    queued_rw_requests: VecDeque<RWRequest>,
+    queued_flush_requests: VecDeque<FlushRequest>,
     finished_requests: Vec<(usize, bool)>,
     sender: Sender<StripeFetcherRequest>,
-    receiver: Receiver<StripeFetcherResponse>,
     stripe_status_vec: StripeStatusVec,
     metadata_flush_state: MetadataFlushState,
 }
@@ -46,7 +47,6 @@ impl LazyIoChannel {
         base: Box<dyn IoChannel>,
         image: Option<Box<dyn IoChannel>>,
         sender: Sender<StripeFetcherRequest>,
-        receiver: Receiver<StripeFetcherResponse>,
         stripe_status_vec: StripeStatusVec,
         metadata_flush_state: MetadataFlushState,
     ) -> Self {
@@ -54,10 +54,9 @@ impl LazyIoChannel {
             base,
             image,
             queued_rw_requests: VecDeque::new(),
+            queued_flush_requests: VecDeque::new(),
             finished_requests: Vec::new(),
-            flush_requests: HashSet::new(),
             sender,
-            receiver,
             stripe_status_vec,
             metadata_flush_state,
         }
@@ -69,7 +68,7 @@ impl LazyIoChannel {
         self.stripe_status_vec.stripe_status(stripe_id)
     }
 
-    fn request_stripes_fetched(&self, request: &Request) -> bool {
+    fn request_stripes_fetched(&self, request: &RWRequest) -> bool {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
             if self.stripe_status(stripe_id) != StripeStatus::Fetched {
                 return false;
@@ -78,7 +77,7 @@ impl LazyIoChannel {
         true
     }
 
-    fn request_stripes_failed(&self, request: &Request) -> bool {
+    fn request_stripes_failed(&self, request: &RWRequest) -> bool {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
             if self.stripe_status(stripe_id) == StripeStatus::Failed {
                 return true;
@@ -87,7 +86,7 @@ impl LazyIoChannel {
         false
     }
 
-    fn start_stripe_fetches(&mut self, request: &Request) -> Result<()> {
+    fn start_stripe_fetches(&mut self, request: &RWRequest) -> Result<()> {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
             if matches!(
                 self.stripe_status(stripe_id),
@@ -111,28 +110,29 @@ impl LazyIoChannel {
         self.stripe_status_vec.sector_to_stripe_id(sector)
     }
 
-    fn poll_stripe_fetcher(&mut self) {
-        while let Ok(resp) = self.receiver.try_recv() {
-            match resp {
-                StripeFetcherResponse::Fetch(_, _) => {
-                    // fetch status is tracked via shared stripe_status_vec
-                }
-                StripeFetcherResponse::Flush(flush_id, success) => {
-                    if success {
-                        self.base.add_flush(flush_id);
-                        if let Err(e) = self.base.submit() {
-                            error!("Failed to submit flush request {}: {}", flush_id, e);
-                            self.finished_requests.push((flush_id, false));
-                        }
-                    } else {
-                        self.finished_requests.push((flush_id, false));
-                    }
-                }
+    fn process_queued_flush_requests(&mut self) {
+        if self.queued_flush_requests.is_empty() {
+            return;
+        }
+
+        let current_metadata_version = self.metadata_flush_state.current_version();
+        while let Some(FlushRequest {
+            id,
+            pending_metadata_version,
+        }) = self.queued_flush_requests.pop_front()
+        {
+            if pending_metadata_version > current_metadata_version {
+                self.queued_flush_requests.push_front(FlushRequest {
+                    id,
+                    pending_metadata_version,
+                });
+                break;
             }
+            self.base.add_flush(id);
         }
     }
 
-    fn process_queued_requests(&mut self) {
+    fn process_queued_rw_requests(&mut self) {
         let mut added_requests = vec![];
         while let Some(request) = self.queued_rw_requests.pop_front() {
             if self.request_stripes_failed(&request) {
@@ -183,7 +183,7 @@ impl LazyIoChannel {
 
 impl IoChannel for LazyIoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
-        let request = Request {
+        let request = RWRequest {
             id,
             type_: RequestType::In,
             sector_offset,
@@ -212,7 +212,7 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
-        let request = Request {
+        let request = RWRequest {
             id,
             type_: RequestType::Out,
             sector_offset,
@@ -245,11 +245,17 @@ impl IoChannel for LazyIoChannel {
             return;
         }
 
+        let current_metadata_version = self.metadata_flush_state.current_version();
+
         if let Err(e) = self.sender.send(StripeFetcherRequest::Flush(id)) {
             error!("Failed to send flush request: {}", e);
             self.finished_requests.push((id, false));
         }
-        self.flush_requests.insert(id);
+
+        self.queued_flush_requests.push_back(FlushRequest {
+            id,
+            pending_metadata_version: current_metadata_version,
+        });
     }
 
     fn submit(&mut self) -> Result<()> {
@@ -260,8 +266,8 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
-        self.poll_stripe_fetcher();
-        self.process_queued_requests();
+        self.process_queued_flush_requests();
+        self.process_queued_rw_requests();
 
         let mut results = std::mem::take(&mut self.finished_requests);
         results.extend(self.base.poll());
@@ -269,12 +275,6 @@ impl IoChannel for LazyIoChannel {
             results.extend(image_channel.poll());
         }
         self.finished_requests.clear();
-
-        for id in &results {
-            if self.flush_requests.contains(&id.0) {
-                self.flush_requests.remove(&id.0);
-            }
-        }
 
         results
     }
@@ -288,7 +288,7 @@ impl IoChannel for LazyIoChannel {
         self.base.busy()
             || image_busy
             || !self.queued_rw_requests.is_empty()
-            || !self.flush_requests.is_empty()
+            || !self.queued_flush_requests.is_empty()
     }
 }
 
@@ -317,8 +317,6 @@ impl LazyBlockDevice {
 
 impl BlockDevice for LazyBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
-        let (req_sender, req_receiver) = std::sync::mpsc::channel();
-        let (resp_sender, resp_receiver) = std::sync::mpsc::channel();
         let base_channel = self.base.create_channel()?;
         let image_channel = if let Some(image) = &self.image {
             Some(image.create_channel()?)
@@ -326,14 +324,13 @@ impl BlockDevice for LazyBlockDevice {
             None
         };
 
-        let mut stripe_fetcher = self.stripe_fetcher.lock().unwrap();
-        stripe_fetcher.add_req_mpsc_pair(resp_sender, req_receiver);
+        let stripe_fetcher = self.stripe_fetcher.lock().unwrap();
+        let req_sender = stripe_fetcher.req_sender();
 
         Ok(Box::new(LazyIoChannel::new(
             base_channel,
             image_channel,
             req_sender,
-            resp_receiver,
             stripe_fetcher.stripe_status_vec(),
             stripe_fetcher.shared_flush_state(),
         )))

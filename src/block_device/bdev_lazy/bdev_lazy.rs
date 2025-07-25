@@ -32,7 +32,7 @@ struct Request {
 struct LazyIoChannel {
     base: Box<dyn IoChannel>,
     image: Option<Box<dyn IoChannel>>,
-    queued_rw_requests: RefCell<VecDeque<Request>>,
+    queued_rw_requests: VecDeque<Request>,
     flush_requests: HashSet<usize>,
     finished_requests: Vec<(usize, bool)>,
     sender: Sender<StripeFetcherRequest>,
@@ -53,7 +53,7 @@ impl LazyIoChannel {
         LazyIoChannel {
             base,
             image,
-            queued_rw_requests: RefCell::new(VecDeque::new()),
+            queued_rw_requests: VecDeque::new(),
             finished_requests: Vec::new(),
             flush_requests: HashSet::new(),
             sender,
@@ -133,15 +133,14 @@ impl LazyIoChannel {
     }
 
     fn process_queued_requests(&mut self) {
-        let mut queued_rw_requests = self.queued_rw_requests.borrow_mut();
         let mut added_requests = vec![];
-        while let Some(request) = queued_rw_requests.pop_front() {
+        while let Some(request) = self.queued_rw_requests.pop_front() {
             if self.request_stripes_failed(&request) {
                 self.finished_requests.push((request.id, false));
                 continue;
             }
             if !self.request_stripes_fetched(&request) {
-                queued_rw_requests.push_front(request);
+                self.queued_rw_requests.push_front(request);
                 break;
             }
             let sector = request.sector_offset;
@@ -208,7 +207,7 @@ impl IoChannel for LazyIoChannel {
             );
             self.finished_requests.push((id, false));
         } else {
-            self.queued_rw_requests.borrow_mut().push_back(request);
+            self.queued_rw_requests.push_back(request);
         }
     }
 
@@ -236,7 +235,7 @@ impl IoChannel for LazyIoChannel {
             );
             self.finished_requests.push((id, false));
         } else {
-            self.queued_rw_requests.borrow_mut().push_back(request);
+            self.queued_rw_requests.push_back(request);
         }
     }
 
@@ -288,7 +287,7 @@ impl IoChannel for LazyIoChannel {
         };
         self.base.busy()
             || image_busy
-            || !self.queued_rw_requests.borrow().is_empty()
+            || !self.queued_rw_requests.is_empty()
             || !self.flush_requests.is_empty()
     }
 }

@@ -6,6 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use super::super::*;
 use super::stripe_metadata_manager::StartFlushResult;
 pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
+use crate::block_device::bdev_lazy::stripe_metadata_manager::MetadataFlushState;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error, info};
@@ -110,6 +111,10 @@ impl StripeFetcher {
         receiver: Receiver<StripeFetcherRequest>,
     ) {
         self.req_mpsc_pairs.push((sender, receiver));
+    }
+
+    pub fn shared_flush_state(&self) -> MetadataFlushState {
+        self.metadata_manager.shared_flush_state()
     }
 
     pub fn handle_fetch_request(

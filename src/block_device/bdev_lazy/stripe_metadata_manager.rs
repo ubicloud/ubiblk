@@ -52,10 +52,13 @@ impl StripeStatusVec {
                 2 => StripeStatus::Fetching,
                 3 => StripeStatus::Fetched,
                 4 => StripeStatus::Failed,
-                other => panic!(
-                    "Invalid stripe status value: {} for stripe_id: {}",
-                    other, stripe_id
-                ),
+                other => {
+                    error!(
+                        "Invalid stripe status value: {} for stripe_id: {}. Defaulting to Failed.",
+                        other, stripe_id
+                    );
+                    StripeStatus::Failed
+                }
             }
         } else {
             StripeStatus::Fetched
@@ -206,13 +209,46 @@ impl UbiMetadata {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MetadataFlushState {
+    metadata_version: Arc<AtomicU64>,
+    metadata_version_flushed: Arc<AtomicU64>,
+}
+
+impl MetadataFlushState {
+    pub fn new() -> Self {
+        Self {
+            metadata_version: Arc::new(AtomicU64::new(1)),
+            metadata_version_flushed: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub fn increment_version(&self) {
+        self.metadata_version.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn set_flushed_version(&self, version: u64) {
+        self.metadata_version_flushed
+            .store(version, Ordering::Release);
+    }
+
+    pub fn current_version(&self) -> u64 {
+        self.metadata_version.load(Ordering::Acquire)
+    }
+
+    pub fn needs_flush(&self) -> bool {
+        let flushed = self.metadata_version_flushed.load(Ordering::Acquire);
+        let current = self.metadata_version.load(Ordering::Acquire);
+        current > flushed
+    }
+}
+
 pub struct StripeMetadataManager {
     channel: Box<dyn IoChannel>,
     metadata: Box<UbiMetadata>,
     stripe_status_vec: StripeStatusVec,
     metadata_buf: SharedBuffer,
-    metadata_version: Arc<AtomicU64>,
-    metadata_version_flushed: u64,
+    flush_state: MetadataFlushState,
     metadata_version_being_flushed: Option<u64>,
 }
 
@@ -233,8 +269,7 @@ impl StripeMetadataManager {
             metadata,
             stripe_status_vec,
             metadata_buf: Rc::new(RefCell::new(AlignedBuf::new(metadata_buf_size))),
-            metadata_version: Arc::new(AtomicU64::new(0)),
-            metadata_version_flushed: 0,
+            flush_state: MetadataFlushState::new(),
             metadata_version_being_flushed: None,
         }))
     }
@@ -247,6 +282,10 @@ impl StripeMetadataManager {
         self.stripe_status_vec.stripe_status(stripe_id)
     }
 
+    // StripeStatusVec is supposed to be updated only by the StripeFetcher thread,
+    // so race conditions are not a concern here.
+    //
+    // XXX: refactor.
     pub fn set_stripe_status(&mut self, stripe_id: usize, status: StripeStatus) {
         let prev = self.stripe_status_vec.stripe_status(stripe_id);
         self.stripe_status_vec.set_stripe_status(stripe_id, status);
@@ -257,7 +296,7 @@ impl StripeMetadataManager {
             StripeStatus::Fetched => {
                 self.metadata.stripe_headers[stripe_id] = 1;
                 if prev != StripeStatus::Fetched {
-                    self.metadata_version.fetch_add(1, Ordering::SeqCst);
+                    self.flush_state.increment_version();
                 }
             }
             _ => {}
@@ -277,8 +316,7 @@ impl StripeMetadataManager {
     }
 
     pub fn start_flush(&mut self) -> Result<StartFlushResult> {
-        let current_version = self.metadata_version.load(Ordering::Acquire);
-        if self.metadata_version_flushed == current_version {
+        if !self.flush_state.needs_flush() {
             debug!("No changes to flush");
             return Ok(StartFlushResult::NoChanges);
         }
@@ -288,6 +326,8 @@ impl StripeMetadataManager {
                 description: "Flush already in progress".to_string(),
             });
         }
+
+        let current_version = self.flush_state.current_version();
 
         debug!("Starting flush for metadata version {}", current_version);
 
@@ -308,6 +348,10 @@ impl StripeMetadataManager {
         self.channel.submit()?;
 
         Ok(StartFlushResult::Started)
+    }
+
+    pub fn shared_flush_state(&self) -> MetadataFlushState {
+        self.flush_state.clone()
     }
 
     pub fn poll_flush(&mut self) -> Option<bool> {
@@ -339,7 +383,7 @@ impl StripeMetadataManager {
                     }
                     (Some(version), true) => {
                         debug!("Metadata flush completed for version {}", version);
-                        self.metadata_version_flushed = version;
+                        self.flush_state.set_flushed_version(version);
                         self.metadata_version_being_flushed = None;
                         return Some(true);
                     }

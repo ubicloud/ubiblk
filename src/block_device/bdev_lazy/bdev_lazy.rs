@@ -7,7 +7,10 @@ use super::super::*;
 use super::stripe_fetcher::{
     SharedStripeFetcher, StripeFetcherRequest, StripeFetcherResponse, StripeStatus, StripeStatusVec,
 };
-use crate::{block_device::SharedBuffer, Result, VhostUserBlockError};
+use crate::{
+    block_device::{bdev_lazy::stripe_metadata_manager::MetadataFlushState, SharedBuffer},
+    Result, VhostUserBlockError,
+};
 use log::error;
 
 #[derive(Debug)]
@@ -35,6 +38,7 @@ struct LazyIoChannel {
     sender: Sender<StripeFetcherRequest>,
     receiver: Receiver<StripeFetcherResponse>,
     stripe_status_vec: StripeStatusVec,
+    metadata_flush_state: MetadataFlushState,
 }
 
 impl LazyIoChannel {
@@ -44,6 +48,7 @@ impl LazyIoChannel {
         sender: Sender<StripeFetcherRequest>,
         receiver: Receiver<StripeFetcherResponse>,
         stripe_status_vec: StripeStatusVec,
+        metadata_flush_state: MetadataFlushState,
     ) -> Self {
         LazyIoChannel {
             base,
@@ -54,6 +59,7 @@ impl LazyIoChannel {
             sender,
             receiver,
             stripe_status_vec,
+            metadata_flush_state,
         }
     }
 }
@@ -235,6 +241,11 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn add_flush(&mut self, id: usize) {
+        if !self.metadata_flush_state.needs_flush() {
+            self.base.add_flush(id);
+            return;
+        }
+
         if let Err(e) = self.sender.send(StripeFetcherRequest::Flush(id)) {
             error!("Failed to send flush request: {}", e);
             self.finished_requests.push((id, false));
@@ -325,6 +336,7 @@ impl BlockDevice for LazyBlockDevice {
             req_sender,
             resp_receiver,
             stripe_fetcher.stripe_status_vec(),
+            stripe_fetcher.shared_flush_state(),
         )))
     }
 

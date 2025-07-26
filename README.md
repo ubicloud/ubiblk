@@ -6,7 +6,7 @@ A block device utilities collection for virtualized environments.
 
 1. Install Rust and Cargo:
    - Follow the instructions at [rustup.rs](https://rustup.rs/).
-2. Install `isa-l_crypto`:
+2. Install `isa-l_crypto` (Optional. Recommended for higher performance):
 
 ```bash
 sudo apt-get install autoconf libtool nasm clang
@@ -16,6 +16,12 @@ cd isa-l_crypto/
 ./configure --prefix=/usr --libdir=/usr/lib
 make -j32
 sudo make install
+```
+
+If `isa-l_crypto` is not available, build using the `disable-isal-crypto` feature:
+
+```bash
+cargo build --release --features disable-isal-crypto
 ```
 
 3. Build the project:

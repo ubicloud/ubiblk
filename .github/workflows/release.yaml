@@ -57,6 +57,9 @@ jobs:
       - name: Run tests with coverage
         run: cargo llvm-cov --fail-under-lines 78 --ignore-filename-regex src/bin/
 
+      - name: Run tests without isa-l_crypto
+        run: cargo test --features disable-isal-crypto
+
       - name: Build project
         if: github.event_name == 'workflow_dispatch' && github.ref_type == 'tag'
         run: |

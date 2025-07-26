@@ -3,13 +3,20 @@ use super::*;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::vhost_backend::{CipherMethod, KeyEncryptionCipher, SECTOR_SIZE};
 use crate::{Result, VhostUserBlockError};
+#[cfg(not(feature = "disable-isal-crypto"))]
 use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
+#[cfg(feature = "disable-isal-crypto")]
+use aes::cipher::{generic_array::GenericArray, KeyInit};
+#[cfg(feature = "disable-isal-crypto")]
+use aes::Aes256;
 use aes_gcm::aead::Payload;
 use aes_gcm::{
-    aead::{consts::U12, generic_array::GenericArray, Aead, KeyInit},
+    aead::{consts::U12, generic_array::GenericArray as AeadArray, Aead, KeyInit as AeadKeyInit},
     Aes256Gcm,
 };
 use log::error;
+#[cfg(feature = "disable-isal-crypto")]
+use xts_mode::{get_tweak_default, Xts128};
 
 struct Request {
     sector_offset: u64,
@@ -61,6 +68,7 @@ impl CryptIoChannel {
      * are not required to be aligned to 16 bytes, any alignment works.
      */
 
+    #[cfg(not(feature = "disable-isal-crypto"))]
     fn decrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
         for i in 0..sector_count as usize {
             let sector = sector_start + i as u64;
@@ -79,6 +87,19 @@ impl CryptIoChannel {
         }
     }
 
+    #[cfg(feature = "disable-isal-crypto")]
+    fn decrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
+        let cipher1 = Aes256::new(GenericArray::from_slice(&self.key1));
+        let cipher2 = Aes256::new(GenericArray::from_slice(&self.key2));
+        let xts = Xts128::new(cipher1, cipher2);
+        for i in 0..sector_count as usize {
+            let sector = sector_start + i as u64;
+            let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
+            xts.decrypt_sector(sector_data, get_tweak_default(sector as u128));
+        }
+    }
+
+    #[cfg(not(feature = "disable-isal-crypto"))]
     fn encrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
         for i in 0..sector_count as usize {
             let sector = sector_start + i as u64;
@@ -94,6 +115,18 @@ impl CryptIoChannel {
                     sector_data.as_mut_ptr(),
                 );
             }
+        }
+    }
+
+    #[cfg(feature = "disable-isal-crypto")]
+    fn encrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
+        let cipher1 = Aes256::new(GenericArray::from_slice(&self.key1));
+        let cipher2 = Aes256::new(GenericArray::from_slice(&self.key2));
+        let xts = Xts128::new(cipher1, cipher2);
+        for i in 0..sector_count as usize {
+            let sector = sector_start + i as u64;
+            let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
+            xts.encrypt_sector(sector_data, get_tweak_default(sector as u128));
         }
     }
 }
@@ -247,7 +280,7 @@ fn decrypt_keys(
     }
 }
 
-type Nonce = GenericArray<u8, U12>;
+type Nonce = AeadArray<u8, U12>;
 
 fn decrypt_block(
     cipher: &Aes256Gcm,
@@ -509,7 +542,7 @@ mod tests {
         use aes_gcm::Aes256Gcm;
 
         let cipher = Aes256Gcm::new_from_slice(&[0u8; 32]).unwrap();
-        let nonce = GenericArray::from_slice(&[0u8; 12]);
+        let nonce = AeadArray::from_slice(&[0u8; 12]);
         let enc = vec![0u8; 48];
 
         let res = decrypt_block(&cipher, nonce, &[], &enc);
@@ -551,9 +584,9 @@ mod tests {
 
     #[test]
     fn test_decrypt_block_bad_plain_length() {
-        use aes_gcm::{Aes256Gcm, KeyInit};
+        use aes_gcm::{aead::KeyInit as AeadKeyInit, Aes256Gcm};
         let cipher = Aes256Gcm::new_from_slice(&[0u8; 32]).unwrap();
-        let nonce = GenericArray::from_slice(&[0u8; 12]);
+        let nonce = AeadArray::from_slice(&[0u8; 12]);
         let data = [1u8; 8];
         let enc = cipher
             .encrypt(

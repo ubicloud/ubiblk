@@ -232,6 +232,10 @@ impl MetadataFlushState {
             .store(version, Ordering::Release);
     }
 
+    pub fn flushed_version(&self) -> u64 {
+        self.metadata_version_flushed.load(Ordering::Acquire)
+    }
+
     pub fn current_version(&self) -> u64 {
         self.metadata_version.load(Ordering::Acquire)
     }

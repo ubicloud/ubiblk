@@ -111,9 +111,9 @@ impl LazyIoChannel {
     }
 
     fn process_queued_flush_requests(&mut self) {
-        let current_version = self.metadata_flush_state.current_version();
+        let flushed_version = self.metadata_flush_state.flushed_version();
         while let Some(front) = self.queued_flush_requests.front() {
-            if front.pending_metadata_version > current_version {
+            if front.pending_metadata_version > flushed_version {
                 break;
             }
 

@@ -166,4 +166,47 @@ mod tests {
         assert_eq!(results, vec![(flush_id, true)]);
         assert_eq!(target_metrics.read().unwrap().flushes, 1);
     }
+
+    /// Ensure that flush requests are completed only after metadata has been
+    /// written and flushed.
+    #[test]
+    fn test_flush_waits_for_metadata_flush() {
+        let stripe_shift = 12u8;
+        let stripe_sectors = 1u64 << stripe_shift;
+        let dev_size = stripe_sectors * SECTOR_SIZE as u64 * 4;
+
+        let source_dev = TestBlockDevice::new(dev_size);
+        let target_dev = TestBlockDevice::new(dev_size);
+        let metadata_dev = TestBlockDevice::new(8 * 1024 * 1024);
+
+        let target_metrics = target_dev.metrics.clone();
+
+        let mut ch = metadata_dev.create_channel().unwrap();
+        UbiMetadata::new(stripe_shift).write(&mut ch).unwrap();
+
+        let killfd = EventFd::new(0).unwrap();
+        let fetcher = Arc::new(Mutex::new(
+            StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
+        ));
+
+        let lazy = LazyBlockDevice::new(Box::new(target_dev), None, fetcher.clone()).unwrap();
+        let mut chan = lazy.create_channel().unwrap();
+
+        let flush_id = 42;
+        chan.add_flush(flush_id);
+        chan.submit().unwrap();
+
+        // Without running the fetcher, the flush should remain pending.
+        assert!(chan.poll().is_empty());
+        assert!(chan.busy());
+        assert_eq!(target_metrics.read().unwrap().flushes, 0);
+        // Only the initial metadata write has been flushed so far.
+        assert_eq!(metadata_dev.flushes(), 1);
+
+        // Drive the fetcher and channel to completion.
+        let results = drive(&fetcher, &mut chan);
+        assert_eq!(results, vec![(flush_id, true)]);
+        assert_eq!(target_metrics.read().unwrap().flushes, 1);
+        assert_eq!(metadata_dev.flushes(), 2);
+    }
 }

@@ -18,16 +18,14 @@ make -j32
 sudo make install
 ```
 
-If `isa-l_crypto` is not available, build using the `disable-isal-crypto` feature:
-
-```bash
-cargo build --release --features disable-isal-crypto
-```
-
 3. Build the project:
 
 ```bash
+# With isa-l_crypto
 cargo build --release
+
+# Without isa-l_crypto
+cargo build --release --features disable-isal-crypto
 ```
 
 4. Run the tests:

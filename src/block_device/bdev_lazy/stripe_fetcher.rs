@@ -260,6 +260,7 @@ impl StripeFetcher {
 
     pub fn finish_flush(&mut self, success: bool) {
         debug!("Finishing flush, success={}", success);
+        self.inprogress_flush_requests.clear();
     }
 
     pub fn update(&mut self) {
@@ -435,5 +436,47 @@ mod tests {
             }
             _ => panic!("Expected InvalidParameter error"),
         }
+    }
+
+    #[test]
+    fn test_consecutive_flushes() {
+        let stripe_shift = 12u8;
+        let stripe_size = (1u64 << stripe_shift) * SECTOR_SIZE as u64;
+        let source_dev = TestBlockDevice::new(4 * stripe_size);
+        let target_dev = TestBlockDevice::new(4 * stripe_size);
+        let metadata_dev = TestBlockDevice::new(8 * 1024 * 1024);
+
+        let mut ch = metadata_dev
+            .create_channel()
+            .expect("Failed to create channel");
+        UbiMetadata::new(stripe_shift).write(&mut ch).unwrap();
+
+        let killfd = EventFd::new(0).unwrap();
+        let mut stripe_fetcher =
+            StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap();
+
+        let req_sender = stripe_fetcher.req_sender();
+
+        // First flush should persist initial metadata changes
+        req_sender.send(StripeFetcherRequest::Flush(0)).unwrap();
+        while stripe_fetcher
+            .metadata_manager
+            .shared_flush_state()
+            .needs_flush()
+        {
+            stripe_fetcher.update();
+        }
+        assert!(stripe_fetcher.pending_flush_requests.is_empty());
+        assert!(stripe_fetcher.inprogress_flush_requests.is_empty());
+
+        // Second flush should succeed even with no changes
+        req_sender.send(StripeFetcherRequest::Flush(1)).unwrap();
+        stripe_fetcher.update();
+        assert!(stripe_fetcher.pending_flush_requests.is_empty());
+        assert!(stripe_fetcher.inprogress_flush_requests.is_empty());
+        assert!(!stripe_fetcher
+            .metadata_manager
+            .shared_flush_state()
+            .needs_flush());
     }
 }

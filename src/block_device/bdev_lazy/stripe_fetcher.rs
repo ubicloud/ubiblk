@@ -15,7 +15,7 @@ use vmm_sys_util::eventfd::EventFd;
 #[derive(Debug)]
 pub enum StripeFetcherRequest {
     Fetch(usize),
-    Flush(usize),
+    FlushMetadata,
 }
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
@@ -39,8 +39,8 @@ pub struct StripeFetcher {
     req_sender: Sender<StripeFetcherRequest>,
     fetch_buffers: Vec<FetchBuffer>,
     stripes_fetched: usize,
-    pending_flush_requests: Vec<usize>,
-    inprogress_flush_requests: Vec<usize>,
+    pending_flush_requests: usize,
+    inprogress_flush_requests: usize,
     killfd: EventFd,
 }
 
@@ -92,8 +92,8 @@ impl StripeFetcher {
             req_sender,
             fetch_buffers,
             stripes_fetched: 0,
-            pending_flush_requests: vec![],
-            inprogress_flush_requests: vec![],
+            pending_flush_requests: 0,
+            inprogress_flush_requests: 0,
             killfd,
             source_sector_count,
             target_sector_count,
@@ -125,8 +125,8 @@ impl StripeFetcher {
         }
     }
 
-    fn handle_flush_request(&mut self, flush_id: usize) {
-        self.pending_flush_requests.push(flush_id);
+    fn handle_flush_request(&mut self) {
+        self.pending_flush_requests += 1;
     }
 
     fn receive_requests(&mut self) {
@@ -141,8 +141,8 @@ impl StripeFetcher {
                 StripeFetcherRequest::Fetch(stripe_id) => {
                     self.handle_fetch_request(stripe_id);
                 }
-                StripeFetcherRequest::Flush(flush_id) => {
-                    self.handle_flush_request(flush_id);
+                StripeFetcherRequest::FlushMetadata => {
+                    self.handle_flush_request();
                 }
             }
         }
@@ -260,7 +260,7 @@ impl StripeFetcher {
 
     pub fn finish_flush(&mut self, success: bool) {
         debug!("Finishing flush, success={}", success);
-        self.inprogress_flush_requests.clear();
+        self.inprogress_flush_requests = 0;
     }
 
     pub fn update(&mut self) {
@@ -273,9 +273,9 @@ impl StripeFetcher {
             self.finish_flush(success);
         }
 
-        if !self.pending_flush_requests.is_empty() && self.inprogress_flush_requests.is_empty() {
-            self.inprogress_flush_requests = self.pending_flush_requests.clone();
-            self.pending_flush_requests.clear();
+        if self.pending_flush_requests > 0 && self.inprogress_flush_requests == 0 {
+            self.inprogress_flush_requests = self.pending_flush_requests;
+            self.pending_flush_requests = 0;
 
             match self.metadata_manager.start_flush() {
                 Ok(StartFlushResult::NoChanges) => {
@@ -403,7 +403,9 @@ mod tests {
         }
 
         // request flush
-        req_sender.send(StripeFetcherRequest::Flush(0)).unwrap();
+        req_sender
+            .send(StripeFetcherRequest::FlushMetadata)
+            .unwrap();
 
         while stripe_fetcher
             .metadata_manager
@@ -458,7 +460,9 @@ mod tests {
         let req_sender = stripe_fetcher.req_sender();
 
         // First flush should persist initial metadata changes
-        req_sender.send(StripeFetcherRequest::Flush(0)).unwrap();
+        req_sender
+            .send(StripeFetcherRequest::FlushMetadata)
+            .unwrap();
         while stripe_fetcher
             .metadata_manager
             .shared_flush_state()
@@ -466,14 +470,16 @@ mod tests {
         {
             stripe_fetcher.update();
         }
-        assert!(stripe_fetcher.pending_flush_requests.is_empty());
-        assert!(stripe_fetcher.inprogress_flush_requests.is_empty());
+        assert!(stripe_fetcher.pending_flush_requests == 0);
+        assert!(stripe_fetcher.inprogress_flush_requests == 0);
 
         // Second flush should succeed even with no changes
-        req_sender.send(StripeFetcherRequest::Flush(1)).unwrap();
+        req_sender
+            .send(StripeFetcherRequest::FlushMetadata)
+            .unwrap();
         stripe_fetcher.update();
-        assert!(stripe_fetcher.pending_flush_requests.is_empty());
-        assert!(stripe_fetcher.inprogress_flush_requests.is_empty());
+        assert!(stripe_fetcher.pending_flush_requests == 0);
+        assert!(stripe_fetcher.inprogress_flush_requests == 0);
         assert!(!stripe_fetcher
             .metadata_manager
             .shared_flush_state()

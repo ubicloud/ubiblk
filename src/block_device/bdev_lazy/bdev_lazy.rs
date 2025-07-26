@@ -111,38 +111,34 @@ impl LazyIoChannel {
     }
 
     fn process_queued_flush_requests(&mut self) {
-        if self.queued_flush_requests.is_empty() {
-            return;
-        }
-
-        let current_metadata_version = self.metadata_flush_state.current_version();
-        while let Some(FlushRequest {
-            id,
-            pending_metadata_version,
-        }) = self.queued_flush_requests.pop_front()
-        {
-            if pending_metadata_version > current_metadata_version {
-                self.queued_flush_requests.push_front(FlushRequest {
-                    id,
-                    pending_metadata_version,
-                });
+        let current_version = self.metadata_flush_state.current_version();
+        while let Some(front) = self.queued_flush_requests.front() {
+            if front.pending_metadata_version > current_version {
                 break;
             }
+
+            let id = front.id;
+            self.queued_flush_requests.pop_front();
             self.base.add_flush(id);
         }
     }
 
     fn process_queued_rw_requests(&mut self) {
-        let mut added_requests = vec![];
-        while let Some(request) = self.queued_rw_requests.pop_front() {
-            if self.request_stripes_failed(&request) {
-                self.finished_requests.push((request.id, false));
+        let mut added_requests = Vec::new();
+
+        while let Some(front) = self.queued_rw_requests.front() {
+            if self.request_stripes_failed(front) {
+                let id = front.id;
+                self.queued_rw_requests.pop_front();
+                self.finished_requests.push((id, false));
                 continue;
             }
-            if !self.request_stripes_fetched(&request) {
-                self.queued_rw_requests.push_front(request);
+
+            if !self.request_stripes_fetched(front) {
                 break;
             }
+
+            let request = self.queued_rw_requests.pop_front().expect("front exists");
             let sector = request.sector_offset;
             match request.type_ {
                 RequestType::In => {

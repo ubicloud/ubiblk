@@ -243,7 +243,7 @@ impl IoChannel for LazyIoChannel {
 
         let current_metadata_version = self.metadata_flush_state.current_version();
 
-        if let Err(e) = self.sender.send(StripeFetcherRequest::Flush(id)) {
+        if let Err(e) = self.sender.send(StripeFetcherRequest::FlushMetadata) {
             error!("Failed to send flush request: {}", e);
             self.finished_requests.push((id, false));
         }

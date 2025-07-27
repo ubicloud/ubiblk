@@ -31,6 +31,7 @@ pub(crate) mod bdev_test;
 pub(crate) mod bdev_failing;
 
 pub use bdev_crypt::CryptBlockDevice;
+pub use bdev_lazy::init_metadata;
 pub use bdev_lazy::LazyBlockDevice;
 pub use bdev_lazy::StripeFetcher;
 pub use bdev_lazy::UbiMetadata;

@@ -3,7 +3,8 @@ mod tests {
     use crate::block_device::SharedBuffer;
     use crate::block_device::{
         bdev_lazy::{
-            stripe_fetcher::SharedStripeFetcher, LazyBlockDevice, StripeFetcher, UbiMetadata,
+            init_metadata, stripe_fetcher::SharedStripeFetcher, LazyBlockDevice, StripeFetcher,
+            UbiMetadata,
         },
         bdev_test::TestBlockDevice,
         BlockDevice, IoChannel,
@@ -60,7 +61,8 @@ mod tests {
         source_dev.write(0, &tmp, SECTOR_SIZE);
 
         let mut ch = metadata_dev.create_channel().unwrap();
-        UbiMetadata::new(stripe_shift).write(&mut ch).unwrap();
+        let metadata = UbiMetadata::new(stripe_shift);
+        init_metadata(&metadata, &mut ch).unwrap();
 
         let killfd = EventFd::new(0).unwrap();
         let fetcher = Arc::new(Mutex::new(
@@ -121,7 +123,8 @@ mod tests {
         image_dev.write(0, &tmp, SECTOR_SIZE);
 
         let mut ch = metadata_dev.create_channel().unwrap();
-        UbiMetadata::new(stripe_shift).write(&mut ch).unwrap();
+        let metadata = UbiMetadata::new(stripe_shift);
+        init_metadata(&metadata, &mut ch).unwrap();
 
         let killfd = EventFd::new(0).unwrap();
         let fetcher = Arc::new(Mutex::new(
@@ -182,7 +185,8 @@ mod tests {
         let target_metrics = target_dev.metrics.clone();
 
         let mut ch = metadata_dev.create_channel().unwrap();
-        UbiMetadata::new(stripe_shift).write(&mut ch).unwrap();
+        let metadata = UbiMetadata::new(stripe_shift);
+        init_metadata(&metadata, &mut ch).unwrap();
 
         let killfd = EventFd::new(0).unwrap();
         let fetcher = Arc::new(Mutex::new(

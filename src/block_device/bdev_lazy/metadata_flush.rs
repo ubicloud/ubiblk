@@ -9,16 +9,16 @@ use std::{
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error};
 
-use super::metadata::{StripeMetadataManager, UbiMetadata};
+use super::metadata::{MetadataManager, UbiMetadata};
 use super::metadata_init::{METADATA_FLUSH_ID, METADATA_WRITE_ID};
 
 #[derive(Debug, Clone)]
-pub struct MetadataFlushState {
+pub struct MetadataFlusher {
     metadata_version: Arc<AtomicU64>,
     metadata_version_flushed: Arc<AtomicU64>,
 }
 
-impl MetadataFlushState {
+impl MetadataFlusher {
     pub fn new() -> Self {
         Self {
             metadata_version: Arc::new(AtomicU64::new(1)),
@@ -50,7 +50,7 @@ impl MetadataFlushState {
     }
 }
 
-impl StripeMetadataManager {
+impl MetadataManager {
     pub fn start_flush(&mut self) -> Result<super::metadata::StartFlushResult> {
         if !self.flush_state.needs_flush() {
             debug!("No changes to flush");
@@ -86,7 +86,7 @@ impl StripeMetadataManager {
         Ok(super::metadata::StartFlushResult::Started)
     }
 
-    pub fn shared_flush_state(&self) -> MetadataFlushState {
+    pub fn shared_flush_state(&self) -> MetadataFlusher {
         self.flush_state.clone()
     }
 

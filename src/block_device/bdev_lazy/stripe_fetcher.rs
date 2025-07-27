@@ -5,8 +5,8 @@ use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
 use super::metadata::StartFlushResult;
-pub use super::metadata::{StripeMetadataManager, StripeStatus, StripeStatusVec};
-use crate::block_device::bdev_lazy::metadata_flush::MetadataFlushState;
+pub use super::metadata::{MetadataManager, StripeStatus, StripeStatusVec};
+use crate::block_device::bdev_lazy::metadata_flush::MetadataFlusher;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error, info};
@@ -33,7 +33,7 @@ pub struct StripeFetcher {
     fetch_target_channel: Box<dyn IoChannel>,
     source_sector_count: u64,
     target_sector_count: u64,
-    metadata_manager: Box<StripeMetadataManager>,
+    metadata_manager: Box<MetadataManager>,
     fetch_queue: VecDeque<usize>,
     req_receiver: Receiver<StripeFetcherRequest>,
     req_sender: Sender<StripeFetcherRequest>,
@@ -54,7 +54,7 @@ impl StripeFetcher {
     ) -> Result<Self> {
         let fetch_source_channel = source_dev.create_channel()?;
         let fetch_target_channel = target_dev.create_channel()?;
-        let metadata_manager = StripeMetadataManager::new(metadata_dev, source_dev.sector_count())?;
+        let metadata_manager = MetadataManager::new(metadata_dev, source_dev.sector_count())?;
 
         let stripe_size_u64 = metadata_manager
             .stripe_sector_count()
@@ -104,7 +104,7 @@ impl StripeFetcher {
         self.req_sender.clone()
     }
 
-    pub fn shared_flush_state(&self) -> MetadataFlushState {
+    pub fn shared_flush_state(&self) -> MetadataFlusher {
         self.metadata_manager.shared_flush_state()
     }
 

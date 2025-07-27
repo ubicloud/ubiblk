@@ -12,10 +12,10 @@ use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{error, info};
 
 use super::metadata::{
-    StripeMetadataManager, StripeStatus, StripeStatusVec, UbiMetadata, UBI_MAGIC, UBI_MAX_STRIPES,
+    MetadataManager, StripeStatus, StripeStatusVec, UbiMetadata, UBI_MAGIC, UBI_MAX_STRIPES,
 };
 
-impl StripeMetadataManager {
+impl MetadataManager {
     pub(crate) fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetadata>> {
         info!("Loading metadata from device");
 

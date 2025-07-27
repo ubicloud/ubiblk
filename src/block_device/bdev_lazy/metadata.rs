@@ -11,7 +11,7 @@ use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result};
 use log::error;
 
-use super::metadata_flush::MetadataFlushState;
+use super::metadata_flush::MetadataFlusher;
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -117,12 +117,12 @@ impl UbiMetadata {
     }
 }
 
-pub struct StripeMetadataManager {
+pub struct MetadataManager {
     pub(super) channel: Box<dyn IoChannel>,
     pub(crate) metadata: Box<UbiMetadata>,
     pub(super) stripe_status_vec: StripeStatusVec,
     pub(super) metadata_buf: SharedBuffer,
-    pub(super) flush_state: MetadataFlushState,
+    pub(super) flush_state: MetadataFlusher,
     pub(super) metadata_version_being_flushed: Option<u64>,
 }
 
@@ -131,19 +131,19 @@ pub enum StartFlushResult {
     NoChanges,
 }
 
-impl StripeMetadataManager {
+impl MetadataManager {
     pub fn new(metadata_dev: &dyn BlockDevice, source_sector_count: u64) -> Result<Box<Self>> {
         let mut channel = metadata_dev.create_channel()?;
         let metadata = Self::load_metadata(&mut channel)?;
         let stripe_status_vec = Self::create_stripe_status_vec(&metadata, source_sector_count)?;
         let metadata_size = std::mem::size_of::<UbiMetadata>();
         let metadata_buf_size = metadata_size.div_ceil(SECTOR_SIZE) * SECTOR_SIZE;
-        Ok(Box::new(StripeMetadataManager {
+        Ok(Box::new(MetadataManager {
             channel,
             metadata,
             stripe_status_vec,
             metadata_buf: Rc::new(RefCell::new(AlignedBuf::new(metadata_buf_size))),
-            flush_state: MetadataFlushState::new(),
+            flush_state: MetadataFlusher::new(),
             metadata_version_being_flushed: None,
         }))
     }

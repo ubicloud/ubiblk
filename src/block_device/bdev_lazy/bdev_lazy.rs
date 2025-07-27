@@ -5,7 +5,7 @@ use super::stripe_fetcher::{
     SharedStripeFetcher, StripeFetcherRequest, StripeStatus, StripeStatusVec,
 };
 use crate::{
-    block_device::{bdev_lazy::metadata_flush::MetadataFlushState, SharedBuffer},
+    block_device::{bdev_lazy::metadata_flush::MetadataFlusher, SharedBuffer},
     Result, VhostUserBlockError,
 };
 use log::error;
@@ -39,7 +39,7 @@ struct LazyIoChannel {
     finished_requests: Vec<(usize, bool)>,
     sender: Sender<StripeFetcherRequest>,
     stripe_status_vec: StripeStatusVec,
-    metadata_flush_state: MetadataFlushState,
+    metadata_flush_state: MetadataFlusher,
 }
 
 impl LazyIoChannel {
@@ -48,7 +48,7 @@ impl LazyIoChannel {
         image: Option<Box<dyn IoChannel>>,
         sender: Sender<StripeFetcherRequest>,
         stripe_status_vec: StripeStatusVec,
-        metadata_flush_state: MetadataFlushState,
+        metadata_flush_state: MetadataFlusher,
     ) -> Self {
         LazyIoChannel {
             base,

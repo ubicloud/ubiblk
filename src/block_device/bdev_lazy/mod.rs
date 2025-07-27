@@ -12,3 +12,4 @@ pub use stripe_fetcher::StripeFetcher;
 
 #[cfg(test)]
 mod bdev_lazy_tests;
+mod metadata_tests;

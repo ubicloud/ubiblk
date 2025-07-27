@@ -5,7 +5,7 @@ use super::stripe_fetcher::{
     SharedStripeFetcher, StripeFetcherRequest, StripeStatus, StripeStatusVec,
 };
 use crate::{
-    block_device::{bdev_lazy::stripe_metadata_manager::MetadataFlushState, SharedBuffer},
+    block_device::{bdev_lazy::metadata_flush::MetadataFlushState, SharedBuffer},
     Result, VhostUserBlockError,
 };
 use log::error;

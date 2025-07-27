@@ -4,9 +4,9 @@ use std::sync::{Arc, Mutex};
 use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
-use super::stripe_metadata_manager::StartFlushResult;
-pub use super::stripe_metadata_manager::{StripeMetadataManager, StripeStatus, StripeStatusVec};
-use crate::block_device::bdev_lazy::stripe_metadata_manager::MetadataFlushState;
+use super::metadata::StartFlushResult;
+pub use super::metadata::{StripeMetadataManager, StripeStatus, StripeStatusVec};
+use crate::block_device::bdev_lazy::metadata_flush::MetadataFlushState;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error, info};
@@ -316,7 +316,7 @@ unsafe impl Sync for StripeFetcher {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_device::bdev_lazy::{init_metadata, stripe_metadata_manager::UbiMetadata};
+    use crate::block_device::bdev_lazy::{init_metadata, metadata::UbiMetadata};
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::vhost_backend::SECTOR_SIZE;
     use crate::VhostUserBlockError;

@@ -28,8 +28,7 @@ const UBI_MAGIC_SIZE: usize = 9;
 const UBI_MAX_STRIPES: usize = 2 * 1024 * 1024;
 const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
 
-const METADATA_WRITE_ID: usize = 0;
-const METADATA_FLUSH_ID: usize = 1;
+use super::metadata_init::{METADATA_FLUSH_ID, METADATA_WRITE_ID};
 
 #[derive(Debug, Clone)]
 pub struct StripeStatusVec {
@@ -118,94 +117,6 @@ impl UbiMetadata {
             metadata_ptr.stripe_headers.fill(0);
         }
         unsafe { metadata.assume_init() }
-    }
-
-    pub fn write(&self, ch: &mut Box<dyn IoChannel>) -> Result<()> {
-        let metadata_size = std::mem::size_of::<UbiMetadata>();
-        let sectors = metadata_size.div_ceil(SECTOR_SIZE);
-        let buf = Rc::new(RefCell::new(AlignedBuf::new(sectors * SECTOR_SIZE)));
-
-        unsafe {
-            let src = self as *const UbiMetadata as *const u8;
-            let dst = buf.borrow_mut().as_mut_ptr();
-            copy_nonoverlapping(src, dst, metadata_size);
-        }
-        ch.add_write(0, sectors as u32, buf.clone(), METADATA_WRITE_ID);
-        ch.submit()?;
-
-        let timeout = std::time::Duration::from_secs(5);
-        let start_time = std::time::Instant::now();
-        let mut written = false;
-        let mut flushed = false;
-        while start_time.elapsed() < timeout && !flushed {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            if let Some((id, success)) = ch.poll().into_iter().next() {
-                if id == METADATA_WRITE_ID {
-                    if !success {
-                        error!(
-                            "Failed to write metadata after submitting {} sectors",
-                            sectors
-                        );
-                        return Err(VhostUserBlockError::IoError {
-                            source: std::io::Error::other("Failed to write metadata"),
-                        });
-                    } else if written {
-                        error!("Write ID received multiple times");
-                        return Err(VhostUserBlockError::IoError {
-                            source: std::io::Error::other("Write ID received multiple times"),
-                        });
-                    }
-
-                    info!("Metadata written successfully, flushing...");
-
-                    ch.add_flush(METADATA_FLUSH_ID);
-                    ch.submit()?;
-
-                    written = true;
-                } else if id == METADATA_FLUSH_ID {
-                    if !success {
-                        error!("Failed to flush metadata");
-                        return Err(VhostUserBlockError::IoError {
-                            source: std::io::Error::other("Failed to flush metadata"),
-                        });
-                    }
-                    flushed = true;
-                    info!("Metadata flushed successfully");
-                } else {
-                    error!("Unexpected completion ID: {}, expected 0", id);
-                    return Err(VhostUserBlockError::IoError {
-                        source: std::io::Error::other(format!("Unexpected ID: {}", id)),
-                    });
-                }
-            }
-        }
-
-        if !written {
-            error!(
-                "Timeout while writing metadata after {} seconds",
-                timeout.as_secs()
-            );
-            return Err(VhostUserBlockError::IoError {
-                source: std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Timeout while writing metadata",
-                ),
-            });
-        }
-        if !flushed {
-            error!(
-                "Timeout while flushing metadata after {} seconds",
-                timeout.as_secs()
-            );
-            return Err(VhostUserBlockError::IoError {
-                source: std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Timeout while flushing metadata",
-                ),
-            });
-        }
-
-        Ok(())
     }
 }
 
@@ -497,6 +408,7 @@ impl StripeMetadataManager {
 mod tests {
     use super::*;
     use crate::block_device::bdev_failing::FailingBlockDevice;
+    use crate::block_device::bdev_lazy::init_metadata;
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::VhostUserBlockError;
 
@@ -509,9 +421,8 @@ mod tests {
         let stripe_count = (source_sector_count + stripe_sector_count - 1) / stripe_sector_count;
 
         let mut ch = metadata_dev.create_channel()?;
-        UbiMetadata::new(stripe_sector_count_shift)
-            .write(&mut ch)
-            .unwrap();
+        let metadata = UbiMetadata::new(stripe_sector_count_shift);
+        init_metadata(&metadata, &mut ch).unwrap();
 
         let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
 
@@ -570,9 +481,8 @@ mod tests {
         let source_sector_count = 29 * stripe_sector_count + 4;
 
         let mut ch = metadata_dev.create_channel()?;
-        UbiMetadata::new(stripe_sector_count_shift)
-            .write(&mut ch)
-            .unwrap();
+        let metadata = UbiMetadata::new(stripe_sector_count_shift);
+        init_metadata(&metadata, &mut ch).unwrap();
 
         // Corrupt the magic bytes
         let bad_magic = [0u8; UBI_MAGIC_SIZE];
@@ -596,9 +506,8 @@ mod tests {
 
         {
             let mut ch = metadata_dev.create_channel()?;
-            UbiMetadata::new(stripe_sector_count_shift)
-                .write(&mut ch)
-                .unwrap();
+            let metadata = UbiMetadata::new(stripe_sector_count_shift);
+            init_metadata(&metadata, &mut ch).unwrap();
         }
 
         let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
@@ -622,9 +531,8 @@ mod tests {
 
         {
             let mut ch = metadata_dev.create_channel()?;
-            UbiMetadata::new(stripe_sector_count_shift)
-                .write(&mut ch)
-                .unwrap();
+            let metadata = UbiMetadata::new(stripe_sector_count_shift);
+            init_metadata(&metadata, &mut ch).unwrap();
         }
 
         let mut manager = StripeMetadataManager::new(&metadata_dev, source_sector_count)?;
@@ -647,9 +555,8 @@ mod tests {
         let source_sector_count = (UBI_MAX_STRIPES as u64 + 1) * stripe_sector_count;
 
         let mut ch = metadata_dev.create_channel()?;
-        UbiMetadata::new(stripe_sector_count_shift)
-            .write(&mut ch)
-            .unwrap();
+        let metadata = UbiMetadata::new(stripe_sector_count_shift);
+        init_metadata(&metadata, &mut ch).unwrap();
 
         let result = StripeMetadataManager::new(&metadata_dev, source_sector_count);
         assert!(matches!(

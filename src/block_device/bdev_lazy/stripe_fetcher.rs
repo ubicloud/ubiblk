@@ -316,7 +316,7 @@ unsafe impl Sync for StripeFetcher {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_device::bdev_lazy::stripe_metadata_manager::UbiMetadata;
+    use crate::block_device::bdev_lazy::{init_metadata, stripe_metadata_manager::UbiMetadata};
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::vhost_backend::SECTOR_SIZE;
     use crate::VhostUserBlockError;
@@ -331,9 +331,8 @@ mod tests {
         let mut ch = metadata_dev
             .create_channel()
             .expect("Failed to create channel");
-        UbiMetadata::new(stripe_sector_count_shift)
-            .write(&mut ch)
-            .unwrap();
+        let metadata = UbiMetadata::new(stripe_sector_count_shift);
+        init_metadata(&metadata, &mut ch).unwrap();
 
         let killfd = EventFd::new(0).unwrap();
         let mut stripe_fetcher =
@@ -426,9 +425,8 @@ mod tests {
         let mut ch = metadata_dev
             .create_channel()
             .expect("Failed to create channel");
-        UbiMetadata::new(stripe_sector_count_shift)
-            .write(&mut ch)
-            .unwrap();
+        let metadata = UbiMetadata::new(stripe_sector_count_shift);
+        init_metadata(&metadata, &mut ch).unwrap();
 
         let killfd = EventFd::new(0).unwrap();
         let res = StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd, 512);
@@ -451,7 +449,8 @@ mod tests {
         let mut ch = metadata_dev
             .create_channel()
             .expect("Failed to create channel");
-        UbiMetadata::new(stripe_shift).write(&mut ch).unwrap();
+        let metadata = UbiMetadata::new(stripe_shift);
+        init_metadata(&metadata, &mut ch).unwrap();
 
         let killfd = EventFd::new(0).unwrap();
         let mut stripe_fetcher =

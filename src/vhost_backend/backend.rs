@@ -16,7 +16,7 @@ use crate::{
 };
 
 use super::{backend_thread::UbiBlkBackendThread, KeyEncryptionCipher, Options};
-use crate::block_device::UbiMetadata;
+use crate::block_device::{init_metadata as init_metadata_file, UbiMetadata};
 use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
 use crate::Result;
 use log::{debug, error, info};
@@ -459,6 +459,6 @@ pub fn init_metadata(
     let metadata_bdev = build_block_device(&metadata_path, config, kek.clone())?;
     let mut ch = metadata_bdev.create_channel()?;
     let metadata = UbiMetadata::new(stripe_sector_count_shift);
-    metadata.write(&mut ch)?;
+    init_metadata_file(&metadata, &mut ch)?;
     Ok(())
 }

@@ -2,10 +2,7 @@
 mod tests {
     use crate::block_device::SharedBuffer;
     use crate::block_device::{
-        bdev_lazy::{
-            init_metadata, stripe_fetcher::SharedStripeFetcher, LazyBlockDevice, StripeFetcher,
-            UbiMetadata,
-        },
+        bdev_lazy::{init_metadata, BgWorker, LazyBlockDevice, SharedBgWorker, UbiMetadata},
         bdev_test::TestBlockDevice,
         BlockDevice, IoChannel,
     };
@@ -18,12 +15,12 @@ mod tests {
     use std::time::Duration;
     use vmm_sys_util::eventfd::EventFd;
 
-    /// Poll the channel and stripe fetcher until all operations complete.
-    fn drive(fetcher: &SharedStripeFetcher, chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
+    /// Poll the channel and the bgworker until all operations complete.
+    fn drive(bgworker: &SharedBgWorker, chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
         let mut results = Vec::new();
         loop {
             {
-                let mut f = fetcher.lock().unwrap();
+                let mut f = bgworker.lock().unwrap();
                 f.update();
             }
             results.extend(chan.poll());
@@ -33,7 +30,7 @@ mod tests {
             sleep(Duration::from_millis(1));
         }
         {
-            let mut f = fetcher.lock().unwrap();
+            let mut f = bgworker.lock().unwrap();
             f.update();
         }
         results.extend(chan.poll());
@@ -65,17 +62,17 @@ mod tests {
         init_metadata(&metadata, &mut ch).unwrap();
 
         let killfd = EventFd::new(0).unwrap();
-        let fetcher = Arc::new(Mutex::new(
-            StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
+        let bgworker: SharedBgWorker = Arc::new(Mutex::new(
+            BgWorker::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
         ));
 
-        let lazy = LazyBlockDevice::new(Box::new(target_dev), None, fetcher.clone()).unwrap();
+        let lazy = LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone()).unwrap();
         let mut chan = lazy.create_channel().unwrap();
 
         let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
-        let results = drive(&fetcher, &mut chan);
+        let results = drive(&bgworker, &mut chan);
         assert_eq!(results, vec![(1, true)]);
         assert_eq!(&read_buf.borrow().as_slice()[..data.len()], data);
         assert_eq!(&target_mem.read().unwrap()[0..data.len()], data);
@@ -85,7 +82,7 @@ mod tests {
         write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(stripe_sectors, 1, write_buf.clone(), 2);
         chan.submit().unwrap();
-        let results = drive(&fetcher, &mut chan);
+        let results = drive(&bgworker, &mut chan);
         assert_eq!(results, vec![(2, true)]);
         let start = stripe_sectors as usize * SECTOR_SIZE;
         assert_eq!(
@@ -96,7 +93,7 @@ mod tests {
         let flush_id = 3;
         chan.add_flush(flush_id);
         chan.submit().unwrap();
-        let results = drive(&fetcher, &mut chan);
+        let results = drive(&bgworker, &mut chan);
         assert_eq!(results, vec![(flush_id, true)]);
         assert_eq!(target_metrics.read().unwrap().flushes, 1);
     }
@@ -127,14 +124,14 @@ mod tests {
         init_metadata(&metadata, &mut ch).unwrap();
 
         let killfd = EventFd::new(0).unwrap();
-        let fetcher = Arc::new(Mutex::new(
-            StripeFetcher::new(&image_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
+        let bgworker: SharedBgWorker = Arc::new(Mutex::new(
+            BgWorker::new(&image_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
         ));
 
         let lazy = LazyBlockDevice::new(
             Box::new(target_dev),
             Some(Box::new(image_dev)),
-            fetcher.clone(),
+            bgworker.clone(),
         )
         .unwrap();
         let mut chan = lazy.create_channel().unwrap();
@@ -142,7 +139,7 @@ mod tests {
         let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
-        let results = drive(&fetcher, &mut chan);
+        let results = drive(&bgworker, &mut chan);
         assert_eq!(results, vec![(1, true)]);
         assert_eq!(&read_buf.borrow().as_slice()[..data.len()], data);
         assert_ne!(&target_mem.read().unwrap()[0..data.len()], data);
@@ -154,7 +151,7 @@ mod tests {
         write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(stripe_sectors, 1, write_buf.clone(), 2);
         chan.submit().unwrap();
-        let results = drive(&fetcher, &mut chan);
+        let results = drive(&bgworker, &mut chan);
         assert_eq!(results, vec![(2, true)]);
         let start = stripe_sectors as usize * SECTOR_SIZE;
         assert_eq!(
@@ -165,7 +162,7 @@ mod tests {
         let flush_id = 3;
         chan.add_flush(flush_id);
         chan.submit().unwrap();
-        let results = drive(&fetcher, &mut chan);
+        let results = drive(&bgworker, &mut chan);
         assert_eq!(results, vec![(flush_id, true)]);
         assert_eq!(target_metrics.read().unwrap().flushes, 1);
     }
@@ -189,26 +186,26 @@ mod tests {
         init_metadata(&metadata, &mut ch).unwrap();
 
         let killfd = EventFd::new(0).unwrap();
-        let fetcher = Arc::new(Mutex::new(
-            StripeFetcher::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
+        let bgworker: SharedBgWorker = Arc::new(Mutex::new(
+            BgWorker::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
         ));
 
-        let lazy = LazyBlockDevice::new(Box::new(target_dev), None, fetcher.clone()).unwrap();
+        let lazy = LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone()).unwrap();
         let mut chan = lazy.create_channel().unwrap();
 
         let flush_id = 42;
         chan.add_flush(flush_id);
         chan.submit().unwrap();
 
-        // Without running the fetcher, the flush should remain pending.
+        // Without running the bgworker, the flush should remain pending.
         assert!(chan.poll().is_empty());
         assert!(chan.busy());
         assert_eq!(target_metrics.read().unwrap().flushes, 0);
         // Only the initial metadata write has been flushed so far.
         assert_eq!(metadata_dev.flushes(), 1);
 
-        // Drive the fetcher and channel to completion.
-        let results = drive(&fetcher, &mut chan);
+        // Drive the bgworker and channel to completion.
+        let results = drive(&bgworker, &mut chan);
         assert_eq!(results, vec![(flush_id, true)]);
         assert_eq!(target_metrics.read().unwrap().flushes, 1);
         assert_eq!(metadata_dev.flushes(), 2);

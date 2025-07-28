@@ -316,7 +316,7 @@ unsafe impl Sync for StripeFetcher {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_device::bdev_lazy::{init_metadata, stripe_metadata_manager::UbiMetadata};
+    use crate::block_device::bdev_lazy::init_metadata;
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::vhost_backend::SECTOR_SIZE;
     use crate::VhostUserBlockError;

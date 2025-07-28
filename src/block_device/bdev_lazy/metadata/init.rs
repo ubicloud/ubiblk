@@ -1,6 +1,6 @@
 use std::{cell::RefCell, ptr::copy_nonoverlapping, rc::Rc};
 
-use super::super::{IoChannel, UbiMetadata};
+use crate::block_device::{IoChannel, UbiMetadata};
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{error, info};

@@ -11,7 +11,7 @@ use crate::{
     VhostUserBlockError,
 };
 use crate::{
-    block_device::{self, BlockDevice, StripeFetcher},
+    block_device::{self, BgWorker, BlockDevice},
     vhost_backend::SECTOR_SIZE,
 };
 
@@ -328,7 +328,7 @@ pub fn start_block_backend(
             let readonly = true;
             let image_bdev =
                 UringBlockDevice::new(PathBuf::from(path), 64, readonly, options.direct_io)?;
-            let stripe_fetcher = StripeFetcher::new(
+            let stripe_fetcher = BgWorker::new(
                 &*image_bdev,
                 &*base_block_device,
                 &*metadata_dev,
@@ -372,7 +372,7 @@ pub fn start_block_backend(
         Some(stripe_fetcher) => {
             let stripe_fetcher_clone = stripe_fetcher.clone();
             let handle = std::thread::Builder::new()
-                .name("stripe-fetcher".to_string())
+                .name("bgworker".to_string())
                 .spawn(move || {
                     stripe_fetcher_clone.lock().unwrap().run();
                 })?;
@@ -409,15 +409,15 @@ pub fn start_block_backend(
     info!("Finished shutting down worker threads!");
 
     if let Some(handle) = stripe_fetcher_thread {
-        info!("Shutting down stripe fetcher thread ...");
+        info!("Shutting down bgworker thread ...");
         if let Err(e) = stripe_fetcher_killfd.write(1) {
-            error!("Error shutting down stripe fetcher thread: {:?}", e);
+            error!("Error shutting down bgworker thread: {:?}", e);
         }
-        info!("Waiting for stripe fetcher thread to join ...");
+        info!("Waiting for bgworker thread to join ...");
         handle.join().unwrap();
-        info!("Stripe fetcher thread joined");
+        info!("Bgworker thread joined");
     } else {
-        info!("No stripe fetcher thread to join");
+        info!("No bgworker thread to join");
     }
 
     info!("Daemon is finished!");

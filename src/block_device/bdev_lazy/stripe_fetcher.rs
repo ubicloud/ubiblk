@@ -191,8 +191,13 @@ impl StripeFetcher {
 
     fn fetch_completed(&mut self, buffer_idx: usize, success: bool) -> (usize, bool) {
         let fetch_buffer = &mut self.fetch_buffers[buffer_idx];
-        let stripe_id = fetch_buffer.used_for.unwrap();
-        fetch_buffer.used_for = None;
+        let stripe_id = match fetch_buffer.used_for.take() {
+            Some(id) => id,
+            None => {
+                error!("fetch_completed called with unused buffer {buffer_idx}");
+                return (0, false);
+            }
+        };
 
         debug!("Fetch completed for stripe {stripe_id}, success={success}");
 
@@ -209,7 +214,13 @@ impl StripeFetcher {
 
     fn start_write(&mut self, buffer_idx: usize) -> bool {
         let fetch_buffer = &mut self.fetch_buffers[buffer_idx];
-        let stripe_id = fetch_buffer.used_for.unwrap();
+        let stripe_id = match fetch_buffer.used_for {
+            Some(id) => id,
+            None => {
+                error!("start_write called with unused buffer {buffer_idx}");
+                return false;
+            }
+        };
         let buf = fetch_buffer.buf.clone();
         let stripe_sector_offset = stripe_id as u64 * self.stripe_sector_count;
         let stripe_sector_count = self
@@ -254,11 +265,13 @@ impl StripeFetcher {
                 .fetch_buffers
                 .iter()
                 .position(|buf| buf.used_for.is_none());
-            if maybe_buffer_idx.is_none() {
-                self.fetch_queue.push_front(stripe_id);
-                break;
-            }
-            let buffer_idx = maybe_buffer_idx.unwrap();
+            let buffer_idx = match maybe_buffer_idx {
+                Some(idx) => idx,
+                None => {
+                    self.fetch_queue.push_front(stripe_id);
+                    break;
+                }
+            };
             let fetch_buffer = &mut self.fetch_buffers[buffer_idx];
             fetch_buffer.used_for = Some(stripe_id);
 

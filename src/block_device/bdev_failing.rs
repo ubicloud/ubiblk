@@ -1,6 +1,7 @@
 use crate::block_device::bdev_test::TestBlockDevice;
 use crate::block_device::{BlockDevice, IoChannel, SharedBuffer};
 use crate::Result;
+use log::error;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -21,7 +22,14 @@ impl IoChannel for FailingIoChannel {
     }
 
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = match self.state.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to lock state mutex: {e}");
+                self.pending.push((id, false));
+                return;
+            }
+        };
         if state.fail_next_write {
             state.fail_next_write = false;
             self.pending.push((id, false));
@@ -31,7 +39,14 @@ impl IoChannel for FailingIoChannel {
     }
 
     fn add_flush(&mut self, id: usize) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = match self.state.lock() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to lock state mutex: {e}");
+                self.pending.push((id, false));
+                return;
+            }
+        };
         if state.fail_next_flush {
             state.fail_next_flush = false;
             self.pending.push((id, false));
@@ -69,13 +84,19 @@ impl FailingBlockDevice {
     }
 
     pub fn fail_next_write(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.fail_next_write = true;
+        if let Ok(mut state) = self.state.lock() {
+            state.fail_next_write = true;
+        } else {
+            error!("Failed to lock state mutex");
+        }
     }
 
     pub fn fail_next_flush(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.fail_next_flush = true;
+        if let Ok(mut state) = self.state.lock() {
+            state.fail_next_flush = true;
+        } else {
+            error!("Failed to lock state mutex");
+        }
     }
 }
 

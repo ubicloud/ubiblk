@@ -31,7 +31,14 @@ pub fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetad
         });
     }
 
-    let (id, success) = results.pop().unwrap();
+    let (id, success) = match results.pop() {
+        Some(v) => v,
+        None => {
+            return Err(VhostUserBlockError::MetadataError {
+                description: "Missing poll result".to_string(),
+            });
+        }
+    };
     if !success || id != 0 {
         error!("Failed to read metadata: id {id}, success {success}");
         return Err(VhostUserBlockError::MetadataError {

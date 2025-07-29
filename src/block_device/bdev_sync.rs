@@ -34,7 +34,14 @@ impl SyncIoChannel {
 impl IoChannel for SyncIoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let mut buf = buf.borrow_mut();
-        let mut file = self.file.lock().unwrap();
+        let mut file = match self.file.lock() {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to lock file mutex: {e}");
+                self.finished_requests.push((id, false));
+                return;
+            }
+        };
         let len = sector_count as usize * SECTOR_SIZE;
         if let Err(e) = file.seek(SeekFrom::Start(sector_offset * SECTOR_SIZE as u64)) {
             error!("Error seeking to sector {sector_offset}: {e}");
@@ -52,7 +59,14 @@ impl IoChannel for SyncIoChannel {
 
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let buf = buf.borrow();
-        let mut file = self.file.lock().unwrap();
+        let mut file = match self.file.lock() {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to lock file mutex: {e}");
+                self.finished_requests.push((id, false));
+                return;
+            }
+        };
         let len = sector_count as usize * SECTOR_SIZE;
 
         if let Err(e) = file.seek(SeekFrom::Start(sector_offset * SECTOR_SIZE as u64)) {
@@ -70,7 +84,14 @@ impl IoChannel for SyncIoChannel {
     }
 
     fn add_flush(&mut self, id: usize) {
-        let mut file = self.file.lock().unwrap();
+        let mut file = match self.file.lock() {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to lock file mutex: {e}");
+                self.finished_requests.push((id, false));
+                return;
+            }
+        };
         if file.flush().is_err() {
             self.finished_requests.push((id, false));
             return;

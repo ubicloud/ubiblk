@@ -6,13 +6,13 @@ use std::{
 };
 
 use crate::{
-    block_device::UringBlockDevice,
-    utils::block::{features_to_str, VirtioBlockConfig},
-    VhostUserBlockError,
-};
-use crate::{
     block_device::{self, BgWorker, BlockDevice},
     vhost_backend::SECTOR_SIZE,
+};
+use crate::{
+    block_device::{BgWorkerRequest, UringBlockDevice},
+    utils::block::{features_to_str, VirtioBlockConfig},
+    VhostUserBlockError,
 };
 
 use super::{backend_thread::UbiBlkBackendThread, KeyEncryptionCipher, Options};
@@ -312,8 +312,7 @@ pub fn start_block_backend(
 
     let base_block_device = build_block_device(&options.path, options, kek.clone())?;
 
-    let stripe_fetcher_killfd = EventFd::new(libc::EFD_NONBLOCK)?;
-    let maybe_fetcher_base_pair = match options.image_path {
+    let maybe_bgworker_base_pair = match options.image_path {
         Some(ref path) => {
             if options.metadata_path.is_none() {
                 return Err(Box::new(VhostUserBlockError::InvalidParameter {
@@ -326,23 +325,20 @@ pub fn start_block_backend(
             let readonly = true;
             let image_bdev =
                 UringBlockDevice::new(PathBuf::from(path), 64, readonly, options.direct_io)?;
-            let stripe_fetcher = BgWorker::new(
-                &*image_bdev,
-                &*base_block_device,
-                &*metadata_dev,
-                stripe_fetcher_killfd.try_clone()?,
-                alignment,
-            )?;
-            Some((Arc::new(Mutex::new(stripe_fetcher)), image_bdev))
+            let bgworker =
+                BgWorker::new(&*image_bdev, &*base_block_device, &*metadata_dev, alignment)?;
+            Some((Arc::new(Mutex::new(bgworker)), image_bdev))
         }
         None => None,
     };
 
-    let mut maybe_stripe_fetcher = None;
+    let mut maybe_bgworker = None;
+    let mut maybe_bgworker_ch = None;
 
-    let block_device = match maybe_fetcher_base_pair {
-        Some((stripe_fetcher, image_bdev)) => {
-            maybe_stripe_fetcher = Some(stripe_fetcher.clone());
+    let block_device = match maybe_bgworker_base_pair {
+        Some((bgworker, image_bdev)) => {
+            maybe_bgworker = Some(bgworker.clone());
+            maybe_bgworker_ch = Some(bgworker.lock().unwrap().req_sender());
             let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
                 None
             } else {
@@ -351,7 +347,7 @@ pub fn start_block_backend(
             block_device::LazyBlockDevice::new(
                 base_block_device,
                 maybe_image_bdev,
-                stripe_fetcher.clone(),
+                bgworker.clone(),
             )?
         }
         None => base_block_device,
@@ -366,13 +362,13 @@ pub fn start_block_backend(
 
     info!("Backend is created!");
 
-    let stripe_fetcher_thread = match maybe_stripe_fetcher.as_ref() {
-        Some(stripe_fetcher) => {
-            let stripe_fetcher_clone = stripe_fetcher.clone();
+    let bgworker_thread = match maybe_bgworker.as_ref() {
+        Some(bgworker) => {
+            let bgworker_clone = bgworker.clone();
             let handle = std::thread::Builder::new()
                 .name("bgworker".to_string())
                 .spawn(move || {
-                    stripe_fetcher_clone.lock().unwrap().run();
+                    bgworker_clone.lock().unwrap().run();
                 })?;
             Some(handle)
         }
@@ -404,11 +400,13 @@ pub fn start_block_backend(
 
     info!("Finished shutting down worker threads!");
 
-    if let Some(handle) = stripe_fetcher_thread {
+    if let Some(handle) = bgworker_thread {
         info!("Shutting down bgworker thread ...");
-        if let Err(e) = stripe_fetcher_killfd.write(1) {
-            error!("Error shutting down bgworker thread: {e:?}");
-        }
+        maybe_bgworker_ch.iter().for_each(|ch| {
+            if let Err(e) = ch.send(BgWorkerRequest::Shutdown) {
+                error!("Failed to send shutdown request to bgworker: {e:?}");
+            }
+        });
         info!("Waiting for bgworker thread to join ...");
         handle.join().unwrap();
         info!("Bgworker thread joined");

@@ -13,7 +13,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread::sleep;
     use std::time::Duration;
-    use vmm_sys_util::eventfd::EventFd;
 
     /// Poll the channel and the bgworker until all operations complete.
     fn drive(bgworker: &SharedBgWorker, chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
@@ -21,6 +20,7 @@ mod tests {
         loop {
             {
                 let mut f = bgworker.lock().unwrap();
+                f.receive_requests();
                 f.update();
             }
             results.extend(chan.poll());
@@ -31,6 +31,7 @@ mod tests {
         }
         {
             let mut f = bgworker.lock().unwrap();
+            f.receive_requests();
             f.update();
         }
         results.extend(chan.poll());
@@ -61,9 +62,8 @@ mod tests {
         let metadata = UbiMetadata::new(stripe_shift);
         init_metadata(&metadata, &mut ch).unwrap();
 
-        let killfd = EventFd::new(0).unwrap();
         let bgworker: SharedBgWorker = Arc::new(Mutex::new(
-            BgWorker::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
+            BgWorker::new(&source_dev, &target_dev, &metadata_dev, 512).unwrap(),
         ));
 
         let lazy = LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone()).unwrap();
@@ -123,9 +123,8 @@ mod tests {
         let metadata = UbiMetadata::new(stripe_shift);
         init_metadata(&metadata, &mut ch).unwrap();
 
-        let killfd = EventFd::new(0).unwrap();
         let bgworker: SharedBgWorker = Arc::new(Mutex::new(
-            BgWorker::new(&image_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
+            BgWorker::new(&image_dev, &target_dev, &metadata_dev, 512).unwrap(),
         ));
 
         let lazy = LazyBlockDevice::new(
@@ -185,9 +184,8 @@ mod tests {
         let metadata = UbiMetadata::new(stripe_shift);
         init_metadata(&metadata, &mut ch).unwrap();
 
-        let killfd = EventFd::new(0).unwrap();
         let bgworker: SharedBgWorker = Arc::new(Mutex::new(
-            BgWorker::new(&source_dev, &target_dev, &metadata_dev, killfd, 512).unwrap(),
+            BgWorker::new(&source_dev, &target_dev, &metadata_dev, 512).unwrap(),
         ));
 
         let lazy = LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone()).unwrap();

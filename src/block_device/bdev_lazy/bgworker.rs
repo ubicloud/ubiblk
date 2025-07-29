@@ -9,11 +9,11 @@ use std::sync::{
     mpsc::{Receiver, Sender},
     Arc, Mutex,
 };
-use vmm_sys_util::eventfd::EventFd;
 
 pub enum BgWorkerRequest {
     Fetch(usize),
     FlushMetadata,
+    Shutdown,
 }
 
 pub struct BgWorker {
@@ -21,7 +21,7 @@ pub struct BgWorker {
     metadata_flusher: MetadataFlusher,
     req_receiver: Receiver<BgWorkerRequest>,
     req_sender: Sender<BgWorkerRequest>,
-    killfd: EventFd,
+    done: bool,
 }
 
 pub type SharedBgWorker = Arc<Mutex<BgWorker>>;
@@ -31,7 +31,6 @@ impl BgWorker {
         source_dev: &dyn BlockDevice,
         target_dev: &dyn BlockDevice,
         metadata_dev: &dyn BlockDevice,
-        killfd: EventFd,
         alignment: usize,
     ) -> Result<Self> {
         let metadata_flusher = MetadataFlusher::new(metadata_dev)?;
@@ -51,7 +50,7 @@ impl BgWorker {
             metadata_flusher,
             req_receiver: rx,
             req_sender: tx,
-            killfd,
+            done: false,
         })
     }
 
@@ -67,17 +66,21 @@ impl BgWorker {
         self.metadata_flusher.shared_flush_state()
     }
 
-    fn receive_requests(&mut self) {
+    pub fn receive_requests(&mut self) {
         while let Ok(req) = self.req_receiver.try_recv() {
             match req {
                 BgWorkerRequest::Fetch(id) => self.stripe_fetcher.handle_fetch_request(id),
                 BgWorkerRequest::FlushMetadata => self.metadata_flusher.request_flush(),
+                BgWorkerRequest::Shutdown => {
+                    info!("Received shutdown request, stopping worker");
+                    self.done = true;
+                    break;
+                }
             }
         }
     }
 
     pub fn update(&mut self) {
-        self.receive_requests();
         let completed = self.stripe_fetcher.update();
         for (stripe_id, success) in completed {
             if success {
@@ -88,12 +91,9 @@ impl BgWorker {
     }
 
     pub fn run(&mut self) {
-        loop {
+        while !self.done {
+            self.receive_requests();
             self.update();
-            if self.killfd.read().is_ok() {
-                info!("Received kill signal, shutting down");
-                break;
-            }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }

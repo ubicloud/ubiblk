@@ -2,6 +2,7 @@
 mod tests {
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
+    use crate::utils::block::VirtioBlockConfig;
     use crate::vhost_backend::{
         init_metadata, start_block_backend, KeyEncryptionCipher, Options, UbiBlkBackend,
         SECTOR_SIZE,
@@ -116,5 +117,89 @@ mod tests {
         let opts = default_options("img".to_string());
         let res = init_metadata(&opts, KeyEncryptionCipher::default(), 4);
         assert!(res.is_err());
+    }
+
+    /// The features method should advertise common virtio features.
+    #[test]
+    fn features_advertise_bits() {
+        let opts = default_options("img".to_string());
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+
+        let features = backend.features();
+        use virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
+        use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
+        assert!(features & (1 << VIRTIO_F_VERSION_1) != 0);
+        assert!(features & (1 << VIRTIO_RING_F_EVENT_IDX) != 0);
+    }
+
+    /// acked_features should accept arbitrary feature flags without panicking.
+    #[test]
+    fn acked_features_noop() {
+        let opts = default_options("img".to_string());
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+
+        backend.acked_features(1 << VIRTIO_BLK_F_FLUSH);
+    }
+
+    /// set_event_idx(false) should clear the flag on all worker threads.
+    #[test]
+    fn clear_event_index() {
+        let opts = default_options("img".to_string());
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        backend.set_event_idx(true);
+        backend.set_event_idx(false);
+        for thread in backend.threads().iter() {
+            assert!(!thread.lock().unwrap().event_idx);
+        }
+    }
+
+    /// get_config should return a valid VirtioBlockConfig structure.
+    #[test]
+    fn get_config_returns_struct() {
+        let opts = default_options("img".to_string());
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+
+        let bytes = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
+        assert_eq!(bytes.len(), std::mem::size_of::<VirtioBlockConfig>());
+        let config: VirtioBlockConfig =
+            unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const VirtioBlockConfig) };
+        let capacity = config.capacity;
+        let blk_size = config.blk_size;
+        let queues = config.num_queues;
+        assert_eq!(capacity, 8);
+        assert_eq!(blk_size, SECTOR_SIZE as u32);
+        assert_eq!(queues as usize, opts.num_queues);
+    }
+
+    /// queues_per_thread should reflect the number of queues configured.
+    #[test]
+    fn queues_per_thread_multiple() {
+        let mut opts = default_options("img".to_string());
+        opts.num_queues = 3;
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+
+        assert_eq!(backend.queues_per_thread(), vec![1, 2, 4]);
+    }
+
+    /// update_memory is currently a no-op and should succeed.
+    #[test]
+    fn update_memory_nop() {
+        let opts = default_options("img".to_string());
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let mem2 = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+
+        assert!(backend.update_memory(mem2).is_ok());
     }
 }

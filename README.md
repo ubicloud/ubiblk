@@ -31,7 +31,11 @@ cargo build --release --features disable-isal-crypto
 4. Run the tests:
 
 ```bash
+# With isa-l_crypto
 cargo test
+
+# Without isa-l_crypto
+cargo test --release --features disable-isal-crypto
 ```
 
 ## vhost-backend

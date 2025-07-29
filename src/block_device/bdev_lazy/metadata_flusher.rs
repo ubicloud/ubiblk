@@ -10,9 +10,7 @@ use crate::{
 };
 use log::{debug, error};
 use std::{
-    cell::RefCell,
     ptr::copy_nonoverlapping,
-    rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -69,7 +67,7 @@ pub enum StartFlushResult {
 }
 
 pub struct MetadataFlusher {
-    channel: Box<dyn IoChannel>,
+    channel: Box<dyn IoChannel + Send>,
     metadata: Box<UbiMetadata>,
     metadata_buf: SharedBuffer,
     flush_state: MetadataFlushState,
@@ -87,7 +85,7 @@ impl MetadataFlusher {
         Ok(MetadataFlusher {
             channel,
             metadata,
-            metadata_buf: Rc::new(RefCell::new(AlignedBuf::new(metadata_buf_size))),
+            metadata_buf: SharedBuffer::new(AlignedBuf::new(metadata_buf_size)),
             flush_state: MetadataFlushState::new(),
             metadata_version_being_flushed: None,
             pending_flush_requests: 0,

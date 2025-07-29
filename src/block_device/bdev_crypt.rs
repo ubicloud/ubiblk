@@ -25,7 +25,7 @@ struct Request {
 }
 
 struct CryptIoChannel {
-    base: Box<dyn IoChannel>,
+    base: Box<dyn IoChannel + Send>,
     #[cfg_attr(feature = "disable-isal-crypto", allow(dead_code))]
     key1: [u8; 32],
     #[cfg_attr(feature = "disable-isal-crypto", allow(dead_code))]
@@ -36,7 +36,7 @@ struct CryptIoChannel {
 }
 
 impl CryptIoChannel {
-    pub fn new(base: Box<dyn IoChannel>, key1: [u8; 32], key2: [u8; 32]) -> Self {
+    pub fn new(base: Box<dyn IoChannel + Send>, key1: [u8; 32], key2: [u8; 32]) -> Self {
         #[cfg(feature = "disable-isal-crypto")]
         let xts = {
             let cipher1 = Aes256::new(GenericArray::from_slice(&key1));
@@ -204,7 +204,7 @@ pub struct CryptBlockDevice {
 }
 
 impl BlockDevice for CryptBlockDevice {
-    fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
+    fn create_channel(&self) -> Result<Box<dyn IoChannel + Send>> {
         let base_channel = self.base.create_channel()?;
         let crypt_channel = CryptIoChannel::new(base_channel, self.key1, self.key2);
         Ok(Box::new(crypt_channel))
@@ -359,7 +359,7 @@ mod tests {
         );
 
         let sample_data = "Hello, world!".as_bytes();
-        let buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let buf = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
 
         for i in 0..2 {
             buf.borrow_mut().as_mut_slice()[0..sample_data.len()].copy_from_slice(sample_data);

@@ -29,8 +29,8 @@ struct FlushRequest {
 }
 
 struct LazyIoChannel {
-    base: Box<dyn IoChannel>,
-    image: Option<Box<dyn IoChannel>>,
+    base: Box<dyn IoChannel + Send>,
+    image: Option<Box<dyn IoChannel + Send>>,
     queued_rw_requests: VecDeque<RWRequest>,
     queued_flush_requests: VecDeque<FlushRequest>,
     finished_requests: Vec<(usize, bool)>,
@@ -41,8 +41,8 @@ struct LazyIoChannel {
 
 impl LazyIoChannel {
     fn new(
-        base: Box<dyn IoChannel>,
-        image: Option<Box<dyn IoChannel>>,
+        base: Box<dyn IoChannel + Send>,
+        image: Option<Box<dyn IoChannel + Send>>,
         bgworker_ch: Sender<BgWorkerRequest>,
         stripe_status_vec: StripeStatusVec,
         metadata_flush_state: MetadataFlushState,
@@ -306,7 +306,7 @@ impl LazyBlockDevice {
 }
 
 impl BlockDevice for LazyBlockDevice {
-    fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
+    fn create_channel(&self) -> Result<Box<dyn IoChannel + Send>> {
         let base_channel = self.base.create_channel()?;
         let image_channel = if let Some(image) = &self.image {
             Some(image.create_channel()?)

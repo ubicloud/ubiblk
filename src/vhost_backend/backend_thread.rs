@@ -1,7 +1,5 @@
-use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
-use std::rc::Rc;
 use std::{ops::Deref, sync::RwLockWriteGuard};
 
 use super::Options;
@@ -42,7 +40,7 @@ pub struct UbiBlkBackendThread {
     pub event_idx: bool,
     pub kill_evt: EventFd,
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    io_channel: Box<dyn IoChannel>,
+    io_channel: Box<dyn IoChannel + Send>,
     request_slots: Vec<RequestSlot>,
     io_debug_file: Option<fs::File>,
     skip_sync: bool,
@@ -53,7 +51,7 @@ pub struct UbiBlkBackendThread {
 impl UbiBlkBackendThread {
     pub fn new(
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
-        io_channel: Box<dyn IoChannel>,
+        io_channel: Box<dyn IoChannel + Send>,
         options: &Options,
         alignment: usize,
     ) -> Result<Self> {
@@ -62,10 +60,10 @@ impl UbiBlkBackendThread {
             .map(|_| RequestSlot {
                 used: false,
                 request_type: RequestType::None,
-                buffer: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+                buffer: SharedBuffer::new(AlignedBuf::new_with_alignment(
                     buf_size as usize,
                     alignment,
-                ))),
+                )),
                 len: buf_size as usize,
                 status_addr: GuestAddress(0),
                 request_sector: 0,
@@ -126,10 +124,10 @@ impl UbiBlkBackendThread {
         self.request_slots.push(RequestSlot {
             used: true,
             request_type: request.request_type,
-            buffer: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+            buffer: SharedBuffer::new(AlignedBuf::new_with_alignment(
                 len,
                 self.alignment,
-            ))),
+            )),
             len,
             request_sector: request.sector,
             request_len: len,
@@ -426,5 +424,3 @@ impl UbiBlkBackendThread {
     }
 }
 
-unsafe impl Sync for UbiBlkBackendThread {}
-unsafe impl Send for UbiBlkBackendThread {}

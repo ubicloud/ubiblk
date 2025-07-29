@@ -1,17 +1,16 @@
 use crate::{
-    block_device::{bdev_lazy::metadata::UBI_MAGIC, AlignedBuf, IoChannel, UbiMetadata},
+    block_device::{bdev_lazy::metadata::UBI_MAGIC, AlignedBuf, IoChannel, SharedBuffer, UbiMetadata},
     vhost_backend::SECTOR_SIZE,
     Result, VhostUserBlockError,
 };
 use log::{error, info};
-use std::{cell::RefCell, mem::MaybeUninit, ptr::copy_nonoverlapping, rc::Rc};
+use std::{mem::MaybeUninit, ptr::copy_nonoverlapping};
 
-pub fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetadata>> {
+pub fn load_metadata(io_channel: &mut Box<dyn IoChannel + Send>) -> Result<Box<UbiMetadata>> {
     info!("Loading metadata from device");
 
     let sector_count = std::mem::size_of::<UbiMetadata>().div_ceil(SECTOR_SIZE);
-    let buf: Rc<RefCell<AlignedBuf>> =
-        Rc::new(RefCell::new(AlignedBuf::new(sector_count * SECTOR_SIZE)));
+    let buf = SharedBuffer::new(AlignedBuf::new(sector_count * SECTOR_SIZE));
     io_channel.add_read(0, sector_count as u32, buf.clone(), 0);
     io_channel.submit()?;
 

@@ -102,7 +102,7 @@ pub struct SyncBlockDevice {
 }
 
 impl BlockDevice for SyncBlockDevice {
-    fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
+    fn create_channel(&self) -> Result<Box<dyn IoChannel + Send>> {
         let channel = SyncIoChannel::new(&self.path, self.readonly)?;
         Ok(Box::new(channel))
     }
@@ -144,7 +144,7 @@ impl SyncBlockDevice {
 #[cfg(test)]
 mod tests {
     use std::os::fd::FromRawFd;
-    use std::{cell::RefCell, rc::Rc};
+    use super::SharedBuffer;
 
     use tempfile::NamedTempFile;
 
@@ -165,7 +165,7 @@ mod tests {
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         write_buf
             .borrow_mut()
             .as_mut_slice()
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(result, vec![(1, true)]);
 
         // Read it back
-        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = chan.poll();
@@ -201,7 +201,7 @@ mod tests {
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         write_buf
             .borrow_mut()
             .as_mut_slice()
@@ -245,13 +245,13 @@ mod tests {
         let path = tmpfile.path();
         let mut chan = SyncIoChannel::new(path, false)?;
 
-        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         chan.add_read(1, 1, read_buf.clone(), 1);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(1, false)]);
 
         let mut ro_chan = SyncIoChannel::new(path, true)?;
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         ro_chan.add_write(0, 1, write_buf.clone(), 2);
         ro_chan.submit()?;
         assert_eq!(ro_chan.poll(), vec![(2, false)]);
@@ -270,7 +270,7 @@ mod tests {
             file: Arc::new(Mutex::new(file)),
             finished_requests: Vec::new(),
         };
-        let buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let buf: SharedBuffer = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         chan.add_read(0, 1, buf.clone(), 1);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(1, false)]);

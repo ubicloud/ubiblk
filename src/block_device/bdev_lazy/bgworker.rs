@@ -99,5 +99,3 @@ impl BgWorker {
     }
 }
 
-unsafe impl Send for BgWorker {}
-unsafe impl Sync for BgWorker {}

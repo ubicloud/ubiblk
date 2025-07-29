@@ -8,15 +8,13 @@ mod tests {
     };
     use crate::utils::aligned_buffer::AlignedBuf;
     use crate::vhost_backend::SECTOR_SIZE;
-    use std::cell::RefCell;
-    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::thread::sleep;
     use std::time::Duration;
     use vmm_sys_util::eventfd::EventFd;
 
     /// Poll the channel and the bgworker until all operations complete.
-    fn drive(bgworker: &SharedBgWorker, chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
+    fn drive(bgworker: &SharedBgWorker, chan: &mut Box<dyn IoChannel + Send>) -> Vec<(usize, bool)> {
         let mut results = Vec::new();
         loop {
             {
@@ -69,7 +67,7 @@ mod tests {
         let lazy = LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone()).unwrap();
         let mut chan = lazy.create_channel().unwrap();
 
-        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf: SharedBuffer = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
         let results = drive(&bgworker, &mut chan);
@@ -78,7 +76,7 @@ mod tests {
         assert_eq!(&target_mem.read().unwrap()[0..data.len()], data);
 
         let write_data = b"queued_write";
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(stripe_sectors, 1, write_buf.clone(), 2);
         chan.submit().unwrap();
@@ -136,7 +134,7 @@ mod tests {
         .unwrap();
         let mut chan = lazy.create_channel().unwrap();
 
-        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf: SharedBuffer = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
         let results = drive(&bgworker, &mut chan);
@@ -147,7 +145,7 @@ mod tests {
         assert_eq!(target_metrics.read().unwrap().reads, 0);
 
         let write_data = b"write_after_fetch";
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = SharedBuffer::new(AlignedBuf::new(SECTOR_SIZE));
         write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(stripe_sectors, 1, write_buf.clone(), 2);
         chan.submit().unwrap();

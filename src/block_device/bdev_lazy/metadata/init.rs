@@ -1,6 +1,6 @@
-use std::{cell::RefCell, ptr::copy_nonoverlapping, rc::Rc};
+use std::{ptr::copy_nonoverlapping};
 
-use crate::block_device::{IoChannel, UbiMetadata};
+use crate::block_device::{IoChannel, SharedBuffer, UbiMetadata};
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{error, info};
@@ -8,7 +8,7 @@ use log::{error, info};
 pub const METADATA_WRITE_ID: usize = 0;
 pub const METADATA_FLUSH_ID: usize = 1;
 
-fn wait_for_completion(ch: &mut Box<dyn IoChannel>, id: usize) -> Result<()> {
+fn wait_for_completion(ch: &mut Box<dyn IoChannel + Send>, id: usize) -> Result<()> {
     let timeout = std::time::Duration::from_secs(5);
     let start = std::time::Instant::now();
     let op = if id == METADATA_WRITE_ID {
@@ -48,10 +48,10 @@ fn wait_for_completion(ch: &mut Box<dyn IoChannel>, id: usize) -> Result<()> {
     })
 }
 
-pub fn init_metadata(metadata: &UbiMetadata, ch: &mut Box<dyn IoChannel>) -> Result<()> {
+pub fn init_metadata(metadata: &UbiMetadata, ch: &mut Box<dyn IoChannel + Send>) -> Result<()> {
     let metadata_size = std::mem::size_of::<UbiMetadata>();
     let sectors = metadata_size.div_ceil(SECTOR_SIZE);
-    let buf = Rc::new(RefCell::new(AlignedBuf::new(sectors * SECTOR_SIZE)));
+    let buf = SharedBuffer::new(AlignedBuf::new(sectors * SECTOR_SIZE));
 
     unsafe {
         let src = metadata as *const UbiMetadata as *const u8;

@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
-use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
 use super::metadata::UBI_MAX_STRIPES;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
+use crate::block_device::SharedBuffer;
 use log::{debug, error};
 use std::sync::{
     atomic::{AtomicU8, Ordering},
@@ -110,8 +110,8 @@ struct FetchBuffer {
 }
 
 pub struct StripeFetcher {
-    fetch_source_channel: Box<dyn IoChannel>,
-    fetch_target_channel: Box<dyn IoChannel>,
+    fetch_source_channel: Box<dyn IoChannel + Send>,
+    fetch_target_channel: Box<dyn IoChannel + Send>,
     source_sector_count: u64,
     target_sector_count: u64,
     stripe_sector_count: u64,
@@ -142,10 +142,10 @@ impl StripeFetcher {
         let fetch_buffers = (0..MAX_CONCURRENT_FETCHES)
             .map(|_| FetchBuffer {
                 used_for: None,
-                buf: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+                buf: SharedBuffer::new(AlignedBuf::new_with_alignment(
                     stripe_size,
                     alignment,
-                ))),
+                )),
             })
             .collect();
         let source_sector_count = source_dev.sector_count();
@@ -295,5 +295,3 @@ impl StripeFetcher {
     }
 }
 
-unsafe impl Send for StripeFetcher {}
-unsafe impl Sync for StripeFetcher {}

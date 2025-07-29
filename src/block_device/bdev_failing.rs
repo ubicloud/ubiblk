@@ -10,7 +10,7 @@ pub struct FailState {
 }
 
 pub struct FailingIoChannel {
-    inner: Box<dyn IoChannel>,
+    inner: Box<dyn IoChannel + Send>,
     state: Arc<Mutex<FailState>>,
     pending: Vec<(usize, bool)>,
 }
@@ -80,7 +80,7 @@ impl FailingBlockDevice {
 }
 
 impl BlockDevice for FailingBlockDevice {
-    fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
+    fn create_channel(&self) -> Result<Box<dyn IoChannel + Send>> {
         Ok(Box::new(FailingIoChannel {
             inner: self.inner.create_channel()?,
             state: self.state.clone(),

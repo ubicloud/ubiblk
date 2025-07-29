@@ -95,6 +95,10 @@ impl MetadataFlusher {
         })
     }
 
+    pub fn busy(&self) -> bool {
+        self.inprogress_flush_requests > 0 || self.pending_flush_requests > 0
+    }
+
     pub fn stripe_sector_count(&self) -> u64 {
         1u64 << self.metadata.stripe_sector_count_shift
     }

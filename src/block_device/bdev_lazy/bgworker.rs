@@ -4,7 +4,7 @@ use super::{
 };
 use crate::block_device::BlockDevice;
 use crate::Result;
-use log::info;
+use log::{error, info};
 use std::sync::{
     mpsc::{Receiver, Sender},
     Arc, Mutex,
@@ -66,17 +66,31 @@ impl BgWorker {
         self.metadata_flusher.shared_flush_state()
     }
 
-    pub fn receive_requests(&mut self) {
-        while let Ok(req) = self.req_receiver.try_recv() {
-            match req {
-                BgWorkerRequest::Fetch(id) => self.stripe_fetcher.handle_fetch_request(id),
-                BgWorkerRequest::FlushMetadata => self.metadata_flusher.request_flush(),
-                BgWorkerRequest::Shutdown => {
-                    info!("Received shutdown request, stopping worker");
+    pub fn process_request(&mut self, req: BgWorkerRequest) {
+        match req {
+            BgWorkerRequest::Fetch(id) => self.stripe_fetcher.handle_fetch_request(id),
+            BgWorkerRequest::FlushMetadata => self.metadata_flusher.request_flush(),
+            BgWorkerRequest::Shutdown => {
+                info!("Received shutdown request, stopping worker");
+                self.done = true;
+            }
+        }
+    }
+
+    pub fn receive_requests(&mut self, block: bool) {
+        if block {
+            match self.req_receiver.recv() {
+                Ok(req) => self.process_request(req),
+                Err(e) => {
+                    error!("Failed to receive request: {e}, stopping worker");
                     self.done = true;
-                    break;
+                    return;
                 }
             }
+        }
+
+        while let Ok(req) = self.req_receiver.try_recv() {
+            self.process_request(req);
         }
     }
 
@@ -92,9 +106,10 @@ impl BgWorker {
 
     pub fn run(&mut self) {
         while !self.done {
-            self.receive_requests();
+            let busy = self.stripe_fetcher.busy() || self.metadata_flusher.busy();
+            let block = !busy;
+            self.receive_requests(block);
             self.update();
-            std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
 }

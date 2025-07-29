@@ -20,7 +20,7 @@ mod tests {
         loop {
             {
                 let mut f = bgworker.lock().unwrap();
-                f.receive_requests();
+                f.receive_requests(false);
                 f.update();
             }
             results.extend(chan.poll());
@@ -31,7 +31,7 @@ mod tests {
         }
         {
             let mut f = bgworker.lock().unwrap();
-            f.receive_requests();
+            f.receive_requests(false);
             f.update();
         }
         results.extend(chan.poll());

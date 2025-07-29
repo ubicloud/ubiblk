@@ -63,7 +63,7 @@ impl IoChannel for TestIoChannel {
         std::mem::take(&mut self.finished_requests)
     }
 
-    fn busy(&mut self) -> bool {
+    fn busy(&self) -> bool {
         false
     }
 }

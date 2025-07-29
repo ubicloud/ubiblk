@@ -127,7 +127,7 @@ impl IoChannel for UringIoChannel {
         finished_requests
     }
 
-    fn busy(&mut self) -> bool {
+    fn busy(&self) -> bool {
         self.submissions > self.completions
     }
 }

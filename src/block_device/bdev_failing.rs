@@ -65,7 +65,7 @@ impl IoChannel for FailingIoChannel {
         results
     }
 
-    fn busy(&mut self) -> bool {
+    fn busy(&self) -> bool {
         self.inner.busy()
     }
 }

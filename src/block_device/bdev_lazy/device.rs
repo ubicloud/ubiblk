@@ -269,8 +269,8 @@ impl IoChannel for LazyIoChannel {
         results
     }
 
-    fn busy(&mut self) -> bool {
-        let image_busy = if let Some(image_channel) = &mut self.image {
+    fn busy(&self) -> bool {
+        let image_busy = if let Some(image_channel) = self.image.as_ref() {
             image_channel.busy()
         } else {
             false

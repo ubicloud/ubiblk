@@ -111,7 +111,7 @@ impl IoChannel for SyncIoChannel {
         std::mem::take(&mut self.finished_requests)
     }
 
-    fn busy(&mut self) -> bool {
+    fn busy(&self) -> bool {
         false
     }
 }

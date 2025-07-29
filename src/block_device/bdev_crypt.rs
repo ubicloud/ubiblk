@@ -192,7 +192,7 @@ impl IoChannel for CryptIoChannel {
         results
     }
 
-    fn busy(&mut self) -> bool {
+    fn busy(&self) -> bool {
         self.base.busy()
     }
 }

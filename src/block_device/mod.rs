@@ -11,7 +11,7 @@ pub trait IoChannel {
     fn submit(&mut self) -> Result<()>;
 
     fn poll(&mut self) -> Vec<(usize, bool)>;
-    fn busy(&mut self) -> bool;
+    fn busy(&self) -> bool;
 }
 
 pub trait BlockDevice {

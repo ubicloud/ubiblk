@@ -1,11 +1,11 @@
 mod init;
 mod load;
-mod metadata;
+mod types;
 
 pub use init::init_metadata;
 pub use load::load_metadata;
-pub use metadata::UbiMetadata;
-pub use metadata::{UBI_MAGIC, UBI_MAX_STRIPES};
+pub use types::UbiMetadata;
+pub use types::{UBI_MAGIC, UBI_MAX_STRIPES};
 
 #[cfg(test)]
-pub use metadata::UBI_MAGIC_SIZE;
+pub use types::UBI_MAGIC_SIZE;

@@ -1,6 +1,5 @@
 use clap::Parser;
 use log::error;
-use serde_yaml;
 use std::fs::File;
 use std::process;
 use ubiblk::vhost_backend::*;
@@ -36,7 +35,7 @@ fn main() {
     let file = match File::open(config_path) {
         Ok(file) => file,
         Err(e) => {
-            error!("Error opening config file {}: {}", config_path, e);
+            error!("Error opening config file {config_path}: {e}");
             process::exit(1);
         }
     };
@@ -44,7 +43,7 @@ fn main() {
     let options: Options = match serde_yaml::from_reader(file) {
         Ok(cfg) => cfg,
         Err(e) => {
-            error!("Error parsing config file {}: {}", config_path, e);
+            error!("Error parsing config file {config_path}: {e}");
             process::exit(1);
         }
     };
@@ -60,7 +59,7 @@ fn main() {
         let file = match File::open(kek_path) {
             Ok(file) => file,
             Err(e) => {
-                error!("Error opening KEK file {}: {}", kek_path, e);
+                error!("Error opening KEK file {kek_path}: {e}");
                 process::exit(1);
             }
         };
@@ -68,14 +67,14 @@ fn main() {
         kek = match serde_yaml::from_reader(file) {
             Ok(kek) => kek,
             Err(e) => {
-                error!("Error parsing KEK file {}: {}", kek_path, e);
+                error!("Error parsing KEK file {kek_path}: {e}");
                 process::exit(1);
             }
         };
 
         if args.unlink_kek {
             if let Err(e) = std::fs::remove_file(kek_path) {
-                error!("Error unlinking KEK file {}: {}", kek_path, e);
+                error!("Error unlinking KEK file {kek_path}: {e}");
                 process::exit(1);
             }
         }

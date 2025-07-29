@@ -92,10 +92,7 @@ impl LazyIoChannel {
                 self.bgworker_ch
                     .send(BgWorkerRequest::Fetch(stripe_id))
                     .map_err(|e| {
-                        error!(
-                            "Failed to send fetch request for stripe {}: {}",
-                            stripe_id, e
-                        );
+                        error!("Failed to send fetch request for stripe {stripe_id}: {e}");
                         VhostUserBlockError::ChannelError
                     })?;
             }
@@ -241,7 +238,7 @@ impl IoChannel for LazyIoChannel {
         let current_metadata_version = self.metadata_flush_state.current_version();
 
         if let Err(e) = self.bgworker_ch.send(BgWorkerRequest::FlushMetadata) {
-            error!("Failed to send flush request: {}", e);
+            error!("Failed to send flush request: {e}");
             self.finished_requests.push((id, false));
         }
 
@@ -318,7 +315,7 @@ impl BlockDevice for LazyBlockDevice {
         };
 
         let bgworker = self.bgworker.lock().map_err(|e| {
-            error!("Failed to lock background worker: {}", e);
+            error!("Failed to lock background worker: {e}");
             VhostUserBlockError::ChannelError
         })?;
 

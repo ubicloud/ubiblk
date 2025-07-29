@@ -76,7 +76,7 @@ impl UbiBlkBackendThread {
             .collect();
 
         let kill_evt = EventFd::new(EFD_NONBLOCK).map_err(|e| {
-            error!("failed to create kill eventfd: {:?}", e);
+            error!("failed to create kill eventfd: {e:?}");
             VhostUserBlockError::ThreadCreation
         })?;
 
@@ -88,7 +88,7 @@ impl UbiBlkBackendThread {
                     .truncate(true)
                     .open(path)
                     .map_err(|e| {
-                        error!("failed to open io debug file: {:?}", e);
+                        error!("failed to open io debug file: {e:?}");
                         VhostUserBlockError::IoError { source: e }
                     })?;
                 Some(file)
@@ -153,14 +153,14 @@ impl UbiBlkBackendThread {
     ) {
         let mem = desc_chain.memory();
         if let Err(e) = mem.write_obj(status, status_addr) {
-            error!("failed to write status: {:?}", e);
+            error!("failed to write status: {e:?}");
             return;
         }
         let ret = vring
             .get_queue_mut()
             .add_used(mem, desc_chain.head_index(), 0);
         if let Err(e) = ret {
-            error!("failed to add used descriptor: {:?}", e);
+            error!("failed to add used descriptor: {e:?}");
         }
     }
 
@@ -174,7 +174,7 @@ impl UbiBlkBackendThread {
             let mut buf_chunk = &buf[pos..pos + *data_len as usize];
             mem.read_exact_volatile_from(*data_addr, &mut buf_chunk, *data_len as usize)
                 .map_err(|e| {
-                    error!("read_exact_volatile_from failed: {:?}", e);
+                    error!("read_exact_volatile_from failed: {e:?}");
                     VhostUserBlockError::GuestMemoryAccess { source: e }
                 })?;
             pos += *data_len as usize;
@@ -216,10 +216,10 @@ impl UbiBlkBackendThread {
                     crate::utils::debug::encode_hex(buf, req.request_len)
                 ))
                 .unwrap_or_else(|e| {
-                    error!("failed to write to io debug file: {:?}", e);
+                    error!("failed to write to io debug file: {e:?}");
                 });
                 file.flush().unwrap_or_else(|e| {
-                    error!("failed to flush io debug file: {:?}", e);
+                    error!("failed to flush io debug file: {e:?}");
                 });
             }
         }
@@ -236,10 +236,7 @@ impl UbiBlkBackendThread {
     fn process_read(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
         let len = self.request_len(request);
         if len % SECTOR_SIZE != 0 {
-            error!(
-                "read request length is not a multiple of sector size: {}",
-                len
-            );
+            error!("read request length is not a multiple of sector size: {len}");
             self.complete_io(
                 vring,
                 desc_chain,
@@ -263,10 +260,7 @@ impl UbiBlkBackendThread {
     fn process_write(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
         let len = self.request_len(request);
         if len % SECTOR_SIZE != 0 {
-            error!(
-                "write request length is not a multiple of sector size: {}",
-                len
-            );
+            error!("write request length is not a multiple of sector size: {len}");
             self.complete_io(
                 vring,
                 desc_chain,
@@ -287,7 +281,7 @@ impl UbiBlkBackendThread {
             pos += *data_len as usize;
             let err = mem.write_all_volatile_to(*data_addr, &mut dst, *data_len as usize);
             if let Err(e) = err {
-                error!("write_all_volatile_to failed: {:?}", e);
+                error!("write_all_volatile_to failed: {e:?}");
                 read_from_guest_failed = true;
             }
         }
@@ -313,10 +307,10 @@ impl UbiBlkBackendThread {
                 crate::utils::debug::encode_hex(buf, len)
             ))
             .unwrap_or_else(|e| {
-                error!("failed to write to io debug file: {:?}", e);
+                error!("failed to write to io debug file: {e:?}");
             });
             file.flush().unwrap_or_else(|e| {
-                error!("failed to flush io debug file: {:?}", e);
+                error!("failed to flush io debug file: {e:?}");
             });
         }
 
@@ -396,13 +390,13 @@ impl UbiBlkBackendThread {
                     }
                 },
                 Err(err) => {
-                    error!("failed to parse available descriptor chain: {:?}", err);
+                    error!("failed to parse available descriptor chain: {err:?}");
                 }
             }
             busy = true;
         }
         self.io_channel.submit().unwrap_or_else(|e| {
-            error!("failed to submit io channel: {:?}", e);
+            error!("failed to submit io channel: {e:?}");
         });
         self.poll_io(vring);
         busy = busy || self.io_channel.busy();
@@ -414,7 +408,7 @@ impl UbiBlkBackendThread {
             {
                 Ok(need) => need,
                 Err(e) => {
-                    error!("needs_notification failed: {:?}", e);
+                    error!("needs_notification failed: {e:?}");
                     true
                 }
             }
@@ -424,7 +418,7 @@ impl UbiBlkBackendThread {
 
         if needs_signalling {
             if let Err(e) = vring.signal_used_queue() {
-                error!("failed to signal used queue: {:?}", e);
+                error!("failed to signal used queue: {e:?}");
             }
         }
 

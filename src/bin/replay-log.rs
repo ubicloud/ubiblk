@@ -118,21 +118,21 @@ fn main() {
 
         if command == "WRITE" {
             if let Err(e) = disk_file.seek(std::io::SeekFrom::Start(offset)) {
-                error!("Error seeking to offset {}: {}", offset, e);
+                error!("Error seeking to offset {offset}: {e}");
                 std::process::exit(1);
             }
             if let Err(e) = disk_file.write_all(&data) {
-                error!("Error writing data to disk: {}", e);
+                error!("Error writing data to disk: {e}");
                 std::process::exit(1);
             }
         } else if command == "READ" {
             let mut buffer = vec![0; len];
             if let Err(e) = disk_file.seek(std::io::SeekFrom::Start(offset)) {
-                error!("Error seeking to offset {}: {}", offset, e);
+                error!("Error seeking to offset {offset}: {e}");
                 std::process::exit(1);
             }
             if let Err(e) = disk_file.read_exact(&mut buffer) {
-                error!("Error reading data from disk: {}", e);
+                error!("Error reading data from disk: {e}");
                 std::process::exit(1);
             }
             let first_diff = first_difference(&data, &buffer);

@@ -13,7 +13,7 @@ fn main() {
     // The header file for ISA-L Crypto
     let header = "/usr/include/isa-l_crypto.h";
     if !Path::new(header).exists() {
-        panic!("ISA-L Crypto header not found at {}", header);
+        panic!("ISA-L Crypto header not found at {header}");
     }
 
     // Generate Rust bindings

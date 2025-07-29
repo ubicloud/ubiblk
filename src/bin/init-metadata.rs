@@ -1,6 +1,5 @@
 use clap::Parser;
 use log::error;
-use serde_yaml;
 use std::fs::File;
 use std::process;
 use ubiblk::vhost_backend::*;
@@ -42,7 +41,7 @@ fn main() {
     let file = match File::open(config_path) {
         Ok(file) => file,
         Err(e) => {
-            error!("Error opening config file {}: {}", config_path, e);
+            error!("Error opening config file {config_path}: {e}");
             process::exit(1);
         }
     };
@@ -50,7 +49,7 @@ fn main() {
     let options: Options = match serde_yaml::from_reader(file) {
         Ok(cfg) => cfg,
         Err(e) => {
-            error!("Error parsing config file {}: {}", config_path, e);
+            error!("Error parsing config file {config_path}: {e}");
             process::exit(1);
         }
     };
@@ -59,12 +58,11 @@ fn main() {
 
     let stripe_sector_count_shift = args.stripe_sector_count_shift;
 
-    if stripe_sector_count_shift > STRIPE_SECTOR_COUNT_SHIFT_MAX
-        || stripe_sector_count_shift < STRIPE_SECTOR_COUNT_SHIFT_MIN
+    if !(STRIPE_SECTOR_COUNT_SHIFT_MIN..=STRIPE_SECTOR_COUNT_SHIFT_MAX)
+        .contains(&stripe_sector_count_shift)
     {
         error!(
-            "stripe-sector-count-shift must be between {} and {}.",
-            STRIPE_SECTOR_COUNT_SHIFT_MIN, STRIPE_SECTOR_COUNT_SHIFT_MAX
+            "stripe-sector-count-shift must be between {STRIPE_SECTOR_COUNT_SHIFT_MIN} and {STRIPE_SECTOR_COUNT_SHIFT_MAX}."
         );
         process::exit(1);
     }
@@ -73,7 +71,7 @@ fn main() {
         let file = match File::open(kek_path) {
             Ok(file) => file,
             Err(e) => {
-                error!("Error opening KEK file {}: {}", kek_path, e);
+                error!("Error opening KEK file {kek_path}: {e}");
                 process::exit(1);
             }
         };
@@ -81,21 +79,21 @@ fn main() {
         kek = match serde_yaml::from_reader(file) {
             Ok(kek) => kek,
             Err(e) => {
-                error!("Error parsing KEK file {}: {}", kek_path, e);
+                error!("Error parsing KEK file {kek_path}: {e}");
                 process::exit(1);
             }
         };
 
         if args.unlink_kek {
             if let Err(e) = std::fs::remove_file(kek_path) {
-                error!("Error unlinking KEK file {}: {}", kek_path, e);
+                error!("Error unlinking KEK file {kek_path}: {e}");
                 process::exit(1);
             }
         }
     }
 
     if let Err(e) = init_metadata(&options, kek, stripe_sector_count_shift) {
-        error!("Error initializing metadata: {}", e);
+        error!("Error initializing metadata: {e}");
         process::exit(1);
     }
 }

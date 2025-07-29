@@ -33,9 +33,9 @@ pub fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetad
 
     let (id, success) = results.pop().unwrap();
     if !success || id != 0 {
-        error!("Failed to read metadata: id {}, success {}", id, success);
+        error!("Failed to read metadata: id {id}, success {success}");
         return Err(VhostUserBlockError::MetadataError {
-            description: format!("Failed to read metadata, id: {}, success: {}", id, success),
+            description: format!("Failed to read metadata, id: {id}, success: {success}"),
         });
     }
 

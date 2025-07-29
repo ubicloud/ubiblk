@@ -46,8 +46,7 @@ impl StripeStatusVec {
                 4 => StripeStatus::Failed,
                 other => {
                     error!(
-                        "Invalid stripe status value: {} for stripe_id: {}. Defaulting to Failed.",
-                        other, stripe_id
+                        "Invalid stripe status value: {other} for stripe_id: {stripe_id}. Defaulting to Failed."
                     );
                     StripeStatus::Failed
                 }
@@ -176,16 +175,16 @@ impl StripeFetcher {
     pub fn handle_fetch_request(&mut self, stripe_id: usize) {
         match self.stripe_status_vec.stripe_status(stripe_id) {
             StripeStatus::NotFetched | StripeStatus::Failed => {
-                debug!("Enqueueing stripe {} for fetch", stripe_id);
+                debug!("Enqueueing stripe {stripe_id} for fetch");
                 self.fetch_queue.push_back(stripe_id);
                 self.stripe_status_vec
                     .set_stripe_status(stripe_id, StripeStatus::Queued);
             }
             StripeStatus::Fetched => {
-                debug!("Stripe {} already fetched", stripe_id);
+                debug!("Stripe {stripe_id} already fetched");
             }
             StripeStatus::Queued | StripeStatus::Fetching => {
-                debug!("Stripe {} is already queued or fetching", stripe_id);
+                debug!("Stripe {stripe_id} is already queued or fetching");
             }
         }
     }
@@ -195,10 +194,7 @@ impl StripeFetcher {
         let stripe_id = fetch_buffer.used_for.unwrap();
         fetch_buffer.used_for = None;
 
-        debug!(
-            "Fetch completed for stripe {}, success={}",
-            stripe_id, success
-        );
+        debug!("Fetch completed for stripe {stripe_id}, success={success}");
 
         if success {
             self.stripe_status_vec
@@ -228,7 +224,7 @@ impl StripeFetcher {
         );
 
         if let Err(e) = self.fetch_target_channel.submit() {
-            error!("Failed to submit write for stripe {}: {:?}", stripe_id, e);
+            error!("Failed to submit write for stripe {stripe_id}: {e:?}");
             false
         } else {
             true
@@ -280,7 +276,7 @@ impl StripeFetcher {
             );
 
             if let Err(e) = self.fetch_source_channel.submit() {
-                error!("Failed to submit read for stripe {}: {:?}", stripe_id, e);
+                error!("Failed to submit read for stripe {stripe_id}: {e:?}");
                 result.push(self.fetch_completed(buffer_idx, false));
                 continue;
             }

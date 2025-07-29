@@ -183,7 +183,11 @@ impl VhostUserBackend for UbiBlkBackend {
     fn set_event_idx(&self, enabled: bool) {
         info!("set_event_idx: {enabled}");
         for thread in self.threads.iter() {
-            thread.lock().unwrap().event_idx = enabled;
+            if let Ok(mut t) = thread.lock() {
+                t.event_idx = enabled;
+            } else {
+                error!("Failed to lock worker thread for set_event_idx");
+            }
         }
     }
 
@@ -204,7 +208,9 @@ impl VhostUserBackend for UbiBlkBackend {
             )));
         }
 
-        let mut thread = self.threads[thread_id].lock().unwrap();
+        let mut thread = self.threads[thread_id]
+            .lock()
+            .map_err(|_| std::io::Error::other("Thread lock poisoned"))?;
         match device_event {
             0 => {
                 let mut vring = vrings[0].get_mut();
@@ -229,7 +235,9 @@ impl VhostUserBackend for UbiBlkBackend {
                         vring
                             .get_queue_mut()
                             .enable_notification(self.mem.memory().deref())
-                            .unwrap();
+                            .map_err(|e| {
+                                std::io::Error::other(format!("enable_notification failed: {e:?}"))
+                            })?;
                         if !thread.process_queue(&mut vring) {
                             break;
                         }
@@ -252,14 +260,10 @@ impl VhostUserBackend for UbiBlkBackend {
     }
 
     fn exit_event(&self, thread_index: usize) -> Option<EventFd> {
-        Some(
-            self.threads[thread_index]
-                .lock()
-                .unwrap()
-                .kill_evt
-                .try_clone()
-                .unwrap(),
-        )
+        self.threads[thread_index]
+            .lock()
+            .ok()
+            .and_then(|t| t.kill_evt.try_clone().ok())
     }
 
     fn queues_per_thread(&self) -> Vec<u64> {
@@ -320,7 +324,14 @@ pub fn start_block_backend(
                         .to_string(),
                 }));
             }
-            let metadata_path = options.metadata_path.as_ref().unwrap();
+            let metadata_path = match options.metadata_path.as_ref() {
+                Some(p) => p,
+                None => {
+                    return Err(Box::new(VhostUserBlockError::InvalidParameter {
+                        description: "metadata_path is missing".to_string(),
+                    }));
+                }
+            };
             let metadata_dev = build_block_device(metadata_path, options, kek)?;
             let readonly = true;
             let image_bdev =
@@ -338,7 +349,13 @@ pub fn start_block_backend(
     let block_device = match maybe_bgworker_base_pair {
         Some((bgworker, image_bdev)) => {
             maybe_bgworker = Some(bgworker.clone());
-            maybe_bgworker_ch = Some(bgworker.lock().unwrap().req_sender());
+            maybe_bgworker_ch = match bgworker.lock() {
+                Ok(b) => Some(b.req_sender()),
+                Err(_) => {
+                    error!("Failed to lock bgworker for channel");
+                    None
+                }
+            };
             let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
                 None
             } else {
@@ -368,7 +385,11 @@ pub fn start_block_backend(
             let handle = std::thread::Builder::new()
                 .name("bgworker".to_string())
                 .spawn(move || {
-                    bgworker_clone.lock().unwrap().run();
+                    if let Ok(mut b) = bgworker_clone.lock() {
+                        b.run();
+                    } else {
+                        error!("Failed to lock bgworker in thread");
+                    }
                 })?;
             Some(handle)
         }
@@ -393,8 +414,13 @@ pub fn start_block_backend(
     info!("Finished serving socket!");
 
     for thread in backend.threads.iter() {
-        if let Err(e) = thread.lock().unwrap().kill_evt.write(1) {
-            error!("Error shutting down worker thread: {e:?}")
+        match thread.lock() {
+            Ok(t) => {
+                if let Err(e) = t.kill_evt.write(1) {
+                    error!("Error shutting down worker thread: {e:?}");
+                }
+            }
+            Err(_) => error!("Failed to lock worker thread for shutdown"),
         }
     }
 
@@ -408,7 +434,9 @@ pub fn start_block_backend(
             }
         });
         info!("Waiting for bgworker thread to join ...");
-        handle.join().unwrap();
+        if let Err(e) = handle.join() {
+            error!("Failed to join bgworker thread: {e:?}");
+        }
         info!("Bgworker thread joined");
     } else {
         info!("No bgworker thread to join");

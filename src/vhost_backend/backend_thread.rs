@@ -165,7 +165,10 @@ impl UbiBlkBackendThread {
     }
 
     fn write_to_guest(&self, req: &RequestSlot) -> Result<()> {
-        let desc_chain = req.desc_chain.clone().unwrap();
+        let desc_chain = req
+            .desc_chain
+            .clone()
+            .ok_or(VhostUserBlockError::ChannelError)?;
         let mem = desc_chain.memory();
         let borrow = req.buffer.borrow();
         let buf = borrow.as_slice();
@@ -187,7 +190,10 @@ impl UbiBlkBackendThread {
         let mut finished_reads = vec![];
         for (request_id, success) in self.io_channel.poll() {
             let req = &self.request_slots[request_id];
-            let desc_chain = req.desc_chain.clone().unwrap();
+            let Some(desc_chain) = req.desc_chain.clone() else {
+                error!("Request slot {request_id} missing desc_chain");
+                continue;
+            };
             let mut write_to_guest_failed = false;
             if req.request_type == RequestType::In && success {
                 if self.write_to_guest(req).is_err() {

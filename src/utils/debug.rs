@@ -5,14 +5,14 @@ pub fn hexdump(data: &[u8], len: usize) -> String {
     let mut result = String::with_capacity(len.div_ceil(16) * 60);
 
     for offset in (0..len).step_by(16) {
-        write!(&mut result, "{offset:08x}  ").unwrap();
+        let _ = write!(&mut result, "{offset:08x}  ");
 
         let mut hex_part = String::new();
         let mut ascii_part = String::new();
         let chunk = &data[offset..len.min(offset + 16)];
 
         for (i, byte) in chunk.iter().enumerate() {
-            write!(&mut hex_part, "{byte:02x} ").unwrap();
+            let _ = write!(&mut hex_part, "{byte:02x} ");
             ascii_part.push(if byte.is_ascii_graphic() || *byte == b' ' {
                 *byte as char
             } else {

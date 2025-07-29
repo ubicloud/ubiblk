@@ -168,6 +168,12 @@ impl StripeFetcher {
         })
     }
 
+    pub fn busy(&self) -> bool {
+        !self.fetch_queue.is_empty()
+            || self.fetch_source_channel.busy()
+            || self.fetch_target_channel.busy()
+    }
+
     pub fn stripe_status_vec(&self) -> StripeStatusVec {
         self.stripe_status_vec.clone()
     }

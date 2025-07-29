@@ -317,7 +317,11 @@ impl BlockDevice for LazyBlockDevice {
             None
         };
 
-        let bgworker = self.bgworker.lock().unwrap();
+        let bgworker = self.bgworker.lock().map_err(|e| {
+            error!("Failed to lock background worker: {}", e);
+            VhostUserBlockError::ChannelError
+        })?;
+
         let bgworker_ch = bgworker.req_sender();
 
         Ok(Box::new(LazyIoChannel::new(

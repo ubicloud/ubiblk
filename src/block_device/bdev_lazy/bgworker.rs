@@ -6,7 +6,7 @@ use crate::block_device::BlockDevice;
 use crate::Result;
 use log::{error, info};
 use std::sync::{
-    mpsc::{Receiver, Sender},
+    mpsc::{Receiver, Sender, TryRecvError},
     Arc, Mutex,
 };
 
@@ -89,8 +89,16 @@ impl BgWorker {
             }
         }
 
-        while let Ok(req) = self.req_receiver.try_recv() {
-            self.process_request(req);
+        loop {
+            match self.req_receiver.try_recv() {
+                Ok(req) => self.process_request(req),
+                Err(TryRecvError::Disconnected) => {
+                    error!("Request channel disconnected, stopping worker");
+                    self.done = true;
+                    return;
+                }
+                Err(TryRecvError::Empty) => break,
+            }
         }
     }
 

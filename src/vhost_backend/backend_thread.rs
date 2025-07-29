@@ -109,7 +109,12 @@ impl UbiBlkBackendThread {
         })
     }
 
-    fn get_request_slot(&mut self, len: usize, request: &Request, desc_chain: &DescChain) -> usize {
+    pub(crate) fn get_request_slot(
+        &mut self,
+        len: usize,
+        request: &Request,
+        desc_chain: &DescChain,
+    ) -> usize {
         for i in 0..self.request_slots.len() {
             if self.request_slots[i].len >= len && !self.request_slots[i].used {
                 let slot = &mut self.request_slots[i];
@@ -140,7 +145,7 @@ impl UbiBlkBackendThread {
         self.request_slots.len() - 1
     }
 
-    fn put_request_slot(&mut self, idx: usize) {
+    pub(crate) fn put_request_slot(&mut self, idx: usize) {
         self.request_slots[idx].used = false;
     }
 
@@ -231,7 +236,7 @@ impl UbiBlkBackendThread {
         }
     }
 
-    fn request_len(&self, request: &Request) -> usize {
+    pub(crate) fn request_len(&self, request: &Request) -> usize {
         let mut len = 0;
         for (_, data_len) in &request.data_descriptors {
             len += *data_len;

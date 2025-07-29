@@ -25,8 +25,7 @@ impl AlignedBuf {
     pub fn new_with_alignment(len: usize, align: usize) -> Self {
         assert!(
             align != 0 && align.is_power_of_two(),
-            "Alignment must be non-zero and a power of two, got: {}",
-            align
+            "Alignment must be non-zero and a power of two, got: {align}"
         );
         let alignment = align;
         let vec = vec![0u8; len + align];

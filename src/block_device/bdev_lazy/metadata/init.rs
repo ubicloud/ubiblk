@@ -20,15 +20,15 @@ fn wait_for_completion(ch: &mut Box<dyn IoChannel>, id: usize) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(1));
         if let Some((cid, success)) = ch.poll().into_iter().next() {
             if cid != id {
-                error!("Unexpected completion ID: {}, expected {}", cid, id);
+                error!("Unexpected completion ID: {cid}, expected {id}");
                 return Err(VhostUserBlockError::IoError {
-                    source: std::io::Error::other(format!("Unexpected ID: {}", cid)),
+                    source: std::io::Error::other(format!("Unexpected ID: {cid}")),
                 });
             }
             if !success {
-                error!("Failed to {} metadata", op);
+                error!("Failed to {op} metadata");
                 return Err(VhostUserBlockError::IoError {
-                    source: std::io::Error::other(format!("Failed to {} metadata", op)),
+                    source: std::io::Error::other(format!("Failed to {op} metadata")),
                 });
             }
             if id == METADATA_WRITE_ID {
@@ -39,11 +39,11 @@ fn wait_for_completion(ch: &mut Box<dyn IoChannel>, id: usize) -> Result<()> {
             return Ok(());
         }
     }
-    error!("Timeout while waiting for metadata {}", op);
+    error!("Timeout while waiting for metadata {op}");
     Err(VhostUserBlockError::IoError {
         source: std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            format!("Timeout while waiting for metadata {}", op),
+            format!("Timeout while waiting for metadata {op}"),
         ),
     })
 }

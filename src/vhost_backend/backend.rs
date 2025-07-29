@@ -81,7 +81,7 @@ impl UbiBlkBackend {
             ..Default::default()
         };
 
-        info!("virtio_config: {:?}", virtio_config);
+        info!("virtio_config: {virtio_config:?}");
 
         let mut queues_per_thread = Vec::new();
         let mut threads: Vec<Mutex<UbiBlkBackendThread>> = Vec::new();
@@ -97,7 +97,7 @@ impl UbiBlkBackend {
             queues_per_thread.push(0b1 << i);
         }
 
-        debug!("queues_per_thread: {:?}", queues_per_thread);
+        debug!("queues_per_thread: {queues_per_thread:?}");
 
         Ok(UbiBlkBackend {
             threads,
@@ -181,7 +181,7 @@ impl VhostUserBackend for UbiBlkBackend {
     //   le16 used_event; /* Only if VIRTIO_F_EVENT_IDX */
     // };
     fn set_event_idx(&self, enabled: bool) {
-        info!("set_event_idx: {}", enabled);
+        info!("set_event_idx: {enabled}");
         for thread in self.threads.iter() {
             thread.lock().unwrap().event_idx = enabled;
         }
@@ -200,8 +200,7 @@ impl VhostUserBackend for UbiBlkBackend {
     ) -> std::result::Result<(), std::io::Error> {
         if evset != EventSet::IN {
             return Err(std::io::Error::other(format!(
-                "Invalid event set: {:?}",
-                evset
+                "Invalid event set: {evset:?}"
             )));
         }
 
@@ -243,8 +242,7 @@ impl VhostUserBackend for UbiBlkBackend {
                 Ok(())
             }
             _ => Err(std::io::Error::other(format!(
-                "Invalid device event: {}",
-                device_event
+                "Invalid device event: {device_event}"
             ))),
         }
     }
@@ -288,7 +286,7 @@ fn build_block_device(
         options.direct_io,
     )
     .map_err(|e| {
-        error!("Failed to create block device at {}: {:?}", path, e);
+        error!("Failed to create block device at {path}: {e:?}");
         e
     })?;
 
@@ -324,7 +322,7 @@ pub fn start_block_backend(
                 }));
             }
             let metadata_path = options.metadata_path.as_ref().unwrap();
-            let metadata_dev = build_block_device(&metadata_path, options, kek)?;
+            let metadata_dev = build_block_device(metadata_path, options, kek)?;
             let readonly = true;
             let image_bdev =
                 UringBlockDevice::new(PathBuf::from(path), 64, readonly, options.direct_io)?;
@@ -360,8 +358,8 @@ pub fn start_block_backend(
     };
 
     let backend = Arc::new(
-        UbiBlkBackend::new(&options, mem.clone(), block_device, alignment).map_err(|e| {
-            error!("Failed to create UbiBlkBackend: {:?}", e);
+        UbiBlkBackend::new(options, mem.clone(), block_device, alignment).map_err(|e| {
+            error!("Failed to create UbiBlkBackend: {e:?}");
             Box::new(e)
         })?,
     );
@@ -384,8 +382,7 @@ pub fn start_block_backend(
     let name = "ubiblk-backend";
     let mut daemon = VhostUserDaemon::new(name.to_string(), backend.clone(), mem).map_err(|e| {
         Box::new(std::io::Error::other(format!(
-            "VhostUserDaemon::new error: {:?}",
-            e
+            "VhostUserDaemon::new error: {e:?}"
         )))
     })?;
 
@@ -393,8 +390,7 @@ pub fn start_block_backend(
 
     if let Err(e) = daemon.serve(&options.socket) {
         return Err(Box::new(std::io::Error::other(format!(
-            "VhostUserDaemon::wait error: {:?}",
-            e
+            "VhostUserDaemon::wait error: {e:?}"
         ))));
     };
 
@@ -402,7 +398,7 @@ pub fn start_block_backend(
 
     for thread in backend.threads.iter() {
         if let Err(e) = thread.lock().unwrap().kill_evt.write(1) {
-            error!("Error shutting down worker thread: {:?}", e)
+            error!("Error shutting down worker thread: {e:?}")
         }
     }
 
@@ -411,7 +407,7 @@ pub fn start_block_backend(
     if let Some(handle) = stripe_fetcher_thread {
         info!("Shutting down bgworker thread ...");
         if let Err(e) = stripe_fetcher_killfd.write(1) {
-            error!("Error shutting down bgworker thread: {:?}", e);
+            error!("Error shutting down bgworker thread: {e:?}");
         }
         info!("Waiting for bgworker thread to join ...");
         handle.join().unwrap();
@@ -426,14 +422,14 @@ pub fn start_block_backend(
 }
 
 pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) {
-    info!("Starting vhost-user-blk backend with options: {:?}", config);
+    info!("Starting vhost-user-blk backend with options: {config:?}");
 
     info!("Process ID: {}", std::process::id());
 
     loop {
         match start_block_backend(config, kek.clone()) {
             Err(e) => {
-                error!("An error occurred: {:?}", e);
+                error!("An error occurred: {e:?}");
                 break;
             }
             Ok(_) => {
@@ -456,7 +452,7 @@ pub fn init_metadata(
             .ok_or_else(|| VhostUserBlockError::InvalidParameter {
                 description: "metadata_path is none".to_string(),
             })?;
-    let metadata_bdev = build_block_device(&metadata_path, config, kek.clone())?;
+    let metadata_bdev = build_block_device(metadata_path, config, kek.clone())?;
     let mut ch = metadata_bdev.create_channel()?;
     let metadata = UbiMetadata::new(stripe_sector_count_shift);
     init_metadata_file(&metadata, &mut ch)?;

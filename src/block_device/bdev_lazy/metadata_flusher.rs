@@ -57,6 +57,12 @@ impl MetadataFlushState {
     }
 }
 
+impl Default for MetadataFlushState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub enum StartFlushResult {
     Started,
     NoChanges,
@@ -115,7 +121,7 @@ impl MetadataFlusher {
         }
 
         let current_version = self.flush_state.current_version();
-        debug!("Starting flush for metadata version {}", current_version);
+        debug!("Starting flush for metadata version {current_version}");
         self.metadata_version_being_flushed = Some(current_version);
 
         let metadata_buf = self.metadata_buf.clone();
@@ -143,7 +149,7 @@ impl MetadataFlusher {
                 }
                 self.channel.add_flush(1);
                 if let Err(e) = self.channel.submit() {
-                    error!("Failed to submit flush: {}", e);
+                    error!("Failed to submit flush: {e}");
                     self.metadata_version_being_flushed = None;
                     return Some(false);
                 }
@@ -155,12 +161,12 @@ impl MetadataFlusher {
                         return Some(false);
                     }
                     (Some(version), false) => {
-                        error!("Metadata flush for version {} failed", version);
+                        error!("Metadata flush for version {version} failed");
                         self.metadata_version_being_flushed = None;
                         return Some(false);
                     }
                     (Some(version), true) => {
-                        debug!("Metadata flush completed for version {}", version);
+                        debug!("Metadata flush completed for version {version}");
                         self.flush_state.set_flushed_version(version);
                         self.metadata_version_being_flushed = None;
                         return Some(true);
@@ -195,7 +201,7 @@ impl MetadataFlusher {
                 Ok(StartFlushResult::NoChanges) => self.finish_flush(true),
                 Ok(StartFlushResult::Started) => {}
                 Err(e) => {
-                    error!("Failed to start flush: {:?}", e);
+                    error!("Failed to start flush: {e:?}");
                     self.finish_flush(false);
                 }
             }
@@ -218,9 +224,9 @@ mod tests {
     fn test_metadata_flusher() -> Result<()> {
         let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
         let stripe_sector_count_shift = 11;
-        let stripe_sector_count = 1 << stripe_sector_count_shift;
+        let stripe_sector_count: u64 = 1 << stripe_sector_count_shift;
         let source_sector_count = 29 * stripe_sector_count + 4;
-        let stripe_count = (source_sector_count + stripe_sector_count - 1) / stripe_sector_count;
+        let stripe_count = source_sector_count.div_ceil(stripe_sector_count);
 
         let mut ch = metadata_dev.create_channel()?;
         let metadata = UbiMetadata::new(stripe_sector_count_shift);
@@ -230,9 +236,9 @@ mod tests {
         let stripe_status_vec = StripeStatusVec::new(flusher.metadata(), source_sector_count)?;
 
         assert_eq!(stripe_status_vec.stripe_status(0), StripeStatus::NotFetched);
-        assert_eq!(flusher.stripe_sector_count(), stripe_sector_count as u64);
+        assert_eq!(flusher.stripe_sector_count(), stripe_sector_count);
 
-        let stripes_to_fetch = vec![0, 3, 7, 8];
+        let stripes_to_fetch = [0, 3, 7, 8];
         for stripe_id in stripes_to_fetch.iter() {
             assert_eq!(
                 stripe_status_vec.stripe_status(*stripe_id),
@@ -255,7 +261,7 @@ mod tests {
                 StripeStatus::Fetched
             );
         }
-        assert_eq!(stripe_status_vec.stripe_count, stripe_count as u64);
+        assert_eq!(stripe_status_vec.stripe_count, stripe_count);
 
         assert_eq!(metadata_dev.flushes(), 1);
         flusher.request_flush();

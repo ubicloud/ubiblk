@@ -2,17 +2,17 @@ use std::fmt::Write;
 
 pub fn hexdump(data: &[u8], len: usize) -> String {
     let len = len.min(data.len());
-    let mut result = String::with_capacity(((len + 15) / 16) * 60);
+    let mut result = String::with_capacity(len.div_ceil(16) * 60);
 
     for offset in (0..len).step_by(16) {
-        write!(&mut result, "{:08x}  ", offset).unwrap();
+        write!(&mut result, "{offset:08x}  ").unwrap();
 
         let mut hex_part = String::new();
         let mut ascii_part = String::new();
         let chunk = &data[offset..len.min(offset + 16)];
 
         for (i, byte) in chunk.iter().enumerate() {
-            write!(&mut hex_part, "{:02x} ", byte).unwrap();
+            write!(&mut hex_part, "{byte:02x} ").unwrap();
             ascii_part.push(if byte.is_ascii_graphic() || *byte == b' ' {
                 *byte as char
             } else {

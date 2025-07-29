@@ -37,12 +37,12 @@ impl IoChannel for SyncIoChannel {
         let mut file = self.file.lock().unwrap();
         let len = sector_count as usize * SECTOR_SIZE;
         if let Err(e) = file.seek(SeekFrom::Start(sector_offset * SECTOR_SIZE as u64)) {
-            error!("Error seeking to sector {}: {}", sector_offset, e);
+            error!("Error seeking to sector {sector_offset}: {e}");
             self.finished_requests.push((id, false));
             return;
         }
         if let Err(e) = file.read_exact(&mut buf.as_mut_slice()[..len]) {
-            error!("Error reading from sector {}: {}", sector_offset, e);
+            error!("Error reading from sector {sector_offset}: {e}");
             self.finished_requests.push((id, false));
             return;
         }
@@ -56,12 +56,12 @@ impl IoChannel for SyncIoChannel {
         let len = sector_count as usize * SECTOR_SIZE;
 
         if let Err(e) = file.seek(SeekFrom::Start(sector_offset * SECTOR_SIZE as u64)) {
-            error!("Error seeking to sector {}: {}", sector_offset, e);
+            error!("Error seeking to sector {sector_offset}: {e}");
             self.finished_requests.push((id, false));
             return;
         }
         if let Err(e) = file.write_all(&buf.as_slice()[..len]) {
-            error!("Error writing to sector {}: {}", sector_offset, e);
+            error!("Error writing to sector {sector_offset}: {e}");
             self.finished_requests.push((id, false));
             return;
         }
@@ -154,7 +154,7 @@ mod tests {
     // Verify basic read and write operations succeed on a read/write device.
     fn create_channel_and_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
 
@@ -190,7 +190,7 @@ mod tests {
     // Ensure writes fail when the device is opened read-only.
     fn create_channel_and_basic_io_readonly() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
 
@@ -237,7 +237,7 @@ mod tests {
     // Trigger error paths for out-of-bounds reads and writes.
     fn read_and_write_error_paths() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         tmpfile.as_file().set_len(SECTOR_SIZE as u64).unwrap();
@@ -285,7 +285,7 @@ mod tests {
     // Test successful flush operations and that the channel never reports busy.
     fn flush_and_busy() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path();

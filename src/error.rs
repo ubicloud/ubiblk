@@ -38,14 +38,14 @@ mod tests {
         let error = VhostUserBlockError::InvalidParameter {
             description: "Test error".to_string(),
         };
-        assert_eq!(format!("{}", error), "Invalid parameter error: Test error");
+        assert_eq!(format!("{error}"), "Invalid parameter error: Test error");
     }
 
     #[test]
     fn test_io_error_format() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::Other, "Test IO error");
+        let io_error = std::io::Error::other("Test IO error");
         let error = VhostUserBlockError::IoError { source: io_error };
-        assert_eq!(format!("{}", error), "I/O error: Test IO error");
+        assert_eq!(format!("{error}"), "I/O error: Test IO error");
     }
 
     #[test]
@@ -55,7 +55,7 @@ mod tests {
             source: guest_memory_error,
         };
         assert_eq!(
-            format!("{}", error),
+            format!("{error}"),
             "Guest memory access error: Guest memory error: invalid backend address"
         );
     }
@@ -63,15 +63,15 @@ mod tests {
     #[test]
     fn test_thread_creation_format() {
         let error = VhostUserBlockError::ThreadCreation;
-        assert_eq!(format!("{}", error), "Thread creation error");
+        assert_eq!(format!("{error}"), "Thread creation error");
     }
 
     #[test]
     fn test_io_channel_creation_format() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::Other, "Test IO error");
+        let io_error = std::io::Error::other("Test IO error");
         let error = VhostUserBlockError::IoChannelCreation { source: io_error };
         assert_eq!(
-            format!("{}", error),
+            format!("{error}"),
             "I/O channel creation error: Test IO error"
         );
     }
@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn test_channel_error_format() {
         let error = VhostUserBlockError::ChannelError;
-        assert_eq!(format!("{}", error), "Channel error");
+        assert_eq!(format!("{error}"), "Channel error");
     }
 
     #[test]
@@ -87,6 +87,6 @@ mod tests {
         let error = VhostUserBlockError::MetadataError {
             description: "Test metadata error".to_string(),
         };
-        assert_eq!(format!("{}", error), "Metadata error: Test metadata error");
+        assert_eq!(format!("{error}"), "Metadata error: Test metadata error");
     }
 }

@@ -28,17 +28,17 @@ impl UringIoChannel {
             opts.custom_flags(libc::O_DIRECT);
         }
         let file = opts.open(path).map_err(|e| {
-            error!("Failed to open file {}: {}", path, e);
+            error!("Failed to open file {path}: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let io_uring_entries: u32 = queue_size.try_into().map_err(|_| {
-            error!("Invalid queue size: {}", queue_size);
+            error!("Invalid queue size: {queue_size}");
             VhostUserBlockError::InvalidParameter {
                 description: "Invalid io_uring queue size".to_string(),
             }
         })?;
         let ring = IoUring::new(io_uring_entries).map_err(|e| {
-            error!("Failed to create io_uring: {}", e);
+            error!("Failed to create io_uring: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         Ok(UringIoChannel {
@@ -99,7 +99,7 @@ impl IoChannel for UringIoChannel {
 
     fn submit(&mut self) -> Result<()> {
         if let Err(e) = self.ring.submit() {
-            error!("Failed to submit IO request: {}", e);
+            error!("Failed to submit IO request: {e}");
             return Err(VhostUserBlockError::IoError { source: e });
         }
         Ok(())
@@ -164,7 +164,7 @@ impl UringBlockDevice {
         direct_io: bool,
     ) -> Result<Box<Self>> {
         if !queue_size.is_power_of_two() {
-            error!("Invalid queue size: {}", queue_size);
+            error!("Invalid queue size: {queue_size}");
             return Err(VhostUserBlockError::InvalidParameter {
                 description: "queue_size must be a positive power of two".to_string(),
             });
@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn create_channel_and_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn create_channel_and_basic_io_readonly() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
@@ -285,14 +285,14 @@ mod tests {
     #[test]
     fn new_with_unaligned_size_fails() -> Result<()> {
         let mut tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         tmpfile
             .as_file_mut()
             .set_len(SECTOR_SIZE as u64 + 1)
             .map_err(|e| {
-                error!("Failed to set temporary file size: {}", e);
+                error!("Failed to set temporary file size: {e}");
                 VhostUserBlockError::IoError { source: e }
             })?;
         let path = tmpfile.path().to_owned();
@@ -315,7 +315,7 @@ mod tests {
     #[test]
     fn new_invalid_queue_size_fails() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn new_zero_queue_size_fails() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn busy_and_flush() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn queue_overflow() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn direct_io_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn direct_io_queue_overflow() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {}", e);
+            error!("Failed to create temporary file: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();

@@ -6,7 +6,7 @@ use crate::{Result, VhostUserBlockError};
 #[cfg(not(feature = "disable-isal-crypto"))]
 use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
 #[cfg(feature = "disable-isal-crypto")]
-use aes::cipher::{generic_array::GenericArray, KeyInit};
+use aes::cipher::generic_array::GenericArray;
 #[cfg(feature = "disable-isal-crypto")]
 use aes::Aes256;
 use aes_gcm::aead::Payload;
@@ -26,7 +26,9 @@ struct Request {
 
 struct CryptIoChannel {
     base: Box<dyn IoChannel>,
+    #[cfg_attr(feature = "disable-isal-crypto", allow(dead_code))]
     key1: [u8; 32],
+    #[cfg_attr(feature = "disable-isal-crypto", allow(dead_code))]
     key2: [u8; 32],
     #[cfg(feature = "disable-isal-crypto")]
     xts: Xts128<Aes256>,
@@ -54,6 +56,7 @@ impl CryptIoChannel {
 }
 
 impl CryptIoChannel {
+    #[cfg_attr(feature = "disable-isal-crypto", allow(dead_code))]
     fn get_initial_tweak(&self, sector: u64) -> [u8; 16] {
         /*
          * Based on SPDK's _sw_accel_crypto_operation() in spdk/lib/accel/accel_sw.c:
@@ -266,9 +269,9 @@ fn decrypt_keys(
             })?;
 
             let cipher = Aes256Gcm::new_from_slice(&kek_key).map_err(|e| {
-                error!("Failed to initialize cipher: {}", e);
+                error!("Failed to initialize cipher: {e}");
                 VhostUserBlockError::InvalidParameter {
-                    description: format!("Failed to initialize cipher: {}", e),
+                    description: format!("Failed to initialize cipher: {e}"),
                 }
             })?;
 
@@ -304,9 +307,9 @@ fn decrypt_block(
             },
         )
         .map_err(|e| {
-            error!("Failed to decrypt key: {}", e);
+            error!("Failed to decrypt key: {e}");
             VhostUserBlockError::InvalidParameter {
-                description: format!("Failed to decrypt key: {}", e),
+                description: format!("Failed to decrypt key: {e}"),
             }
         })?;
 

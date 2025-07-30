@@ -117,7 +117,6 @@ pub struct StripeFetcher {
     stripe_sector_count: u64,
     fetch_queue: VecDeque<usize>,
     fetch_buffers: Vec<FetchBuffer>,
-    stripes_fetched: usize,
     stripe_status_vec: StripeStatusVec,
 }
 
@@ -163,7 +162,6 @@ impl StripeFetcher {
             stripe_sector_count,
             fetch_queue: VecDeque::new(),
             fetch_buffers,
-            stripes_fetched: 0,
             stripe_status_vec,
         })
     }
@@ -210,7 +208,6 @@ impl StripeFetcher {
         if success {
             self.stripe_status_vec
                 .set_stripe_status(stripe_id, StripeStatus::Fetched);
-            self.stripes_fetched += 1;
         } else {
             self.stripe_status_vec
                 .set_stripe_status(stripe_id, StripeStatus::Failed);

@@ -6,7 +6,7 @@ use crate::{
     },
     utils::aligned_buffer::AlignedBuf,
     vhost_backend::SECTOR_SIZE,
-    Result, VhostUserBlockError,
+    Result,
 };
 use log::{debug, error};
 use std::{
@@ -18,6 +18,9 @@ use std::{
         Arc,
     },
 };
+
+const METADATA_WRITE_ID: usize = 0;
+const METADATA_FLUSH_ID: usize = 1;
 
 #[derive(Debug, Clone)]
 pub struct MetadataFlushState {
@@ -63,19 +66,14 @@ impl Default for MetadataFlushState {
     }
 }
 
-pub enum StartFlushResult {
-    Started,
-    NoChanges,
-}
-
 pub struct MetadataFlusher {
     channel: Box<dyn IoChannel>,
     metadata: Box<UbiMetadata>,
     metadata_buf: SharedBuffer,
     flush_state: MetadataFlushState,
     metadata_version_being_flushed: Option<u64>,
-    pending_flush_requests: usize,
-    inprogress_flush_requests: usize,
+    pending_flush_requests: bool,
+    inprogress_flush_requests: bool,
 }
 
 impl MetadataFlusher {
@@ -90,13 +88,13 @@ impl MetadataFlusher {
             metadata_buf: Rc::new(RefCell::new(AlignedBuf::new(metadata_buf_size))),
             flush_state: MetadataFlushState::new(),
             metadata_version_being_flushed: None,
-            pending_flush_requests: 0,
-            inprogress_flush_requests: 0,
+            pending_flush_requests: false,
+            inprogress_flush_requests: false,
         })
     }
 
     pub fn busy(&self) -> bool {
-        self.inprogress_flush_requests > 0 || self.pending_flush_requests > 0
+        self.inprogress_flush_requests || self.pending_flush_requests
     }
 
     pub fn stripe_sector_count(&self) -> u64 {
@@ -112,18 +110,7 @@ impl MetadataFlusher {
         self.flush_state.increment_version();
     }
 
-    fn start_flush(&mut self) -> Result<StartFlushResult> {
-        if !self.flush_state.needs_flush() {
-            debug!("No changes to flush");
-            return Ok(StartFlushResult::NoChanges);
-        }
-
-        if self.metadata_version_being_flushed.is_some() {
-            return Err(VhostUserBlockError::MetadataError {
-                description: "Flush already in progress".to_string(),
-            });
-        }
-
+    fn start_flush(&mut self) -> Result<()> {
         let current_version = self.flush_state.current_version();
         debug!("Starting flush for metadata version {current_version}");
         self.metadata_version_being_flushed = Some(current_version);
@@ -138,55 +125,52 @@ impl MetadataFlusher {
 
         let sector_count = metadata_buf.borrow().len() / SECTOR_SIZE;
         self.channel
-            .add_write(0, sector_count as u32, metadata_buf, 0);
+            .add_write(0, sector_count as u32, metadata_buf, METADATA_WRITE_ID);
         self.channel.submit()?;
-        Ok(StartFlushResult::Started)
+        Ok(())
     }
 
-    fn poll_flush(&mut self) -> Option<bool> {
+    fn poll(&mut self) -> Option<bool> {
         for (id, success) in self.channel.poll() {
-            if id == 0 {
+            if id == METADATA_WRITE_ID {
                 if !success {
                     error!("Metadata write failed");
-                    self.metadata_version_being_flushed = None;
                     return Some(false);
                 }
-                self.channel.add_flush(1);
+                self.channel.add_flush(METADATA_FLUSH_ID);
                 if let Err(e) = self.channel.submit() {
                     error!("Failed to submit flush: {e}");
-                    self.metadata_version_being_flushed = None;
                     return Some(false);
                 }
                 return None;
-            } else if id == 1 {
-                match (self.metadata_version_being_flushed, success) {
-                    (None, _) => {
-                        error!("Flush completion received without a pending flush");
-                        return Some(false);
-                    }
-                    (Some(version), false) => {
-                        error!("Metadata flush for version {version} failed");
-                        self.metadata_version_being_flushed = None;
-                        return Some(false);
-                    }
-                    (Some(version), true) => {
-                        debug!("Metadata flush completed for version {version}");
-                        self.flush_state.set_flushed_version(version);
-                        self.metadata_version_being_flushed = None;
-                        return Some(true);
-                    }
-                }
+            } else if id == METADATA_FLUSH_ID {
+                return Some(success);
+            } else {
+                error!("Unexpected ID {id} in poll result");
             }
         }
         None
     }
 
-    fn finish_flush(&mut self, _success: bool) {
-        self.inprogress_flush_requests = 0;
+    fn finish_flush(&mut self, success: bool) {
+        match (self.metadata_version_being_flushed, success) {
+            (None, _) => {
+                error!("Flush completion received without a pending flush");
+            }
+            (Some(version), false) => {
+                error!("Metadata flush for version {version} failed");
+            }
+            (Some(version), true) => {
+                debug!("Metadata flush completed for version {version}");
+                self.flush_state.set_flushed_version(version);
+            }
+        }
+        self.inprogress_flush_requests = false;
+        self.metadata_version_being_flushed = None;
     }
 
     pub fn request_flush(&mut self) {
-        self.pending_flush_requests += 1;
+        self.pending_flush_requests = true;
     }
 
     pub fn shared_flush_state(&self) -> MetadataFlushState {
@@ -194,16 +178,17 @@ impl MetadataFlusher {
     }
 
     pub fn update(&mut self) {
-        if let Some(success) = self.poll_flush() {
+        if let Some(success) = self.poll() {
             self.finish_flush(success);
         }
 
-        if self.pending_flush_requests > 0 && self.inprogress_flush_requests == 0 {
-            self.inprogress_flush_requests = self.pending_flush_requests;
-            self.pending_flush_requests = 0;
+        if self.pending_flush_requests && !self.inprogress_flush_requests {
+            self.inprogress_flush_requests = true;
+            self.pending_flush_requests = false;
             match self.start_flush() {
-                Ok(StartFlushResult::NoChanges) => self.finish_flush(true),
-                Ok(StartFlushResult::Started) => {}
+                Ok(()) => {
+                    debug!("Flush request started successfully");
+                }
                 Err(e) => {
                     error!("Failed to start flush: {e:?}");
                     self.finish_flush(false);
@@ -270,7 +255,7 @@ mod tests {
         assert_eq!(metadata_dev.flushes(), 1);
         flusher.request_flush();
         flusher.update();
-        assert!(flusher.pending_flush_requests == 0);
+        assert!(!flusher.pending_flush_requests);
         while flusher.shared_flush_state().needs_flush() {
             flusher.update();
         }
@@ -333,7 +318,7 @@ mod tests {
         flusher.set_stripe_fetched(0);
         flusher.request_flush();
         flusher.update();
-        assert!(flusher.pending_flush_requests == 0);
+        assert!(!flusher.pending_flush_requests);
         assert!(flusher.shared_flush_state().needs_flush());
         Ok(())
     }

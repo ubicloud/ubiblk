@@ -19,6 +19,7 @@ pub enum StripeStatus {
     NotFetched,
     Queued,
     Fetching,
+    Flushing,
     Fetched,
     Failed,
 }
@@ -42,8 +43,9 @@ impl StripeStatusVec {
                 0 => StripeStatus::NotFetched,
                 1 => StripeStatus::Queued,
                 2 => StripeStatus::Fetching,
-                3 => StripeStatus::Fetched,
-                4 => StripeStatus::Failed,
+                3 => StripeStatus::Flushing,
+                4 => StripeStatus::Fetched,
+                5 => StripeStatus::Failed,
                 other => {
                     error!(
                         "Invalid stripe status value: {other} for stripe_id: {stripe_id}. Defaulting to Failed."
@@ -187,7 +189,7 @@ impl StripeFetcher {
             StripeStatus::Fetched => {
                 debug!("Stripe {stripe_id} already fetched");
             }
-            StripeStatus::Queued | StripeStatus::Fetching => {
+            StripeStatus::Queued | StripeStatus::Fetching | StripeStatus::Flushing => {
                 debug!("Stripe {stripe_id} is already queued or fetching");
             }
         }
@@ -245,6 +247,19 @@ impl StripeFetcher {
         }
     }
 
+    fn start_flush(&mut self, buffer_idx: usize, stripe_id: usize) -> bool {
+        self.stripe_status_vec
+            .set_stripe_status(stripe_id, StripeStatus::Flushing);
+        self.fetch_target_channel.add_flush(buffer_idx);
+
+        if let Err(e) = self.fetch_target_channel.submit() {
+            error!("Failed to submit flush for stripe {stripe_id}: {e:?}");
+            false
+        } else {
+            true
+        }
+    }
+
     fn poll_fetches(&mut self) -> Vec<(usize, bool)> {
         let mut result = Vec::new();
         for (buffer_idx, success) in self.fetch_source_channel.poll() {
@@ -254,7 +269,35 @@ impl StripeFetcher {
         }
 
         for (buffer_idx, success) in self.fetch_target_channel.poll() {
-            result.push(self.fetch_completed(buffer_idx, success));
+            if !success {
+                result.push(self.fetch_completed(buffer_idx, false));
+                continue;
+            }
+            let stripe_id = match self.fetch_buffers[buffer_idx].used_for {
+                Some(id) => id,
+                None => {
+                    error!("poll_fetches called with unused buffer {buffer_idx}");
+                    continue;
+                }
+            };
+            let status = self.stripe_status_vec.stripe_status(stripe_id);
+            match status {
+                StripeStatus::Fetching => {
+                    debug!("Stripe {stripe_id} write completed, flushing...");
+                    if !self.start_flush(buffer_idx, stripe_id) {
+                        result.push(self.fetch_completed(buffer_idx, false));
+                        continue;
+                    }
+                }
+                StripeStatus::Flushing => {
+                    self.stripe_status_vec
+                        .set_stripe_status(stripe_id, StripeStatus::Fetched);
+                    result.push(self.fetch_completed(buffer_idx, success));
+                }
+                _ => {
+                    error!("Unexpected status for stripe {stripe_id} after write: {status:?}");
+                }
+            }
         }
 
         result

@@ -95,7 +95,7 @@ mod tests {
         chan.submit().unwrap();
         let results = drive(&bgworker, &mut chan);
         assert_eq!(results, vec![(flush_id, true)]);
-        assert_eq!(target_metrics.read().unwrap().flushes, 1);
+        assert_eq!(target_metrics.read().unwrap().flushes, 3);
     }
 
     /// Verify that reads are served from the image when copy-on-read is
@@ -163,7 +163,7 @@ mod tests {
         chan.submit().unwrap();
         let results = drive(&bgworker, &mut chan);
         assert_eq!(results, vec![(flush_id, true)]);
-        assert_eq!(target_metrics.read().unwrap().flushes, 1);
+        assert_eq!(target_metrics.read().unwrap().flushes, 2);
     }
 
     /// Ensure that flush requests are completed only after metadata has been

@@ -51,6 +51,15 @@ pub struct UbiBlkBackendThread {
 }
 
 impl UbiBlkBackendThread {
+    fn complete_bad_chain(&mut self, vring: &mut Vring<'_>, desc_chain: &DescChain) {
+        let mem = desc_chain.memory();
+        if let Err(e) = vring
+            .get_queue_mut()
+            .add_used(mem, desc_chain.head_index(), 0)
+        {
+            error!("failed to add used descriptor: {e:?}");
+        }
+    }
     pub fn new(
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         io_channel: Box<dyn IoChannel>,
@@ -396,12 +405,19 @@ impl UbiBlkBackendThread {
                     RequestType::GetDeviceId => {
                         self.process_get_device_id(&request, desc_chain, vring)
                     }
-                    _ => {
+                    RequestType::Unsupported(_) | RequestType::None => {
                         error!("unknown request type: {:?}", request.request_type);
+                        self.complete_io(
+                            vring,
+                            &desc_chain,
+                            request.status_addr,
+                            VIRTIO_BLK_S_UNSUPP as u8,
+                        );
                     }
                 },
                 Err(err) => {
                     error!("failed to parse available descriptor chain: {err:?}");
+                    self.complete_bad_chain(vring, &desc_chain);
                 }
             }
             busy = true;

@@ -169,6 +169,16 @@ impl UbiBlkBackendThread {
         }
     }
 
+    fn fail_descriptor_chain(&mut self, vring: &mut Vring<'_>, desc_chain: &DescChain) {
+        let mem = desc_chain.memory();
+        if let Err(e) = vring
+            .get_queue_mut()
+            .add_used(mem, desc_chain.head_index(), 0)
+        {
+            error!("failed to add used descriptor: {e:?}");
+        }
+    }
+
     fn write_to_guest(&self, req: &RequestSlot) -> Result<()> {
         let desc_chain = req
             .desc_chain
@@ -396,12 +406,28 @@ impl UbiBlkBackendThread {
                     RequestType::GetDeviceId => {
                         self.process_get_device_id(&request, desc_chain, vring)
                     }
+                    RequestType::Unsupported(_) => {
+                        error!("unknown request type: {:?}", request.request_type);
+                        self.complete_io(
+                            vring,
+                            &desc_chain,
+                            request.status_addr,
+                            VIRTIO_BLK_S_UNSUPP as u8,
+                        );
+                    }
                     _ => {
                         error!("unknown request type: {:?}", request.request_type);
+                        self.complete_io(
+                            vring,
+                            &desc_chain,
+                            request.status_addr,
+                            VIRTIO_BLK_S_IOERR as u8,
+                        );
                     }
                 },
                 Err(err) => {
                     error!("failed to parse available descriptor chain: {err:?}");
+                    self.fail_descriptor_chain(vring, &desc_chain);
                 }
             }
             busy = true;

@@ -9,10 +9,13 @@ mod tests {
     use smallvec::smallvec;
     use vhost_user_backend::bitmap::BitmapMmapRegion;
     use virtio_bindings::bindings::virtio_ring::VRING_DESC_F_WRITE;
+    use virtio_bindings::virtio_blk::VIRTIO_BLK_S_UNSUPP;
     use virtio_queue::desc::split::Descriptor as SplitDescriptor;
+    use virtio_queue::QueueT;
     use virtio_queue::{Queue, QueueOwnedT};
     use vm_memory::{
-        GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap,
+        Address, Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard,
+        GuestMemoryMmap,
     };
 
     type GuestMemory = GuestMemoryMmap<BitmapMmapRegion>;
@@ -115,5 +118,55 @@ mod tests {
         // allocate second while first is still used
         let second = thread.get_request_slot(128, &req, &chain);
         assert_eq!(second, 1);
+    }
+
+    #[test]
+    fn unsupported_request_completes_with_unsupp() {
+        use vhost_user_backend::VringT;
+        use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+        use virtio_queue::desc::RawDescriptor;
+        use virtio_queue::mock::MockSplitQueue;
+
+        let (mut thread, mem) = create_thread();
+
+        let hdr = GuestAddress(0x1000);
+        let data = GuestAddress(0x2000);
+        let status = GuestAddress(0x3000);
+
+        // Unsupported request type 0xdead
+        mem.write_obj::<u32>(0xdead, hdr).unwrap();
+        mem.write_obj::<u32>(0, hdr.unchecked_add(4)).unwrap();
+        mem.write_obj::<u64>(0, hdr.unchecked_add(8)).unwrap();
+
+        let descs = [
+            SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
+            SplitDescriptor::new(data.0, 512, VRING_DESC_F_NEXT as u16, 2),
+            SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
+        ];
+
+        let vq = MockSplitQueue::new(&mem, 4);
+        let raw_descs: Vec<RawDescriptor> =
+            descs.iter().cloned().map(RawDescriptor::from).collect();
+        vq.add_desc_chains(&raw_descs, 0).unwrap();
+        let queue: Queue = vq.create_queue().unwrap();
+
+        let atomic = GuestMemoryAtomic::new(mem.clone());
+        let vring = vhost_user_backend::VringRwLock::new(atomic.clone(), queue.max_size()).unwrap();
+        {
+            let mut vring_state = vring.get_mut();
+            vring_state.set_enabled(true);
+            vring_state
+                .set_queue_info(vq.desc_table_addr().0, vq.avail_addr().0, vq.used_addr().0)
+                .unwrap();
+            *vring_state.get_queue_mut() = queue;
+        }
+
+        {
+            let mut vring_state = vring.get_mut();
+            thread.process_queue(&mut vring_state);
+        }
+
+        let status_val = mem.read_obj::<u8>(status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_UNSUPP as u8);
     }
 }

@@ -1,6 +1,6 @@
-use std::{cell::RefCell, ptr::copy_nonoverlapping, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
-use crate::block_device::{IoChannel, UbiMetadata};
+use crate::block_device::{bdev_lazy::metadata::UBI_MAX_STRIPES, IoChannel, UbiMetadata};
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{error, info};
@@ -49,15 +49,11 @@ fn wait_for_completion(ch: &mut Box<dyn IoChannel>, id: usize) -> Result<()> {
 }
 
 pub fn init_metadata(metadata: &UbiMetadata, ch: &mut Box<dyn IoChannel>) -> Result<()> {
-    let metadata_size = std::mem::size_of::<UbiMetadata>();
+    let metadata_size = UbiMetadata::metadata_size(UBI_MAX_STRIPES);
     let sectors = metadata_size.div_ceil(SECTOR_SIZE);
     let buf = Rc::new(RefCell::new(AlignedBuf::new(sectors * SECTOR_SIZE)));
 
-    unsafe {
-        let src = metadata as *const UbiMetadata as *const u8;
-        let dst = buf.borrow_mut().as_mut_ptr();
-        copy_nonoverlapping(src, dst, metadata_size);
-    }
+    metadata.write_to_buf(buf.borrow_mut().as_mut_slice(), UBI_MAX_STRIPES);
 
     ch.add_write(0, sectors as u32, buf.clone(), METADATA_WRITE_ID);
     ch.submit()?;

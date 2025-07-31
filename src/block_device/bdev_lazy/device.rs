@@ -2,8 +2,7 @@ use std::{collections::VecDeque, sync::mpsc::Sender};
 
 use super::super::*;
 use super::bgworker::{BgWorkerRequest, SharedBgWorker};
-use super::metadata_flusher::MetadataFlushState;
-use super::stripe_fetcher::{StripeStatus, StripeStatusVec};
+use super::metadata::SharedMetadataState;
 use crate::{block_device::SharedBuffer, Result, VhostUserBlockError};
 use log::error;
 
@@ -35,8 +34,8 @@ struct LazyIoChannel {
     queued_flush_requests: VecDeque<FlushRequest>,
     finished_requests: Vec<(usize, bool)>,
     bgworker_ch: Sender<BgWorkerRequest>,
-    stripe_status_vec: StripeStatusVec,
-    metadata_flush_state: MetadataFlushState,
+    metadata_state: SharedMetadataState,
+    stripe_sector_count: u64,
 }
 
 impl LazyIoChannel {
@@ -44,8 +43,8 @@ impl LazyIoChannel {
         base: Box<dyn IoChannel>,
         image: Option<Box<dyn IoChannel>>,
         bgworker_ch: Sender<BgWorkerRequest>,
-        stripe_status_vec: StripeStatusVec,
-        metadata_flush_state: MetadataFlushState,
+        metadata_state: SharedMetadataState,
+        stripe_sector_count: u64,
     ) -> Self {
         LazyIoChannel {
             base,
@@ -54,41 +53,29 @@ impl LazyIoChannel {
             queued_flush_requests: VecDeque::new(),
             finished_requests: Vec::new(),
             bgworker_ch,
-            stripe_status_vec,
-            metadata_flush_state,
+            metadata_state,
+            stripe_sector_count,
         }
     }
 }
 
 impl LazyIoChannel {
-    fn stripe_status(&self, stripe_id: usize) -> StripeStatus {
-        self.stripe_status_vec.stripe_status(stripe_id)
+    fn stripe_fetched(&self, stripe_id: usize) -> bool {
+        self.metadata_state.stripe_fetched(stripe_id)
     }
 
     fn request_stripes_fetched(&self, request: &RWRequest) -> bool {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if self.stripe_status(stripe_id) != StripeStatus::Fetched {
+            if !self.stripe_fetched(stripe_id) {
                 return false;
             }
         }
         true
     }
 
-    fn request_stripes_failed(&self, request: &RWRequest) -> bool {
-        for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if self.stripe_status(stripe_id) == StripeStatus::Failed {
-                return true;
-            }
-        }
-        false
-    }
-
     fn start_stripe_fetches(&mut self, request: &RWRequest) -> Result<()> {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if matches!(
-                self.stripe_status(stripe_id),
-                StripeStatus::NotFetched | StripeStatus::Failed
-            ) {
+            if !self.metadata_state.stripe_fetched(stripe_id) {
                 self.bgworker_ch
                     .send(BgWorkerRequest::Fetch(stripe_id))
                     .map_err(|e| {
@@ -101,11 +88,11 @@ impl LazyIoChannel {
     }
 
     fn sector_to_stripe_id(&self, sector: u64) -> usize {
-        self.stripe_status_vec.sector_to_stripe_id(sector)
+        (sector / self.stripe_sector_count) as usize
     }
 
     fn process_queued_flush_requests(&mut self) {
-        let flushed_version = self.metadata_flush_state.flushed_version();
+        let flushed_version = self.metadata_state.flushed_version();
         while let Some(front) = self.queued_flush_requests.front() {
             if front.pending_metadata_version > flushed_version {
                 break;
@@ -121,13 +108,6 @@ impl LazyIoChannel {
         let mut added_requests = Vec::new();
 
         while let Some(front) = self.queued_rw_requests.front() {
-            if self.request_stripes_failed(front) {
-                let id = front.id;
-                self.queued_rw_requests.pop_front();
-                self.finished_requests.push((id, false));
-                continue;
-            }
-
             if !self.request_stripes_fetched(front) {
                 break;
             }
@@ -186,8 +166,6 @@ impl IoChannel for LazyIoChannel {
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
             self.base.add_read(sector_offset, sector_count, buf, id);
-        } else if self.request_stripes_failed(&request) {
-            self.finished_requests.push((id, false));
         } else if let Some(image_channel) = &mut self.image {
             image_channel.add_read(sector_offset, sector_count, buf, id);
         } else if let Err(e) = self.start_stripe_fetches(&request) {
@@ -216,8 +194,6 @@ impl IoChannel for LazyIoChannel {
         if fetched {
             self.base
                 .add_write(sector_offset, sector_count, buf.clone(), id);
-        } else if self.request_stripes_failed(&request) {
-            self.finished_requests.push((id, false));
         } else if let Err(e) = self.start_stripe_fetches(&request) {
             error!(
                 "Failed to send fetch request for stripe range {}-{}: {}",
@@ -230,12 +206,12 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn add_flush(&mut self, id: usize) {
-        if !self.metadata_flush_state.needs_flush() {
+        if !self.metadata_state.needs_flush() {
             self.base.add_flush(id);
             return;
         }
 
-        let current_metadata_version = self.metadata_flush_state.current_version();
+        let current_metadata_version = self.metadata_state.current_version();
 
         if let Err(e) = self.bgworker_ch.send(BgWorkerRequest::FlushMetadata) {
             error!("Failed to send flush request: {e}");
@@ -325,8 +301,8 @@ impl BlockDevice for LazyBlockDevice {
             base_channel,
             image_channel,
             bgworker_ch,
-            bgworker.stripe_status_vec(),
-            bgworker.shared_flush_state(),
+            bgworker.shared_state(),
+            bgworker.stripe_sector_count(),
         )))
     }
 

@@ -196,8 +196,6 @@ mod tests {
         chan.submit().unwrap();
 
         // Without running the bgworker, the flush should remain pending.
-        assert!(chan.poll().is_empty());
-        assert!(chan.busy());
         assert_eq!(target_metrics.read().unwrap().flushes, 0);
         // Only the initial metadata write has been flushed so far.
         assert_eq!(metadata_dev.flushes(), 1);

@@ -1,108 +1,19 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
-use super::metadata::UBI_MAX_STRIPES;
+use super::metadata::{SharedMetadataState, UBI_MAX_STRIPES};
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error};
-use std::sync::{
-    atomic::{AtomicU8, Ordering},
-    Arc,
-};
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
 
-#[repr(u8)]
-#[derive(Debug, Copy, Clone, PartialEq)]
-pub enum StripeStatus {
-    NotFetched,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FetchState {
     Queued,
     Fetching,
     Flushing,
-    Fetched,
-    Failed,
-}
-
-#[derive(Debug, Clone)]
-pub struct StripeStatusVec {
-    pub data: Arc<Vec<AtomicU8>>,
-    pub stripe_sector_count: u64,
-    pub source_sector_count: u64,
-    pub stripe_count: u64,
-}
-
-impl StripeStatusVec {
-    pub fn sector_to_stripe_id(&self, sector: u64) -> usize {
-        (sector / self.stripe_sector_count) as usize
-    }
-
-    pub fn stripe_status(&self, stripe_id: usize) -> StripeStatus {
-        if (stripe_id as u64) < self.stripe_count {
-            match self.data[stripe_id].load(Ordering::Acquire) {
-                0 => StripeStatus::NotFetched,
-                1 => StripeStatus::Queued,
-                2 => StripeStatus::Fetching,
-                3 => StripeStatus::Flushing,
-                4 => StripeStatus::Fetched,
-                5 => StripeStatus::Failed,
-                other => {
-                    error!(
-                        "Invalid stripe status value: {other} for stripe_id: {stripe_id}. Defaulting to Failed."
-                    );
-                    StripeStatus::Failed
-                }
-            }
-        } else {
-            StripeStatus::Fetched
-        }
-    }
-
-    pub fn set_stripe_status(&self, stripe_id: usize, status: StripeStatus) {
-        if (stripe_id as u64) >= self.stripe_count {
-            error!(
-                "Invalid stripe_id: {}. Must be less than stripe_count: {}",
-                stripe_id, self.stripe_count
-            );
-            return;
-        }
-        self.data[stripe_id].store(status as u8, Ordering::Release);
-    }
-
-    pub fn stripe_sector_count(&self, stripe_id: usize) -> u32 {
-        let stripe_sector_count = self
-            .stripe_sector_count
-            .min(self.source_sector_count - (stripe_id as u64 * self.stripe_sector_count))
-            as usize;
-        stripe_sector_count as u32
-    }
-
-    pub fn new(metadata: &UbiMetadata, source_sector_count: u64) -> Result<Self> {
-        let v = metadata
-            .stripe_headers
-            .iter()
-            .map(|header| {
-                if *header == 0 {
-                    AtomicU8::new(StripeStatus::NotFetched as u8)
-                } else {
-                    AtomicU8::new(StripeStatus::Fetched as u8)
-                }
-            })
-            .collect::<Vec<AtomicU8>>();
-        let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
-        let stripe_count = source_sector_count.div_ceil(stripe_sector_count);
-        if stripe_count as usize > UBI_MAX_STRIPES {
-            return Err(VhostUserBlockError::InvalidParameter {
-                description: "source sector count exceeds maximum stripe count".to_string(),
-            });
-        }
-        Ok(StripeStatusVec {
-            data: Arc::new(v),
-            stripe_sector_count,
-            source_sector_count,
-            stripe_count,
-        })
-    }
 }
 
 #[derive(Clone)]
@@ -119,7 +30,8 @@ pub struct StripeFetcher {
     stripe_sector_count: u64,
     fetch_queue: VecDeque<usize>,
     fetch_buffers: Vec<FetchBuffer>,
-    stripe_status_vec: StripeStatusVec,
+    shared_state: SharedMetadataState,
+    stripe_states: HashMap<usize, FetchState>,
 }
 
 impl StripeFetcher {
@@ -127,7 +39,7 @@ impl StripeFetcher {
         source_dev: &dyn BlockDevice,
         target_dev: &dyn BlockDevice,
         stripe_sector_count: u64,
-        stripe_status_vec: StripeStatusVec,
+        shared_state: SharedMetadataState,
         alignment: usize,
     ) -> Result<Self> {
         let fetch_source_channel = source_dev.create_channel()?;
@@ -156,6 +68,12 @@ impl StripeFetcher {
                 description: "target device too small".into(),
             });
         }
+        let stripe_count = source_sector_count.div_ceil(stripe_sector_count);
+        if stripe_count as usize > UBI_MAX_STRIPES {
+            return Err(VhostUserBlockError::InvalidParameter {
+                description: "source sector count exceeds maximum stripe count".to_string(),
+            });
+        }
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,
@@ -164,7 +82,8 @@ impl StripeFetcher {
             stripe_sector_count,
             fetch_queue: VecDeque::new(),
             fetch_buffers,
-            stripe_status_vec,
+            shared_state,
+            stripe_states: HashMap::new(),
         })
     }
 
@@ -174,25 +93,18 @@ impl StripeFetcher {
             || self.fetch_target_channel.busy()
     }
 
-    pub fn stripe_status_vec(&self) -> StripeStatusVec {
-        self.stripe_status_vec.clone()
-    }
-
     pub fn handle_fetch_request(&mut self, stripe_id: usize) {
-        match self.stripe_status_vec.stripe_status(stripe_id) {
-            StripeStatus::NotFetched | StripeStatus::Failed => {
-                debug!("Enqueueing stripe {stripe_id} for fetch");
-                self.fetch_queue.push_back(stripe_id);
-                self.stripe_status_vec
-                    .set_stripe_status(stripe_id, StripeStatus::Queued);
-            }
-            StripeStatus::Fetched => {
-                debug!("Stripe {stripe_id} already fetched");
-            }
-            StripeStatus::Queued | StripeStatus::Fetching | StripeStatus::Flushing => {
-                debug!("Stripe {stripe_id} is already queued or fetching");
-            }
+        if self.shared_state.stripe_fetched(stripe_id) {
+            debug!("Stripe {stripe_id} already fetched");
+            return;
         }
+        if self.stripe_states.contains_key(&stripe_id) {
+            debug!("Stripe {stripe_id} is already queued or fetching");
+            return;
+        }
+        debug!("Enqueueing stripe {stripe_id} for fetch");
+        self.fetch_queue.push_back(stripe_id);
+        self.stripe_states.insert(stripe_id, FetchState::Queued);
     }
 
     fn fetch_completed(&mut self, buffer_idx: usize, success: bool) -> (usize, bool) {
@@ -207,12 +119,9 @@ impl StripeFetcher {
 
         debug!("Fetch completed for stripe {stripe_id}, success={success}");
 
+        self.stripe_states.remove(&stripe_id);
         if success {
-            self.stripe_status_vec
-                .set_stripe_status(stripe_id, StripeStatus::Fetched);
-        } else {
-            self.stripe_status_vec
-                .set_stripe_status(stripe_id, StripeStatus::Failed);
+            self.shared_state.set_stripe_fetched(stripe_id);
         }
         (stripe_id, success)
     }
@@ -248,8 +157,7 @@ impl StripeFetcher {
     }
 
     fn start_flush(&mut self, buffer_idx: usize, stripe_id: usize) -> bool {
-        self.stripe_status_vec
-            .set_stripe_status(stripe_id, StripeStatus::Flushing);
+        self.stripe_states.insert(stripe_id, FetchState::Flushing);
         self.fetch_target_channel.add_flush(buffer_idx);
 
         if let Err(e) = self.fetch_target_channel.submit() {
@@ -265,6 +173,8 @@ impl StripeFetcher {
         for (buffer_idx, success) in self.fetch_source_channel.poll() {
             if !success || !self.start_write(buffer_idx) {
                 result.push(self.fetch_completed(buffer_idx, false));
+            } else if let Some(stripe_id) = self.fetch_buffers[buffer_idx].used_for {
+                self.stripe_states.insert(stripe_id, FetchState::Fetching);
             }
         }
 
@@ -280,22 +190,19 @@ impl StripeFetcher {
                     continue;
                 }
             };
-            let status = self.stripe_status_vec.stripe_status(stripe_id);
-            match status {
-                StripeStatus::Fetching => {
+            match self.stripe_states.get(&stripe_id) {
+                Some(FetchState::Fetching) => {
                     debug!("Stripe {stripe_id} write completed, flushing...");
                     if !self.start_flush(buffer_idx, stripe_id) {
                         result.push(self.fetch_completed(buffer_idx, false));
                         continue;
                     }
                 }
-                StripeStatus::Flushing => {
-                    self.stripe_status_vec
-                        .set_stripe_status(stripe_id, StripeStatus::Fetched);
+                Some(FetchState::Flushing) => {
                     result.push(self.fetch_completed(buffer_idx, success));
                 }
                 _ => {
-                    error!("Unexpected status for stripe {stripe_id} after write: {status:?}");
+                    error!("Unexpected state for stripe {stripe_id} after write");
                 }
             }
         }
@@ -340,8 +247,7 @@ impl StripeFetcher {
                 continue;
             }
 
-            self.stripe_status_vec
-                .set_stripe_status(stripe_id, StripeStatus::Fetching);
+            self.stripe_states.insert(stripe_id, FetchState::Fetching);
         }
 
         result

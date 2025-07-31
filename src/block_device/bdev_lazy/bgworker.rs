@@ -1,6 +1,5 @@
 use super::{
-    metadata_flusher::{MetadataFlushState, MetadataFlusher},
-    stripe_fetcher::{StripeFetcher, StripeStatusVec},
+    metadata::SharedMetadataState, metadata_flusher::MetadataFlusher, stripe_fetcher::StripeFetcher,
 };
 use crate::block_device::BlockDevice;
 use crate::Result;
@@ -19,6 +18,7 @@ pub enum BgWorkerRequest {
 pub struct BgWorker {
     stripe_fetcher: StripeFetcher,
     metadata_flusher: MetadataFlusher,
+    stripe_sector_count: u64,
     req_receiver: Receiver<BgWorkerRequest>,
     req_sender: Sender<BgWorkerRequest>,
     done: bool,
@@ -35,35 +35,35 @@ impl BgWorker {
     ) -> Result<Self> {
         let metadata_flusher = MetadataFlusher::new(metadata_dev)?;
         let stripe_sector_count = metadata_flusher.stripe_sector_count();
-        let stripe_status_vec =
-            StripeStatusVec::new(metadata_flusher.metadata(), source_dev.sector_count())?;
+        let shared_state = metadata_flusher.shared_state();
         let stripe_fetcher = StripeFetcher::new(
             source_dev,
             target_dev,
             stripe_sector_count,
-            stripe_status_vec,
+            shared_state,
             alignment,
         )?;
         let (tx, rx) = std::sync::mpsc::channel();
         Ok(BgWorker {
             stripe_fetcher,
             metadata_flusher,
+            stripe_sector_count,
             req_receiver: rx,
             req_sender: tx,
             done: false,
         })
     }
 
+    pub fn stripe_sector_count(&self) -> u64 {
+        self.stripe_sector_count
+    }
+
     pub fn req_sender(&self) -> Sender<BgWorkerRequest> {
         self.req_sender.clone()
     }
 
-    pub fn stripe_status_vec(&self) -> StripeStatusVec {
-        self.stripe_fetcher.stripe_status_vec()
-    }
-
-    pub fn shared_flush_state(&self) -> MetadataFlushState {
-        self.metadata_flusher.shared_flush_state()
+    pub fn shared_state(&self) -> SharedMetadataState {
+        self.metadata_flusher.shared_state()
     }
 
     pub fn process_request(&mut self, req: BgWorkerRequest) {

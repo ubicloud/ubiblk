@@ -4,15 +4,25 @@ use crate::{
     Result, VhostUserBlockError,
 };
 use log::{error, info};
-use std::{cell::RefCell, mem::MaybeUninit, ptr::copy_nonoverlapping, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
-pub fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetadata>> {
+pub fn load_metadata(
+    io_channel: &mut Box<dyn IoChannel>,
+    sector_count: u64,
+) -> Result<Box<UbiMetadata>> {
     info!("Loading metadata from device");
 
-    let sector_count = std::mem::size_of::<UbiMetadata>().div_ceil(SECTOR_SIZE);
-    let buf: Rc<RefCell<AlignedBuf>> =
-        Rc::new(RefCell::new(AlignedBuf::new(sector_count * SECTOR_SIZE)));
-    io_channel.add_read(0, sector_count as u32, buf.clone(), 0);
+    let buf: Rc<RefCell<AlignedBuf>> = Rc::new(RefCell::new(AlignedBuf::new(
+        sector_count as usize * SECTOR_SIZE,
+    )));
+    let sector_count_u32 =
+        sector_count
+            .try_into()
+            .map_err(|_| VhostUserBlockError::InvalidParameter {
+                description: "Metadata file too large".to_string(),
+            })?;
+
+    io_channel.add_read(0, sector_count_u32, buf.clone(), 0);
     io_channel.submit()?;
 
     let mut results = io_channel.poll();
@@ -46,17 +56,7 @@ pub fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetad
         });
     }
 
-    let mut metadata: Box<MaybeUninit<UbiMetadata>> = Box::new_uninit();
-
-    unsafe {
-        copy_nonoverlapping(
-            buf.borrow().as_ptr(),
-            metadata.as_mut_ptr() as *mut u8,
-            std::mem::size_of::<UbiMetadata>(),
-        );
-    }
-
-    let metadata: Box<UbiMetadata> = unsafe { metadata.assume_init() };
+    let metadata = UbiMetadata::from_bytes(buf.borrow().as_slice());
 
     if metadata.magic != *UBI_MAGIC {
         error!(

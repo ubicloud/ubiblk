@@ -490,9 +490,13 @@ pub fn init_metadata(
             .ok_or_else(|| VhostUserBlockError::InvalidParameter {
                 description: "metadata_path is none".to_string(),
             })?;
+    let base_bdev = build_block_device(&config.path, config, kek.clone())?;
+    let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+    let stripe_count = base_bdev.sector_count().div_ceil(stripe_sector_count) as usize;
+
     let metadata_bdev = build_block_device(metadata_path, config, kek.clone())?;
     let mut ch = metadata_bdev.create_channel()?;
-    let metadata = UbiMetadata::new(stripe_sector_count_shift);
+    let metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count);
     init_metadata_file(&metadata, &mut ch)?;
     Ok(())
 }

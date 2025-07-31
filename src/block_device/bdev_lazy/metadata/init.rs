@@ -1,4 +1,4 @@
-use std::{cell::RefCell, ptr::copy_nonoverlapping, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::block_device::{IoChannel, UbiMetadata};
 use crate::utils::aligned_buffer::AlignedBuf;
@@ -49,15 +49,11 @@ fn wait_for_completion(ch: &mut Box<dyn IoChannel>, id: usize) -> Result<()> {
 }
 
 pub fn init_metadata(metadata: &UbiMetadata, ch: &mut Box<dyn IoChannel>) -> Result<()> {
-    let metadata_size = std::mem::size_of::<UbiMetadata>();
+    let metadata_size = metadata.metadata_size();
     let sectors = metadata_size.div_ceil(SECTOR_SIZE);
     let buf = Rc::new(RefCell::new(AlignedBuf::new(sectors * SECTOR_SIZE)));
 
-    unsafe {
-        let src = metadata as *const UbiMetadata as *const u8;
-        let dst = buf.borrow_mut().as_mut_ptr();
-        copy_nonoverlapping(src, dst, metadata_size);
-    }
+    metadata.write_to_buf(buf.borrow_mut().as_mut_slice());
 
     ch.add_write(0, sectors as u32, buf.clone(), METADATA_WRITE_ID);
     ch.submit()?;

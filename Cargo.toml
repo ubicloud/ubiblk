@@ -30,6 +30,7 @@ base64 = "0.22.1"
 aes-gcm = "0.10.3"
 aes = { version = "0.8", optional = true }
 xts-mode = { version = "0.5.1", optional = true }
+static_assertions = "1.1.0"
 
 [build-dependencies]
 bindgen = "0.72.0"

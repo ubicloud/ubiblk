@@ -26,10 +26,6 @@ impl SharedMetadataState {
     }
 
     pub fn increment_version(&self) {
-        // Use a strong ordering here because updates to the metadata version
-        // coordinate flush operations across multiple threads.  Other callers
-        // only perform `Acquire` loads, so `SeqCst` ensures they observe the
-        // increment once the update is complete.
         self.metadata_version.fetch_add(1, Ordering::SeqCst);
     }
 

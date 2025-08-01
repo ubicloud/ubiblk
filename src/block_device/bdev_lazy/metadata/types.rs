@@ -7,7 +7,6 @@ use std::{
 use static_assertions::const_assert;
 
 pub const UBI_MAGIC_SIZE: usize = 9;
-pub const UBI_MAX_STRIPES: usize = 2 * 1024 * 1024;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
 
 // Ensure AtomicU8 has the same in-memory layout as u8 so we can copy headers
@@ -31,15 +30,23 @@ pub struct UbiMetadata {
 }
 
 impl UbiMetadata {
-    const HEADER_LEN: usize = UBI_MAGIC_SIZE + 2 + 2 + 1;
+    pub const HEADER_SIZE: usize = UBI_MAGIC_SIZE + 2 + 2 + 1;
 
-    pub const fn metadata_size(stripe_count: usize) -> usize {
-        Self::HEADER_LEN + stripe_count
+    pub fn metadata_size(&self) -> usize {
+        Self::HEADER_SIZE + self.stripe_headers.len()
+    }
+
+    pub fn stripe_size(&self) -> u64 {
+        1u64 << self.stripe_sector_count_shift
+    }
+
+    pub fn stripe_count(&self) -> u64 {
+        self.stripe_headers.len() as u64
     }
 
     #[cfg(test)]
     pub fn stripe_headers_offset(&self, stripe_id: usize) -> usize {
-        stripe_id + Self::HEADER_LEN
+        stripe_id + Self::HEADER_SIZE
     }
 
     pub fn stripe_header(&self, stripe_id: usize) -> u8 {
@@ -50,10 +57,10 @@ impl UbiMetadata {
         self.stripe_headers[stripe_id].store(value, std::sync::atomic::Ordering::SeqCst);
     }
 
-    pub fn new(stripe_sector_count_shift: u8) -> Box<Self> {
+    pub fn new(stripe_sector_count_shift: u8, stripe_count: usize) -> Box<Self> {
         let mut metadata: Box<MaybeUninit<Self>> = Box::new_uninit();
 
-        let headers = (0..UBI_MAX_STRIPES)
+        let headers = (0..stripe_count)
             .map(|_| AtomicU8::new(0))
             .collect::<Vec<_>>();
 
@@ -71,16 +78,7 @@ impl UbiMetadata {
         }
     }
 
-    pub fn from_bytes(buf: &[u8], stripe_count: usize) -> Box<Self> {
-        // sanity check
-        let expected_len = Self::HEADER_LEN + stripe_count;
-        assert!(
-            buf.len() >= expected_len,
-            "buffer too small: {} < {}",
-            buf.len(),
-            expected_len
-        );
-
+    pub fn from_bytes(buf: &[u8]) -> Box<Self> {
         // copy the fixed‐size header fields
         let mut magic = [0u8; UBI_MAGIC_SIZE];
         magic.copy_from_slice(&buf[0..UBI_MAGIC_SIZE]);
@@ -93,6 +91,8 @@ impl UbiMetadata {
 
         let stripe_sector_count_shift = buf[UBI_MAGIC_SIZE + 4];
 
+        let stripe_count = buf.len() - Self::HEADER_SIZE;
+
         // initialize all headers to zero and then copy the provided stripe data
         let mut stripe_headers = (0..stripe_count)
             .map(|_| AtomicU8::new(0))
@@ -101,7 +101,7 @@ impl UbiMetadata {
         // copy any stripe headers that are actually present in `buf`
         unsafe {
             let dst = stripe_headers.as_mut_ptr() as *mut u8;
-            let src = buf.as_ptr().add(Self::HEADER_LEN);
+            let src = buf.as_ptr().add(Self::HEADER_SIZE);
             ptr::copy_nonoverlapping(src, dst, stripe_count);
         }
         let stripe_headers = Arc::new(stripe_headers);
@@ -117,8 +117,8 @@ impl UbiMetadata {
     }
 
     /// Serialize `self` into the given buffer
-    pub fn write_to_buf(&self, buf: &mut [u8], stripe_count: usize) {
-        let total_len: usize = Self::metadata_size(stripe_count);
+    pub fn write_to_buf(&self, buf: &mut [u8]) {
+        let total_len: usize = self.metadata_size();
         assert!(
             buf.len() >= total_len,
             "buffer too small: {} < {}",
@@ -127,6 +127,7 @@ impl UbiMetadata {
         );
 
         let dst = buf.as_mut_ptr();
+        let stripe_count = self.stripe_headers.len();
 
         assert!(
             stripe_count <= self.stripe_headers.len(),
@@ -137,18 +138,16 @@ impl UbiMetadata {
 
         unsafe {
             // build and copy the header
-            let mut header = [0u8; Self::HEADER_LEN];
+            let mut header = [0u8; Self::HEADER_SIZE];
             header[..UBI_MAGIC_SIZE].copy_from_slice(&self.magic);
             header[UBI_MAGIC_SIZE..UBI_MAGIC_SIZE + 2].copy_from_slice(&self.version_major);
             header[UBI_MAGIC_SIZE + 2..UBI_MAGIC_SIZE + 4].copy_from_slice(&self.version_minor);
             header[UBI_MAGIC_SIZE + 4] = self.stripe_sector_count_shift;
-            ptr::copy_nonoverlapping(header.as_ptr(), dst, Self::HEADER_LEN);
+            ptr::copy_nonoverlapping(header.as_ptr(), dst, Self::HEADER_SIZE);
 
-            // Copy the stripe headers. `AtomicU8` has the same layout as `u8`
-            // on all supported platforms but this isn't explicitly guaranteed
-            // by the standard, so we assert this at compile time above.
+            // Copy the stripe headers.
             let stripes_ptr = self.stripe_headers.as_ptr() as *const u8;
-            ptr::copy_nonoverlapping(stripes_ptr, dst.add(Self::HEADER_LEN), stripe_count);
+            ptr::copy_nonoverlapping(stripes_ptr, dst.add(Self::HEADER_SIZE), stripe_count);
         }
     }
 }
@@ -160,19 +159,19 @@ mod tests {
     #[test]
     fn test_ubi_metadata_serialization() {
         const STRIPES: usize = 20;
-        let metadata = UbiMetadata::new(9);
+        let metadata = UbiMetadata::new(9, STRIPES);
 
         for i in 0..STRIPES {
             metadata.set_stripe_header(i, (i * 2) as u8);
         }
 
-        const metadata_size: usize = UbiMetadata::metadata_size(STRIPES);
-        const buf_size: usize = metadata_size.div_ceil(512) * 512;
+        let metadata_size: usize = metadata.metadata_size();
+        let buf_size: usize = metadata_size.div_ceil(512) * 512;
 
         let mut buf = vec![0u8; buf_size];
-        metadata.write_to_buf(&mut buf, STRIPES);
+        metadata.write_to_buf(&mut buf);
 
-        let loaded_metadata = UbiMetadata::from_bytes(&buf, STRIPES);
+        let loaded_metadata = UbiMetadata::from_bytes(&buf);
 
         assert_eq!(loaded_metadata.magic, metadata.magic);
         assert_eq!(loaded_metadata.version_major, metadata.version_major);

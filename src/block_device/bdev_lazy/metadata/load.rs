@@ -1,21 +1,28 @@
 use crate::{
-    block_device::{
-        bdev_lazy::metadata::{UBI_MAGIC, UBI_MAX_STRIPES},
-        AlignedBuf, IoChannel, UbiMetadata,
-    },
+    block_device::{bdev_lazy::metadata::UBI_MAGIC, AlignedBuf, IoChannel, UbiMetadata},
     vhost_backend::SECTOR_SIZE,
     Result, VhostUserBlockError,
 };
 use log::{error, info};
 use std::{cell::RefCell, rc::Rc};
 
-pub fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetadata>> {
+pub fn load_metadata(
+    io_channel: &mut Box<dyn IoChannel>,
+    sector_count: u64,
+) -> Result<Box<UbiMetadata>> {
     info!("Loading metadata from device");
 
-    let sector_count = (1024 + UBI_MAX_STRIPES).div_ceil(SECTOR_SIZE);
-    let buf: Rc<RefCell<AlignedBuf>> =
-        Rc::new(RefCell::new(AlignedBuf::new(sector_count * SECTOR_SIZE)));
-    io_channel.add_read(0, sector_count as u32, buf.clone(), 0);
+    let buf: Rc<RefCell<AlignedBuf>> = Rc::new(RefCell::new(AlignedBuf::new(
+        sector_count as usize * SECTOR_SIZE,
+    )));
+    let sector_count_u32 =
+        sector_count
+            .try_into()
+            .map_err(|_| VhostUserBlockError::InvalidParameter {
+                description: "Metadata file too large".to_string(),
+            })?;
+
+    io_channel.add_read(0, sector_count_u32, buf.clone(), 0);
     io_channel.submit()?;
 
     let mut results = io_channel.poll();
@@ -49,7 +56,7 @@ pub fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetad
         });
     }
 
-    let metadata = UbiMetadata::from_bytes(buf.borrow().as_slice(), UBI_MAX_STRIPES);
+    let metadata = UbiMetadata::from_bytes(buf.borrow().as_slice());
 
     if metadata.magic != *UBI_MAGIC {
         error!(

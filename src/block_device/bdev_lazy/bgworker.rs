@@ -33,7 +33,8 @@ impl BgWorker {
         metadata_dev: &dyn BlockDevice,
         alignment: usize,
     ) -> Result<Self> {
-        let metadata_flusher = MetadataFlusher::new(metadata_dev)?;
+        let source_sector_count = source_dev.sector_count();
+        let metadata_flusher = MetadataFlusher::new(metadata_dev, source_sector_count)?;
         let stripe_sector_count = metadata_flusher.stripe_sector_count();
         let shared_state = metadata_flusher.shared_state();
         let stripe_fetcher = StripeFetcher::new(

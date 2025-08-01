@@ -1,11 +1,11 @@
 use crate::{
     block_device::{
-        bdev_lazy::metadata::{load_metadata, SharedMetadataState, UBI_MAX_STRIPES},
+        bdev_lazy::metadata::{load_metadata, SharedMetadataState},
         BlockDevice, IoChannel, SharedBuffer, UbiMetadata,
     },
     utils::aligned_buffer::AlignedBuf,
     vhost_backend::SECTOR_SIZE,
-    Result,
+    Result, VhostUserBlockError,
 };
 use log::{debug, error};
 use std::{cell::RefCell, rc::Rc};
@@ -24,10 +24,22 @@ pub struct MetadataFlusher {
 }
 
 impl MetadataFlusher {
-    pub fn new(metadata_dev: &dyn BlockDevice) -> Result<Self> {
+    pub fn new(metadata_dev: &dyn BlockDevice, source_sector_count: u64) -> Result<Self> {
         let mut channel = metadata_dev.create_channel()?;
-        let metadata = load_metadata(&mut channel)?;
-        let metadata_size = UbiMetadata::metadata_size(UBI_MAX_STRIPES);
+        let metadata = load_metadata(&mut channel, metadata_dev.sector_count())?;
+
+        let source_stripe_count = source_sector_count.div_ceil(metadata.stripe_size());
+        if source_stripe_count > metadata.stripe_count() {
+            return Err(VhostUserBlockError::InvalidParameter {
+                description: format!(
+                    "Source stripe count {} exceeds metadata stripe count {}",
+                    source_stripe_count,
+                    metadata.stripe_count()
+                ),
+            });
+        }
+
+        let metadata_size = metadata.metadata_size();
         let metadata_buf_size = metadata_size.div_ceil(SECTOR_SIZE) * SECTOR_SIZE;
         let shared_state = SharedMetadataState::new(&metadata);
         Ok(MetadataFlusher {
@@ -60,7 +72,7 @@ impl MetadataFlusher {
 
         let metadata_buf = self.metadata_buf.clone();
         self.metadata
-            .write_to_buf(metadata_buf.borrow_mut().as_mut_slice(), UBI_MAX_STRIPES);
+            .write_to_buf(metadata_buf.borrow_mut().as_mut_slice());
 
         let sector_count = metadata_buf.borrow().len() / SECTOR_SIZE;
         self.channel
@@ -152,14 +164,14 @@ mod tests {
         let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
         let stripe_sector_count_shift = 11;
         let stripe_sector_count: u64 = 1 << stripe_sector_count_shift;
-        let _source_sector_count = 29 * stripe_sector_count + 4;
-        let stripe_count = _source_sector_count.div_ceil(stripe_sector_count);
+        let source_sector_count = 29 * stripe_sector_count + 4;
+        let stripe_count = source_sector_count.div_ceil(stripe_sector_count) as usize;
 
         let mut ch = metadata_dev.create_channel()?;
-        let metadata = UbiMetadata::new(stripe_sector_count_shift);
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count);
         init_metadata(&metadata, &mut ch).unwrap();
 
-        let mut flusher = MetadataFlusher::new(&metadata_dev)?;
+        let mut flusher = MetadataFlusher::new(&metadata_dev, source_sector_count)?;
         let shared_state = flusher.shared_state();
 
         assert!(!shared_state.stripe_fetched(0));
@@ -173,7 +185,7 @@ mod tests {
         }
         assert_eq!(
             stripe_count,
-            _source_sector_count.div_ceil(stripe_sector_count)
+            source_sector_count.div_ceil(stripe_sector_count) as usize
         );
 
         assert_eq!(metadata_dev.flushes(), 1);
@@ -185,7 +197,7 @@ mod tests {
         }
         assert_eq!(metadata_dev.flushes(), 2);
 
-        for i in 0..UBI_MAX_STRIPES {
+        for i in 0..stripe_count {
             let offset = metadata.stripe_headers_offset(i);
             let mut header_buf = [0u8; 1];
             metadata_dev.read(offset, &mut header_buf, 1);
@@ -209,12 +221,12 @@ mod tests {
         let stripe_shift = 11u8;
 
         let mut ch = metadata_dev.create_channel()?;
-        let metadata = UbiMetadata::new(stripe_shift);
+        let metadata = UbiMetadata::new(stripe_shift, 40);
         init_metadata(&metadata, &mut ch).unwrap();
         let bad_magic = [0u8; UBI_MAGIC_SIZE];
         metadata_dev.write(0, &bad_magic, UBI_MAGIC_SIZE);
 
-        let result = MetadataFlusher::new(&metadata_dev);
+        let result = MetadataFlusher::new(&metadata_dev, 1024);
         assert!(matches!(
             result,
             Err(VhostUserBlockError::MetadataError { .. })
@@ -226,16 +238,14 @@ mod tests {
     fn test_poll_flush_failed_write() -> Result<()> {
         let metadata_dev = FailingBlockDevice::new(40 * 1024 * 1024);
         let stripe_shift = 11u8;
-        let stripe_sector_count = 1 << stripe_shift;
-        let _source_sector_count = 29 * stripe_sector_count + 4;
 
         {
             let mut ch = metadata_dev.create_channel()?;
-            let metadata = UbiMetadata::new(stripe_shift);
+            let metadata = UbiMetadata::new(stripe_shift, 40);
             init_metadata(&metadata, &mut ch).unwrap();
         }
 
-        let mut flusher = MetadataFlusher::new(&metadata_dev)?;
+        let mut flusher = MetadataFlusher::new(&metadata_dev, 1024)?;
         metadata_dev.fail_next_write();
         flusher.set_stripe_fetched(0);
         flusher.request_flush();
@@ -249,16 +259,14 @@ mod tests {
     fn test_poll_flush_failed_flush() -> Result<()> {
         let metadata_dev = FailingBlockDevice::new(40 * 1024 * 1024);
         let stripe_shift = 11u8;
-        let stripe_sector_count = 1 << stripe_shift;
-        let _source_sector_count = 29 * stripe_sector_count + 4;
 
         {
             let mut ch = metadata_dev.create_channel()?;
-            let metadata = UbiMetadata::new(stripe_shift);
+            let metadata = UbiMetadata::new(stripe_shift, 40);
             init_metadata(&metadata, &mut ch).unwrap();
         }
 
-        let mut flusher = MetadataFlusher::new(&metadata_dev)?;
+        let mut flusher = MetadataFlusher::new(&metadata_dev, 1024)?;
         flusher.set_stripe_fetched(0);
         metadata_dev.fail_next_flush();
         flusher.request_flush();

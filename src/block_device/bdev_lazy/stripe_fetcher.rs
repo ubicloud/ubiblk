@@ -68,7 +68,6 @@ impl StripeFetcher {
                 description: "target device too small".into(),
             });
         }
-        let _stripe_count = source_sector_count.div_ceil(stripe_sector_count);
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,

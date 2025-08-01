@@ -324,14 +324,11 @@ pub fn start_block_backend(
                         .to_string(),
                 }));
             }
-            let metadata_path = match options.metadata_path.as_ref() {
-                Some(p) => p,
-                None => {
-                    return Err(Box::new(VhostUserBlockError::InvalidParameter {
-                        description: "metadata_path is missing".to_string(),
-                    }));
-                }
-            };
+            let metadata_path = options.metadata_path.as_ref().ok_or_else(|| {
+                Box::new(VhostUserBlockError::InvalidParameter {
+                    description: "metadata_path is missing".to_string(),
+                })
+            })?;
             let metadata_dev = build_block_device(metadata_path, options, kek)?;
             let readonly = true;
             let image_bdev =

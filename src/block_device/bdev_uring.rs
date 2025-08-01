@@ -37,10 +37,13 @@ impl UringIoChannel {
                 description: "Invalid io_uring queue size".to_string(),
             }
         })?;
-        let ring = IoUring::new(io_uring_entries).map_err(|e| {
-            error!("Failed to create io_uring: {e}");
-            VhostUserBlockError::IoError { source: e }
-        })?;
+        let ring = IoUring::builder()
+            .setup_coop_taskrun()
+            .build(io_uring_entries * 2)
+            .map_err(|e| {
+                error!("Failed to create io_uring: {e}");
+                VhostUserBlockError::IoError { source: e }
+            })?;
         Ok(UringIoChannel {
             file,
             ring,
@@ -87,6 +90,7 @@ impl IoChannel for UringIoChannel {
     fn add_flush(&mut self, id: usize) {
         let fd = self.file.as_raw_fd();
         let flush_e = io_uring::opcode::Fsync::new(io_uring::types::Fd(fd))
+            .flags(io_uring::types::FsyncFlags::DATASYNC)
             .build()
             .user_data(id as u64);
         let push_result = unsafe { self.ring.submission().push(&flush_e) };

@@ -2,7 +2,7 @@ use super::{BlockDevice, IoChannel, SharedBuffer};
 #[cfg(test)]
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
-use io_uring::IoUring;
+use io_uring::{types::FsyncFlags, IoUring};
 use log::error;
 use nix::errno::Errno;
 use std::{
@@ -31,16 +31,42 @@ impl UringIoChannel {
             error!("Failed to open file {path}: {e}");
             VhostUserBlockError::IoError { source: e }
         })?;
-        let io_uring_entries: u32 = queue_size.try_into().map_err(|_| {
+        let entries: u32 = queue_size.try_into().map_err(|_| {
             error!("Invalid queue size: {queue_size}");
             VhostUserBlockError::InvalidParameter {
                 description: "Invalid io_uring queue size".to_string(),
             }
         })?;
-        let ring = IoUring::new(io_uring_entries).map_err(|e| {
-            error!("Failed to create io_uring: {e}");
-            VhostUserBlockError::IoError { source: e }
-        })?;
+        let ring_result = {
+            let mut builder = IoUring::builder();
+            builder
+                .setup_sqpoll(200)
+                .setup_cqsize(entries * 2)
+                .setup_single_issuer()
+                .setup_coop_taskrun();
+            builder.build(entries)
+        };
+        let ring = match ring_result {
+            Ok(r) => {
+                if let Err(e) = r.submitter().register_files(&[file.as_raw_fd()]) {
+                    error!("Failed to register file with io_uring: {e}");
+                    return Err(VhostUserBlockError::IoError { source: e });
+                }
+                if let Err(e) = r.submitter().register_iowq_max_workers(&mut [8, 0]) {
+                    error!("Failed to set iowq max workers: {e}");
+                    return Err(VhostUserBlockError::IoError { source: e });
+                }
+                r
+            }
+            Err(e) => {
+                error!("Falling back to default io_uring: {e}");
+                IoUring::new(entries).map_err(|e| {
+                    error!("Failed to create io_uring: {e}");
+                    VhostUserBlockError::IoError { source: e }
+                })?
+            }
+        };
+
         Ok(UringIoChannel {
             file,
             ring,
@@ -87,6 +113,7 @@ impl IoChannel for UringIoChannel {
     fn add_flush(&mut self, id: usize) {
         let fd = self.file.as_raw_fd();
         let flush_e = io_uring::opcode::Fsync::new(io_uring::types::Fd(fd))
+            .flags(FsyncFlags::DATASYNC)
             .build()
             .user_data(id as u64);
         let push_result = unsafe { self.ring.submission().push(&flush_e) };

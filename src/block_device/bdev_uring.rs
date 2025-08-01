@@ -107,22 +107,16 @@ impl IoChannel for UringIoChannel {
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
         let mut finished_requests = std::mem::take(&mut self.finished_requests);
-        loop {
-            let maybe_entry = { self.ring.completion().next() };
-            match maybe_entry {
-                Some(entry) => {
-                    let result = entry.result();
-                    let id = entry.user_data();
-                    if result < 0 {
-                        finished_requests.push((id as usize, false));
-                        error!("IO request failed: {}", Errno::from_raw(-result));
-                    } else {
-                        finished_requests.push((id as usize, true));
-                    }
-                    self.completions += 1;
-                }
-                None => break,
+        while let Some(entry) = self.ring.completion().next() {
+            let result = entry.result();
+            let id = entry.user_data() as usize;
+            if result < 0 {
+                finished_requests.push((id, false));
+                error!("IO request failed: {}", Errno::from_raw(-result));
+            } else {
+                finished_requests.push((id, true));
             }
+            self.completions += 1;
         }
         finished_requests
     }

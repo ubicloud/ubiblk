@@ -72,24 +72,27 @@ pub fn features_to_str(features: u64) -> String {
     ];
 
     let mut remaining_features = features;
-    let mut first = true;
-    let mut output = format!("Features (0x{features:x}): ");
+    let mut names: Vec<&str> = Vec::new();
+
     for (feature, name) in all_features.iter() {
         if remaining_features & (1u64 << *feature) != 0 {
-            if !first {
-                output.push_str(" | ");
-            }
-            output.push_str(name);
-            first = false;
+            names.push(*name);
             remaining_features &= !(1u64 << *feature);
         }
     }
+
+    let mut output = format!("Features (0x{features:x}): ");
+    if !names.is_empty() {
+        output.push_str(&names.join(" | "));
+    }
+
     if remaining_features != 0 {
-        if !first {
+        if !names.is_empty() {
             output.push_str(" | ");
         }
         output.push_str(&format!("0x{remaining_features:x}"));
     }
+
     output.push('\n');
     output
 }

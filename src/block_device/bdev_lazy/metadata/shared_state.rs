@@ -9,10 +9,16 @@ pub struct SharedMetadataState {
     stripe_headers: Arc<Vec<AtomicU8>>,
     metadata_version: Arc<AtomicU64>,
     metadata_version_flushed: Arc<AtomicU64>,
+    source_stripe_count: usize,
+    target_stripe_count: usize,
 }
 
 impl SharedMetadataState {
-    pub fn new(metadata: &UbiMetadata) -> Self {
+    pub fn new(
+        metadata: &UbiMetadata,
+        source_stripe_count: usize,
+        target_stripe_count: usize,
+    ) -> Self {
         let stripe_headers = metadata.stripe_headers.clone();
         // Start at version 1 so initial state is not considered flushed.
         let metadata_version = Arc::new(AtomicU64::new(1));
@@ -22,6 +28,8 @@ impl SharedMetadataState {
             stripe_headers,
             metadata_version,
             metadata_version_flushed,
+            source_stripe_count,
+            target_stripe_count,
         }
     }
 
@@ -50,6 +58,14 @@ impl SharedMetadataState {
         let flushed = self.metadata_version_flushed.load(Ordering::Acquire);
         let current = self.metadata_version.load(Ordering::Acquire);
         current > flushed
+    }
+
+    pub fn source_stripe_count(&self) -> usize {
+        self.source_stripe_count
+    }
+
+    pub fn target_stripe_count(&self) -> usize {
+        self.target_stripe_count
     }
 
     pub fn stripe_fetched(&self, stripe_id: usize) -> bool {

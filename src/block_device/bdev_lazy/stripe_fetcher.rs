@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
-use super::metadata::{SharedMetadataState, UBI_MAX_STRIPES};
+use super::metadata::SharedMetadataState;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error};
@@ -68,12 +68,7 @@ impl StripeFetcher {
                 description: "target device too small".into(),
             });
         }
-        let stripe_count = source_sector_count.div_ceil(stripe_sector_count);
-        if stripe_count as usize > UBI_MAX_STRIPES {
-            return Err(VhostUserBlockError::InvalidParameter {
-                description: "source sector count exceeds maximum stripe count".to_string(),
-            });
-        }
+        let _stripe_count = source_sector_count.div_ceil(stripe_sector_count);
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,

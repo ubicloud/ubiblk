@@ -7,7 +7,6 @@ use std::{
 use static_assertions::const_assert;
 
 pub const UBI_MAGIC_SIZE: usize = 9;
-pub const UBI_MAX_STRIPES: usize = 2 * 1024 * 1024;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
 
 // Ensure AtomicU8 has the same in-memory layout as u8 so we can copy headers
@@ -50,10 +49,10 @@ impl UbiMetadata {
         self.stripe_headers[stripe_id].store(value, std::sync::atomic::Ordering::SeqCst);
     }
 
-    pub fn new(stripe_sector_count_shift: u8) -> Box<Self> {
+    pub fn new(stripe_sector_count_shift: u8, stripe_count: usize) -> Box<Self> {
         let mut metadata: Box<MaybeUninit<Self>> = Box::new_uninit();
 
-        let headers = (0..UBI_MAX_STRIPES)
+        let headers = (0..stripe_count)
             .map(|_| AtomicU8::new(0))
             .collect::<Vec<_>>();
 
@@ -160,7 +159,7 @@ mod tests {
     #[test]
     fn test_ubi_metadata_serialization() {
         const STRIPES: usize = 20;
-        let metadata = UbiMetadata::new(9);
+        let metadata = UbiMetadata::new(9, STRIPES);
 
         for i in 0..STRIPES {
             metadata.set_stripe_header(i, (i * 2) as u8);

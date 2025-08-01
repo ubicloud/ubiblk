@@ -1,11 +1,11 @@
 use crate::{
     block_device::{
-        bdev_lazy::metadata::{load_metadata, SharedMetadataState, UBI_MAX_STRIPES},
-        BlockDevice, IoChannel, SharedBuffer, UbiMetadata,
+        bdev_lazy::metadata::{SharedMetadataState, UbiMetadata, UBI_MAGIC},
+        BlockDevice, IoChannel, SharedBuffer,
     },
     utils::aligned_buffer::AlignedBuf,
     vhost_backend::SECTOR_SIZE,
-    Result,
+    Result, VhostUserBlockError,
 };
 use log::{debug, error};
 use std::{cell::RefCell, rc::Rc};
@@ -24,12 +24,59 @@ pub struct MetadataFlusher {
 }
 
 impl MetadataFlusher {
-    pub fn new(metadata_dev: &dyn BlockDevice) -> Result<Self> {
+    pub fn new(
+        metadata_dev: &dyn BlockDevice,
+        source_sector_count: u64,
+        target_sector_count: u64,
+    ) -> Result<Self> {
         let mut channel = metadata_dev.create_channel()?;
-        let metadata = load_metadata(&mut channel)?;
-        let metadata_size = UbiMetadata::metadata_size(UBI_MAX_STRIPES);
+        let metadata_sectors = metadata_dev.sector_count();
+        let buf_size = metadata_sectors as usize * SECTOR_SIZE;
+        let buf = Rc::new(RefCell::new(AlignedBuf::new(buf_size)));
+        channel.add_read(0, metadata_sectors as u32, buf.clone(), 0);
+        channel.submit()?;
+        let mut results = channel.poll();
+        while channel.busy() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            results.extend(channel.poll());
+        }
+        if results.len() != 1 || results[0].0 != 0 || !results[0].1 {
+            return Err(VhostUserBlockError::MetadataError {
+                description: "Failed to read metadata".to_string(),
+            });
+        }
+
+        let buf_ref = buf.borrow();
+        let bytes = buf_ref.as_slice();
+        const HEADER_LEN: usize = UbiMetadata::metadata_size(0);
+        if bytes.len() < HEADER_LEN {
+            return Err(VhostUserBlockError::MetadataError {
+                description: "Metadata buffer too small".to_string(),
+            });
+        }
+        let stripe_shift = bytes[9 + 4];
+        let stripe_sector_count = 1u64 << stripe_shift;
+        let source_stripe_count = source_sector_count.div_ceil(stripe_sector_count) as usize;
+        let target_stripe_count = target_sector_count.div_ceil(stripe_sector_count) as usize;
+        let metadata_size = UbiMetadata::metadata_size(source_stripe_count);
+        if bytes.len() < metadata_size {
+            return Err(VhostUserBlockError::MetadataError {
+                description: "Metadata buffer too small".to_string(),
+            });
+        }
+        let metadata = UbiMetadata::from_bytes(&bytes[..metadata_size], source_stripe_count);
+        if metadata.magic != *UBI_MAGIC {
+            return Err(VhostUserBlockError::MetadataError {
+                description: format!(
+                    "Metadata magic mismatch! Expected: {:?}, Found: {:?}",
+                    UBI_MAGIC, metadata.magic
+                ),
+            });
+        }
+
         let metadata_buf_size = metadata_size.div_ceil(SECTOR_SIZE) * SECTOR_SIZE;
-        let shared_state = SharedMetadataState::new(&metadata);
+        let shared_state =
+            SharedMetadataState::new(&metadata, source_stripe_count, target_stripe_count);
         Ok(MetadataFlusher {
             channel,
             metadata,
@@ -59,8 +106,9 @@ impl MetadataFlusher {
         self.metadata_version_being_flushed = Some(current_version);
 
         let metadata_buf = self.metadata_buf.clone();
+        let stripe_count = self.shared_state.source_stripe_count();
         self.metadata
-            .write_to_buf(metadata_buf.borrow_mut().as_mut_slice(), UBI_MAX_STRIPES);
+            .write_to_buf(metadata_buf.borrow_mut().as_mut_slice(), stripe_count);
 
         let sector_count = metadata_buf.borrow().len() / SECTOR_SIZE;
         self.channel
@@ -156,10 +204,11 @@ mod tests {
         let stripe_count = _source_sector_count.div_ceil(stripe_sector_count);
 
         let mut ch = metadata_dev.create_channel()?;
-        let metadata = UbiMetadata::new(stripe_sector_count_shift);
-        init_metadata(&metadata, &mut ch).unwrap();
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count as usize);
+        init_metadata(&metadata, stripe_count as usize, &mut ch).unwrap();
 
-        let mut flusher = MetadataFlusher::new(&metadata_dev)?;
+        let mut flusher =
+            MetadataFlusher::new(&metadata_dev, _source_sector_count, _source_sector_count)?;
         let shared_state = flusher.shared_state();
 
         assert!(!shared_state.stripe_fetched(0));
@@ -185,7 +234,7 @@ mod tests {
         }
         assert_eq!(metadata_dev.flushes(), 2);
 
-        for i in 0..UBI_MAX_STRIPES {
+        for i in 0..stripe_count as usize {
             let offset = metadata.stripe_headers_offset(i);
             let mut header_buf = [0u8; 1];
             metadata_dev.read(offset, &mut header_buf, 1);
@@ -208,13 +257,15 @@ mod tests {
         let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
         let stripe_shift = 11u8;
 
+        let source_sector_count = 29 * (1u64 << stripe_shift) + 4;
+        let stripe_count = source_sector_count.div_ceil(1u64 << stripe_shift);
         let mut ch = metadata_dev.create_channel()?;
-        let metadata = UbiMetadata::new(stripe_shift);
-        init_metadata(&metadata, &mut ch).unwrap();
+        let metadata = UbiMetadata::new(stripe_shift, stripe_count as usize);
+        init_metadata(&metadata, stripe_count as usize, &mut ch).unwrap();
         let bad_magic = [0u8; UBI_MAGIC_SIZE];
         metadata_dev.write(0, &bad_magic, UBI_MAGIC_SIZE);
 
-        let result = MetadataFlusher::new(&metadata_dev);
+        let result = MetadataFlusher::new(&metadata_dev, source_sector_count, source_sector_count);
         assert!(matches!(
             result,
             Err(VhostUserBlockError::MetadataError { .. })
@@ -226,16 +277,18 @@ mod tests {
     fn test_poll_flush_failed_write() -> Result<()> {
         let metadata_dev = FailingBlockDevice::new(40 * 1024 * 1024);
         let stripe_shift = 11u8;
-        let stripe_sector_count = 1 << stripe_shift;
-        let _source_sector_count = 29 * stripe_sector_count + 4;
+        let stripe_sector_count = 1u64 << stripe_shift;
+        let _source_sector_count: u64 = 29 * stripe_sector_count + 4;
 
         {
+            let stripe_count = _source_sector_count.div_ceil(stripe_sector_count) as usize;
             let mut ch = metadata_dev.create_channel()?;
-            let metadata = UbiMetadata::new(stripe_shift);
-            init_metadata(&metadata, &mut ch).unwrap();
+            let metadata = UbiMetadata::new(stripe_shift, stripe_count);
+            init_metadata(&metadata, stripe_count, &mut ch).unwrap();
         }
 
-        let mut flusher = MetadataFlusher::new(&metadata_dev)?;
+        let mut flusher =
+            MetadataFlusher::new(&metadata_dev, _source_sector_count, _source_sector_count)?;
         metadata_dev.fail_next_write();
         flusher.set_stripe_fetched(0);
         flusher.request_flush();
@@ -249,16 +302,18 @@ mod tests {
     fn test_poll_flush_failed_flush() -> Result<()> {
         let metadata_dev = FailingBlockDevice::new(40 * 1024 * 1024);
         let stripe_shift = 11u8;
-        let stripe_sector_count = 1 << stripe_shift;
-        let _source_sector_count = 29 * stripe_sector_count + 4;
+        let stripe_sector_count = 1u64 << stripe_shift;
+        let _source_sector_count: u64 = 29 * stripe_sector_count + 4;
 
         {
+            let stripe_count = _source_sector_count.div_ceil(stripe_sector_count) as usize;
             let mut ch = metadata_dev.create_channel()?;
-            let metadata = UbiMetadata::new(stripe_shift);
-            init_metadata(&metadata, &mut ch).unwrap();
+            let metadata = UbiMetadata::new(stripe_shift, stripe_count);
+            init_metadata(&metadata, stripe_count, &mut ch).unwrap();
         }
 
-        let mut flusher = MetadataFlusher::new(&metadata_dev)?;
+        let mut flusher =
+            MetadataFlusher::new(&metadata_dev, _source_sector_count, _source_sector_count)?;
         flusher.set_stripe_fetched(0);
         metadata_dev.fail_next_flush();
         flusher.request_flush();

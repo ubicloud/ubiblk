@@ -1,18 +1,19 @@
 use crate::{
-    block_device::{
-        bdev_lazy::metadata::{UBI_MAGIC, UBI_MAX_STRIPES},
-        AlignedBuf, IoChannel, UbiMetadata,
-    },
+    block_device::{bdev_lazy::metadata::UBI_MAGIC, AlignedBuf, IoChannel, UbiMetadata},
     vhost_backend::SECTOR_SIZE,
     Result, VhostUserBlockError,
 };
 use log::{error, info};
 use std::{cell::RefCell, rc::Rc};
 
-pub fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetadata>> {
+#[allow(dead_code)]
+pub fn load_metadata(
+    io_channel: &mut Box<dyn IoChannel>,
+    stripe_count: usize,
+) -> Result<Box<UbiMetadata>> {
     info!("Loading metadata from device");
 
-    let sector_count = (1024 + UBI_MAX_STRIPES).div_ceil(SECTOR_SIZE);
+    let sector_count = (1024 + stripe_count).div_ceil(SECTOR_SIZE);
     let buf: Rc<RefCell<AlignedBuf>> =
         Rc::new(RefCell::new(AlignedBuf::new(sector_count * SECTOR_SIZE)));
     io_channel.add_read(0, sector_count as u32, buf.clone(), 0);
@@ -49,7 +50,7 @@ pub fn load_metadata(io_channel: &mut Box<dyn IoChannel>) -> Result<Box<UbiMetad
         });
     }
 
-    let metadata = UbiMetadata::from_bytes(buf.borrow().as_slice(), UBI_MAX_STRIPES);
+    let metadata = UbiMetadata::from_bytes(buf.borrow().as_slice(), stripe_count);
 
     if metadata.magic != *UBI_MAGIC {
         error!(

@@ -110,6 +110,9 @@ pub struct Options {
     pub io_debug_path: Option<String>,
     pub socket: String,
 
+    #[serde(default)]
+    pub cpus: Option<Vec<usize>>,
+
     #[serde(default = "default_num_queues")]
     pub num_queues: usize,
 
@@ -260,5 +263,19 @@ mod tests {
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert!(options.direct_io);
+    }
+
+    #[test]
+    fn test_cpus_parsing() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        num_queues: 2
+        cpus:
+          - 1
+          - 2
+        "#;
+        let options: Options = from_str(yaml).unwrap();
+        assert_eq!(options.cpus, Some(vec![1, 2]));
     }
 }

@@ -28,7 +28,7 @@ use vhost_user_backend::{
 };
 use virtio_bindings::{
     virtio_blk::*,
-    virtio_config::VIRTIO_F_VERSION_1,
+    virtio_config::{VIRTIO_F_NOTIFICATION_DATA, VIRTIO_F_RING_PACKED, VIRTIO_F_VERSION_1},
     virtio_ring::{VIRTIO_RING_F_EVENT_IDX, VIRTIO_RING_F_INDIRECT_DESC},
 };
 use virtio_queue::QueueT;
@@ -145,6 +145,8 @@ impl VhostUserBackend for UbiBlkBackend {
             | (1 << VIRTIO_BLK_F_MQ)
             | (1 << VIRTIO_BLK_F_CONFIG_WCE)
             | (1 << VIRTIO_RING_F_EVENT_IDX) // https://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-370007
+            | (1 << VIRTIO_F_RING_PACKED)
+            | (1 << VIRTIO_F_NOTIFICATION_DATA)
             | (1 << VIRTIO_F_VERSION_1)
             | (1 << VIRTIO_RING_F_INDIRECT_DESC) // https://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-330003
             | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();

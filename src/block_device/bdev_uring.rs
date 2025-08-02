@@ -102,8 +102,14 @@ impl IoChannel for UringIoChannel {
             self.submissions += self.added;
             self.added = 0;
         }
-        for id in self.pending_flushes.drain(..) {
-            self.finished_requests.push((id, true));
+        if !self.pending_flushes.is_empty() {
+            let success = unsafe { fsync(self.file.as_raw_fd()) };
+            if success != 0 {
+                error!("Failed to flush file: {}", Errno::last());
+            }
+            for id in self.pending_flushes.drain(..) {
+                self.finished_requests.push((id, success == 0));
+            }
         }
         Ok(())
     }

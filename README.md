@@ -66,6 +66,8 @@ The configuration YAML must define:
 - `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
 - `io_debug_path`: (Optional) Path for I/O debug log.
 - `device_id`: (Optional) Identifier returned to the guest for GET_ID.
+- `cpus`: (Optional) List of CPU indices to pin backend threads to. When
+  provided, the length must match `num_queues`.
 
 **Examples:**
 ```bash
@@ -82,6 +84,7 @@ image_path: "/path/to/ubi-image.raw"     # Optional String: UBI image for lazy f
 metadata_path: "/path/to/metadata"       # Optional: metadata path for lazy fetch
 socket: "/tmp/vhost.sock"                # String: vhost‐user socket path
 num_queues: 4                            # Integer: number of virtqueues
+cpus: [0, 1, 2, 3]                       # Optional: CPU list matching num_queues
 queue_size: 256                          # Integer: size of each virtqueue
 seg_size_max: 4096                       # Integer: max IO segment size (bytes)
 seg_count_max: 1                         # Integer: max segments per IO

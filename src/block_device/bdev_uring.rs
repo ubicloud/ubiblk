@@ -6,9 +6,9 @@ use io_uring::IoUring;
 use log::error;
 use nix::errno::Errno;
 use std::{
+    collections::HashMap,
     fs::{File, OpenOptions},
-    os::fd::AsRawFd,
-    os::unix::fs::OpenOptionsExt,
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::PathBuf,
 };
 
@@ -18,6 +18,8 @@ struct UringIoChannel {
     submissions: u64,
     completions: u64,
     finished_requests: Vec<(usize, bool)>,
+    flush_leader_id: Option<usize>,
+    flush_groups: HashMap<usize, Vec<usize>>,
 }
 
 impl UringIoChannel {
@@ -47,6 +49,8 @@ impl UringIoChannel {
             submissions: 0,
             completions: 0,
             finished_requests: Vec::new(),
+            flush_leader_id: None,
+            flush_groups: HashMap::new(),
         })
     }
 }
@@ -85,6 +89,14 @@ impl IoChannel for UringIoChannel {
     }
 
     fn add_flush(&mut self, id: usize) {
+        if let Some(leader_id) = self.flush_leader_id {
+            // If we already have a flush leader, add this request to its group.
+            self.flush_groups.entry(leader_id).or_default().push(id);
+            return;
+        }
+        // Otherwise, set this request as the flush leader.
+        self.flush_leader_id = Some(id);
+        self.flush_groups.insert(id, Vec::new());
         let fd = self.file.as_raw_fd();
         let flush_e = io_uring::opcode::Fsync::new(io_uring::types::Fd(fd))
             .build()
@@ -102,6 +114,7 @@ impl IoChannel for UringIoChannel {
             error!("Failed to submit IO request: {e}");
             return Err(VhostUserBlockError::IoError { source: e });
         }
+        self.flush_leader_id = None;
         Ok(())
     }
 
@@ -115,6 +128,11 @@ impl IoChannel for UringIoChannel {
                 error!("IO request failed: {}", Errno::from_raw(-result));
             } else {
                 finished_requests.push((id, true));
+            }
+            if let Some(group) = self.flush_groups.remove(&id) {
+                for group_id in group {
+                    finished_requests.push((group_id, result >= 0));
+                }
             }
             self.completions += 1;
         }

@@ -38,8 +38,7 @@ impl UringIoChannel {
             }
         })?;
         let ring = IoUring::builder()
-            // .setup_iopoll()
-            .setup_sqpoll(2)
+            .setup_coop_taskrun()
             .build(io_uring_entries * 2)
             .map_err(|e| {
                 error!("Failed to create io_uring: {e}");

@@ -38,10 +38,19 @@ impl UringIoChannel {
             }
         })?;
         let ring = IoUring::builder()
-            .setup_coop_taskrun()
+            // .setup_iopoll()
+            .setup_sqpoll(2)
             .build(io_uring_entries * 2)
             .map_err(|e| {
                 error!("Failed to create io_uring: {e}");
+                VhostUserBlockError::IoError { source: e }
+            })?;
+
+        let mut max = [4; 2];
+        ring.submitter()
+            .register_iowq_max_workers(&mut max)
+            .map_err(|e| {
+                error!("Failed to register io_uring max workers: {e}");
                 VhostUserBlockError::IoError { source: e }
             })?;
         Ok(UringIoChannel {

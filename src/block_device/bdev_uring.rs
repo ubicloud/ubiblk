@@ -96,14 +96,8 @@ impl IoChannel for UringIoChannel {
             error!("Failed to submit IO request: {e}");
             return Err(VhostUserBlockError::IoError { source: e });
         }
-        if !self.pending_flushes.is_empty() {
-            let success = unsafe { fsync(self.file.as_raw_fd()) };
-            if success != 0 {
-                error!("Failed to flush file: {}", Errno::last());
-            }
-            for id in self.pending_flushes.drain(..) {
-                self.finished_requests.push((id, success == 0));
-            }
+        for id in self.pending_flushes.drain(..) {
+            self.finished_requests.push((id, true));
         }
         Ok(())
     }

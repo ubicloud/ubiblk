@@ -3,6 +3,7 @@ use super::{BlockDevice, IoChannel, SharedBuffer};
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use io_uring::IoUring;
+use libc::fsync;
 use log::error;
 use nix::errno::Errno;
 use std::{
@@ -15,9 +16,11 @@ use std::{
 struct UringIoChannel {
     file: File,
     ring: IoUring,
+    added: u64,
     submissions: u64,
     completions: u64,
     finished_requests: Vec<(usize, bool)>,
+    pending_flushes: Vec<usize>,
 }
 
 impl UringIoChannel {
@@ -44,9 +47,11 @@ impl UringIoChannel {
         Ok(UringIoChannel {
             file,
             ring,
+            added: 0,
             submissions: 0,
             completions: 0,
             finished_requests: Vec::new(),
+            pending_flushes: Vec::new(),
         })
     }
 }
@@ -65,7 +70,7 @@ impl IoChannel for UringIoChannel {
             self.finished_requests.push((id, false));
             return;
         }
-        self.submissions += 1;
+        self.added += 1;
     }
 
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
@@ -81,26 +86,31 @@ impl IoChannel for UringIoChannel {
             self.finished_requests.push((id, false));
             return;
         }
-        self.submissions += 1;
+        self.added += 1;
     }
 
     fn add_flush(&mut self, id: usize) {
-        let fd = self.file.as_raw_fd();
-        let flush_e = io_uring::opcode::Fsync::new(io_uring::types::Fd(fd))
-            .build()
-            .user_data(id as u64);
-        let push_result = unsafe { self.ring.submission().push(&flush_e) };
-        if push_result.is_err() {
-            self.finished_requests.push((id, false));
-            return;
-        }
-        self.submissions += 1;
+        self.pending_flushes.push(id);
     }
 
     fn submit(&mut self) -> Result<()> {
-        if let Err(e) = self.ring.submit() {
-            error!("Failed to submit IO request: {e}");
-            return Err(VhostUserBlockError::IoError { source: e });
+        if self.added != 0 {
+            if let Err(e) = self.ring.submit() {
+                error!("Failed to submit IO request: {e}");
+                return Err(VhostUserBlockError::IoError { source: e });
+            }
+            self.submissions += self.added;
+            self.added = 0;
+        }
+        if !self.pending_flushes.is_empty() {
+            let success = unsafe { fsync(self.file.as_raw_fd()) };
+            let errno = Errno::last();
+            if success != 0 {
+                error!("Failed to flush file: {errno}");
+            }
+            for id in self.pending_flushes.drain(..) {
+                self.finished_requests.push((id, success == 0));
+            }
         }
         Ok(())
     }
@@ -123,6 +133,9 @@ impl IoChannel for UringIoChannel {
 
     fn busy(&self) -> bool {
         self.submissions > self.completions
+            || !self.pending_flushes.is_empty()
+            || !self.finished_requests.is_empty()
+            || self.added > 0
     }
 }
 

@@ -49,6 +49,7 @@ pub struct UbiBlkBackendThread {
     device_id: String,
     alignment: usize,
     pinned: bool,
+    ios_pending_signal: bool,
 }
 
 impl UbiBlkBackendThread {
@@ -117,6 +118,7 @@ impl UbiBlkBackendThread {
             device_id: options.device_id.clone(),
             alignment,
             pinned: false,
+            ios_pending_signal: false,
         })
     }
 
@@ -189,6 +191,7 @@ impl UbiBlkBackendThread {
         status_addr: GuestAddress,
         status: u8,
     ) {
+        self.ios_pending_signal = true;
         let mem = desc_chain.memory();
         if let Err(e) = mem.write_obj(status, status_addr) {
             error!("failed to write status: {e:?}");
@@ -452,25 +455,30 @@ impl UbiBlkBackendThread {
         self.poll_io(vring);
         busy = busy || self.io_channel.busy();
 
-        let needs_signalling = if self.event_idx {
-            match vring
-                .get_queue_mut()
-                .needs_notification(self.mem.memory().deref())
-            {
-                Ok(need) => need,
-                Err(e) => {
-                    error!("needs_notification failed: {e:?}");
-                    true
+        let needs_signalling = if self.ios_pending_signal {
+            if self.event_idx {
+                match vring
+                    .get_queue_mut()
+                    .needs_notification(self.mem.memory().deref())
+                {
+                    Ok(need) => need,
+                    Err(e) => {
+                        error!("needs_notification failed: {e:?}");
+                        true
+                    }
                 }
+            } else {
+                true
             }
         } else {
-            true
+            false
         };
 
         if needs_signalling {
             if let Err(e) = vring.signal_used_queue() {
                 error!("failed to signal used queue: {e:?}");
             }
+            self.ios_pending_signal = false;
         }
 
         busy

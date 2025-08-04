@@ -42,3 +42,8 @@ vm-memory = { version = "0.16.2", features = ["backend-mmap", "backend-atomic"] 
 [features]
 default = []
 disable-isal-crypto = ["aes", "xts-mode"]
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"

@@ -45,6 +45,7 @@ mod tests {
             metadata_path: None,
             io_debug_path: None,
             socket: "sock".to_string(),
+            cpus: None,
             num_queues: 1,
             queue_size: 2,
             seg_size_max: 512,

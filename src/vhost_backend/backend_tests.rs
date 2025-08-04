@@ -22,6 +22,7 @@ mod tests {
             metadata_path: None,
             io_debug_path: None,
             socket: "sock".to_string(),
+            cpus: None,
             num_queues: 1,
             queue_size: 32,
             seg_size_max: 65536,
@@ -184,11 +185,23 @@ mod tests {
     fn queues_per_thread_multiple() {
         let mut opts = default_options("img".to_string());
         opts.num_queues = 3;
+        opts.cpus = None;
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
 
         assert_eq!(backend.queues_per_thread(), vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn cpus_mismatch() {
+        let mut opts = default_options("img".to_string());
+        opts.num_queues = 2;
+        opts.cpus = Some(vec![0]);
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let res = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT);
+        assert!(res.is_err());
     }
 
     /// update_memory is currently a no-op and should succeed.

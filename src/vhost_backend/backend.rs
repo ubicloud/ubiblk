@@ -68,6 +68,14 @@ impl UbiBlkBackend {
             });
         }
 
+        if let Some(ref cpus) = options.cpus {
+            if cpus.len() != options.num_queues {
+                return Err(VhostUserBlockError::InvalidParameter {
+                    description: "cpus length must equal num_queues".to_string(),
+                });
+            }
+        }
+
         let nsectors = block_device.sector_count();
         let virtio_config = VirtioBlockConfig {
             capacity: nsectors,             /* The capacity (in SECTOR_SIZE-byte sectors). */
@@ -211,6 +219,10 @@ impl VhostUserBackend for UbiBlkBackend {
         let mut thread = self.threads[thread_id]
             .lock()
             .map_err(|_| std::io::Error::other("Thread lock poisoned"))?;
+
+        if let Some(cpus) = &self.options.cpus {
+            thread.pin_to_cpu(cpus[thread_id]);
+        }
         match device_event {
             0 => {
                 let mut vring = vrings[0].get_mut();

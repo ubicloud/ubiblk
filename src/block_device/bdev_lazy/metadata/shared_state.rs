@@ -26,7 +26,7 @@ impl SharedMetadataState {
     }
 
     pub fn increment_version(&self) {
-        self.metadata_version.fetch_add(1, Ordering::Release);
+        self.metadata_version.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn set_flushed_version(&self, version: u64) {
@@ -49,7 +49,7 @@ impl SharedMetadataState {
     }
 
     pub fn stripe_fetched(&self, stripe_id: usize) -> bool {
-        let header = self.stripe_headers[stripe_id].load(Ordering::Acquire);
+        let header = self.stripe_headers[stripe_id].load(Ordering::Relaxed);
         header & (1 << 0) != 0
     }
 

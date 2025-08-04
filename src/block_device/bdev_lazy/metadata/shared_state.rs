@@ -26,7 +26,7 @@ impl SharedMetadataState {
     }
 
     pub fn increment_version(&self) {
-        self.metadata_version.fetch_add(1, Ordering::SeqCst);
+        self.metadata_version.fetch_add(1, Ordering::Release);
     }
 
     pub fn set_flushed_version(&self, version: u64) {
@@ -49,24 +49,24 @@ impl SharedMetadataState {
     }
 
     pub fn stripe_fetched(&self, stripe_id: usize) -> bool {
-        let header = self.stripe_headers[stripe_id].load(Ordering::SeqCst);
+        let header = self.stripe_headers[stripe_id].load(Ordering::Acquire);
         header & (1 << 0) != 0
     }
 
     pub fn stripe_written(&self, stripe_id: usize) -> bool {
-        let header = self.stripe_headers[stripe_id].load(Ordering::SeqCst);
+        let header = self.stripe_headers[stripe_id].load(Ordering::Acquire);
         header & (1 << 1) != 0
     }
 
     pub fn set_stripe_fetched(&self, stripe_id: usize) {
-        let prev_header = self.stripe_headers[stripe_id].fetch_or(1 << 0, Ordering::SeqCst);
+        let prev_header = self.stripe_headers[stripe_id].fetch_or(1 << 0, Ordering::AcqRel);
         if prev_header & (1 << 0) == 0 {
             self.increment_version();
         }
     }
 
     pub fn set_stripe_written(&self, stripe_id: usize) {
-        let prev_header = self.stripe_headers[stripe_id].fetch_or(1 << 1, Ordering::SeqCst);
+        let prev_header = self.stripe_headers[stripe_id].fetch_or(1 << 1, Ordering::AcqRel);
         if prev_header & (1 << 1) == 0 {
             self.increment_version();
         }

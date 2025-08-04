@@ -49,12 +49,14 @@ impl UbiMetadata {
         stripe_id + Self::HEADER_SIZE
     }
 
+    #[cfg(test)]
     pub fn stripe_header(&self, stripe_id: usize) -> u8 {
-        self.stripe_headers[stripe_id].load(std::sync::atomic::Ordering::SeqCst)
+        self.stripe_headers[stripe_id].load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub fn set_stripe_header(&self, stripe_id: usize, value: u8) {
-        self.stripe_headers[stripe_id].store(value, std::sync::atomic::Ordering::SeqCst);
+        self.stripe_headers[stripe_id].store(value, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn new(stripe_sector_count_shift: u8, stripe_count: usize) -> Box<Self> {

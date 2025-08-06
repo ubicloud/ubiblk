@@ -1,4 +1,7 @@
-use std::{collections::VecDeque, sync::mpsc::Sender};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::mpsc::Sender,
+};
 
 use super::super::*;
 use super::bgworker::{BgWorkerRequest, SharedBgWorker};
@@ -36,6 +39,7 @@ struct LazyIoChannel {
     bgworker_ch: Sender<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     stripe_sector_count: u64,
+    stripe_fetches_requested: HashSet<usize>,
 }
 
 impl LazyIoChannel {
@@ -55,6 +59,7 @@ impl LazyIoChannel {
             bgworker_ch,
             metadata_state,
             stripe_sector_count,
+            stripe_fetches_requested: HashSet::new(),
         }
     }
 }
@@ -75,13 +80,16 @@ impl LazyIoChannel {
 
     fn start_stripe_fetches(&mut self, request: &RWRequest) -> Result<()> {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if !self.metadata_state.stripe_fetched(stripe_id) {
+            if !self.metadata_state.stripe_fetched(stripe_id)
+                && !self.stripe_fetches_requested.contains(&stripe_id)
+            {
                 self.bgworker_ch
                     .send(BgWorkerRequest::Fetch(stripe_id))
                     .map_err(|e| {
                         error!("Failed to send fetch request for stripe {stripe_id}: {e}");
                         VhostUserBlockError::ChannelError
                     })?;
+                self.stripe_fetches_requested.insert(stripe_id);
             }
         }
         Ok(())
@@ -110,6 +118,10 @@ impl LazyIoChannel {
         while let Some(front) = self.queued_rw_requests.front() {
             if !self.request_stripes_fetched(front) {
                 break;
+            }
+
+            for stripe_id in front.stripe_id_first..=front.stripe_id_last {
+                self.stripe_fetches_requested.remove(&stripe_id);
             }
 
             let request = self.queued_rw_requests.pop_front().expect("front exists");

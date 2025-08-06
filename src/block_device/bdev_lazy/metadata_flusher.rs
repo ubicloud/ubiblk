@@ -19,8 +19,7 @@ pub struct MetadataFlusher {
     metadata_buf: SharedBuffer,
     shared_state: SharedMetadataState,
     metadata_version_being_flushed: Option<u64>,
-    pending_flush_requests: bool,
-    inprogress_flush_requests: bool,
+    flush_requested: bool,
 }
 
 impl MetadataFlusher {
@@ -48,13 +47,12 @@ impl MetadataFlusher {
             metadata_buf: Rc::new(RefCell::new(AlignedBuf::new(metadata_buf_size))),
             shared_state,
             metadata_version_being_flushed: None,
-            pending_flush_requests: false,
-            inprogress_flush_requests: false,
+            flush_requested: false,
         })
     }
 
     pub fn busy(&self) -> bool {
-        self.inprogress_flush_requests || self.pending_flush_requests
+        self.metadata_version_being_flushed.is_some() || self.flush_requested
     }
 
     pub fn stripe_sector_count(&self) -> u64 {
@@ -105,7 +103,7 @@ impl MetadataFlusher {
     }
 
     fn finish_flush(&mut self, success: bool) {
-        match (self.metadata_version_being_flushed, success) {
+        match (self.metadata_version_being_flushed.take(), success) {
             (None, _) => {
                 error!("Flush completion received without a pending flush");
             }
@@ -117,12 +115,10 @@ impl MetadataFlusher {
                 self.shared_state.set_flushed_version(version);
             }
         }
-        self.inprogress_flush_requests = false;
-        self.metadata_version_being_flushed = None;
     }
 
     pub fn request_flush(&mut self) {
-        self.pending_flush_requests = true;
+        self.flush_requested = true;
     }
 
     pub fn shared_state(&self) -> SharedMetadataState {
@@ -134,9 +130,8 @@ impl MetadataFlusher {
             self.finish_flush(success);
         }
 
-        if self.pending_flush_requests && !self.inprogress_flush_requests {
-            self.inprogress_flush_requests = true;
-            self.pending_flush_requests = false;
+        if self.flush_requested && self.metadata_version_being_flushed.is_none() {
+            self.flush_requested = false;
             match self.start_flush() {
                 Ok(()) => {
                     debug!("Flush request started successfully");
@@ -192,7 +187,7 @@ mod tests {
         assert_eq!(metadata_dev.flushes(), 1);
         flusher.request_flush();
         flusher.update();
-        assert!(!flusher.pending_flush_requests);
+        assert!(!flusher.flush_requested);
         while flusher.shared_state().needs_flush() {
             flusher.update();
         }
@@ -251,7 +246,7 @@ mod tests {
         flusher.set_stripe_fetched(0);
         flusher.request_flush();
         flusher.update();
-        assert!(!flusher.pending_flush_requests);
+        assert!(!flusher.flush_requested);
         assert!(flusher.shared_state().needs_flush());
         Ok(())
     }

@@ -53,12 +53,7 @@ impl UbiBlkBackend {
 }
 
 impl UbiBlkBackend {
-    pub fn new(
-        options: &Options,
-        mem: GuestMemoryAtomic<GuestMemoryMmap>,
-        block_device: Box<dyn BlockDevice>,
-        alignment: usize,
-    ) -> Result<Self> {
+    fn validate_options(options: &Options) -> Result<()> {
         if options.queue_size == 0 || !options.queue_size.is_power_of_two() {
             return Err(VhostUserBlockError::InvalidParameter {
                 description: format!(
@@ -76,6 +71,17 @@ impl UbiBlkBackend {
             }
         }
 
+        Ok(())
+    }
+
+    pub fn new(
+        options: &Options,
+        mem: GuestMemoryAtomic<GuestMemoryMmap>,
+        block_device: Box<dyn BlockDevice>,
+        alignment: usize,
+    ) -> Result<Self> {
+        Self::validate_options(options)?;
+
         let nsectors = block_device.sector_count();
         let virtio_config = VirtioBlockConfig {
             capacity: nsectors,             /* The capacity (in SECTOR_SIZE-byte sectors). */
@@ -91,19 +97,15 @@ impl UbiBlkBackend {
 
         info!("virtio_config: {virtio_config:?}");
 
-        let mut queues_per_thread = Vec::new();
-        let mut threads: Vec<Mutex<UbiBlkBackendThread>> = Vec::new();
-        for i in 0..options.num_queues {
-            let io_channel = block_device.create_channel()?;
-            let thread: Mutex<UbiBlkBackendThread> = Mutex::new(UbiBlkBackendThread::new(
-                mem.clone(),
-                io_channel,
-                options,
-                alignment,
-            )?);
-            threads.push(thread);
-            queues_per_thread.push(0b1 << i);
-        }
+        let threads = (0..options.num_queues)
+            .map(|_| {
+                let io_channel = block_device.create_channel()?;
+                UbiBlkBackendThread::new(mem.clone(), io_channel, options, alignment)
+                    .map(Mutex::new)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let queues_per_thread = (0..options.num_queues).map(|i| 1 << i).collect();
 
         debug!("queues_per_thread: {queues_per_thread:?}");
 
@@ -328,58 +330,32 @@ pub fn start_block_backend(
 
     let base_block_device = build_block_device(&options.path, options, kek.clone())?;
 
-    let maybe_bgworker_base_pair = match options.image_path {
-        Some(ref path) => {
-            if options.metadata_path.is_none() {
-                return Err(Box::new(VhostUserBlockError::InvalidParameter {
-                    description: "metadata_path is required when image_path is provided"
-                        .to_string(),
-                }));
-            }
-            let metadata_path = match options.metadata_path.as_ref() {
-                Some(p) => p,
-                None => {
-                    return Err(Box::new(VhostUserBlockError::InvalidParameter {
-                        description: "metadata_path is missing".to_string(),
-                    }));
-                }
-            };
-            let metadata_dev = build_block_device(metadata_path, options, kek)?;
-            let readonly = true;
-            let image_bdev =
-                UringBlockDevice::new(PathBuf::from(path), 64, readonly, options.direct_io)?;
-            let bgworker =
-                BgWorker::new(&*image_bdev, &*base_block_device, &*metadata_dev, alignment)?;
-            Some((Arc::new(Mutex::new(bgworker)), image_bdev))
-        }
-        None => None,
-    };
-
-    let mut maybe_bgworker = None;
-    let mut maybe_bgworker_ch = None;
-
-    let block_device = match maybe_bgworker_base_pair {
-        Some((bgworker, image_bdev)) => {
-            maybe_bgworker = Some(bgworker.clone());
-            maybe_bgworker_ch = match bgworker.lock() {
-                Ok(b) => Some(b.req_sender()),
-                Err(_) => {
-                    error!("Failed to lock bgworker for channel");
-                    None
-                }
-            };
-            let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
-                None
-            } else {
-                Some(image_bdev)
-            };
-            block_device::LazyBlockDevice::new(
-                base_block_device,
-                maybe_image_bdev,
-                bgworker.clone(),
-            )?
-        }
-        None => base_block_device,
+    let (block_device, bgworker, bgworker_ch) = if let Some(ref path) = options.image_path {
+        let metadata_path = options.metadata_path.as_ref().ok_or_else(|| {
+            Box::new(VhostUserBlockError::InvalidParameter {
+                description: "metadata_path is required when image_path is provided".to_string(),
+            })
+        })?;
+        let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
+        let readonly = true;
+        let image_bdev =
+            UringBlockDevice::new(PathBuf::from(path), 64, readonly, options.direct_io)?;
+        let bgworker = BgWorker::new(&*image_bdev, &*base_block_device, &*metadata_dev, alignment)?;
+        let bgworker = Arc::new(Mutex::new(bgworker));
+        let bgworker_ch = bgworker.lock().ok().map(|b| b.req_sender());
+        let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
+            None
+        } else {
+            Some(image_bdev)
+        };
+        let block_device: Box<dyn BlockDevice> = block_device::LazyBlockDevice::new(
+            base_block_device,
+            maybe_image_bdev,
+            bgworker.clone(),
+        )?;
+        (block_device, Some(bgworker), bgworker_ch)
+    } else {
+        (base_block_device, None, None)
     };
 
     let backend = Arc::new(
@@ -391,21 +367,20 @@ pub fn start_block_backend(
 
     info!("Backend is created!");
 
-    let bgworker_thread = match maybe_bgworker.as_ref() {
-        Some(bgworker) => {
-            let bgworker_clone = bgworker.clone();
-            let handle = std::thread::Builder::new()
+    let bgworker_thread = if let Some(bgworker) = bgworker.clone() {
+        Some(
+            std::thread::Builder::new()
                 .name("bgworker".to_string())
                 .spawn(move || {
-                    if let Ok(mut b) = bgworker_clone.lock() {
+                    if let Ok(mut b) = bgworker.lock() {
                         b.run();
                     } else {
                         error!("Failed to lock bgworker in thread");
                     }
-                })?;
-            Some(handle)
-        }
-        None => None,
+                })?,
+        )
+    } else {
+        None
     };
 
     let name = "ubiblk-backend";
@@ -440,11 +415,11 @@ pub fn start_block_backend(
 
     if let Some(handle) = bgworker_thread {
         info!("Shutting down bgworker thread ...");
-        maybe_bgworker_ch.iter().for_each(|ch| {
+        if let Some(ch) = bgworker_ch {
             if let Err(e) = ch.send(BgWorkerRequest::Shutdown) {
                 error!("Failed to send shutdown request to bgworker: {e:?}");
             }
-        });
+        }
         info!("Waiting for bgworker thread to join ...");
         if let Err(e) = handle.join() {
             error!("Failed to join bgworker thread: {e:?}");

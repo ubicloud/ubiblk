@@ -342,7 +342,13 @@ pub fn start_block_backend(
             UringBlockDevice::new(PathBuf::from(path), 64, readonly, options.direct_io)?;
         let bgworker = BgWorker::new(&*image_bdev, &*base_block_device, &*metadata_dev, alignment)?;
         let bgworker = Arc::new(Mutex::new(bgworker));
-        let bgworker_ch = bgworker.lock().ok().map(|b| b.req_sender());
+        let bgworker_ch = match bgworker.lock() {
+            Ok(b) => Some(b.req_sender()),
+            Err(e) => {
+                error!("Failed to lock bgworker mutex: {}", e);
+                None
+            }
+        };
         let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
             None
         } else {

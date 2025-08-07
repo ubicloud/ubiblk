@@ -128,7 +128,7 @@ impl IoChannel for UringIoChannel {
     }
 
     fn busy(&self) -> bool {
-        self.submissions > self.completions
+        self.submissions > self.completions || !self.finished_requests.is_empty()
     }
 }
 
@@ -392,6 +392,28 @@ mod tests {
         let result = spin_until_complete(&mut chan);
         assert!(result.contains(&(1, true)));
         assert!(result.contains(&(2, false)));
+        Ok(())
+    }
+
+    // When there are failed submissions that haven't been reported yet, busy()
+    // should still return true so the caller knows to poll for them.
+    #[test]
+    fn busy_reports_finished_requests() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {e}");
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let path = tmpfile.path().to_owned();
+        let mut chan = UringIoChannel::new(path.to_str().unwrap(), 8, false, false)?;
+
+        assert!(!chan.busy());
+
+        chan.finished_requests.push((1, false));
+        assert!(chan.busy());
+
+        let result = chan.poll();
+        assert_eq!(result, vec![(1, false)]);
+        assert!(!chan.busy());
         Ok(())
     }
 

@@ -65,13 +65,9 @@ impl LazyIoChannel {
 }
 
 impl LazyIoChannel {
-    fn stripe_fetched(&self, stripe_id: usize) -> bool {
-        self.metadata_state.stripe_fetched(stripe_id)
-    }
-
     fn request_stripes_fetched(&self, request: &RWRequest) -> bool {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if !self.stripe_fetched(stripe_id) {
+            if !self.metadata_state.stripe_fetched(stripe_id) {
                 return false;
             }
         }
@@ -252,19 +248,13 @@ impl IoChannel for LazyIoChannel {
         if let Some(image_channel) = &mut self.image {
             results.extend(image_channel.poll());
         }
-        self.finished_requests.clear();
 
         results
     }
 
     fn busy(&self) -> bool {
-        let image_busy = if let Some(image_channel) = self.image.as_ref() {
-            image_channel.busy()
-        } else {
-            false
-        };
         self.base.busy()
-            || image_busy
+            || self.image.as_ref().is_some_and(|ch| ch.busy())
             || !self.queued_rw_requests.is_empty()
             || !self.queued_flush_requests.is_empty()
     }
@@ -274,7 +264,6 @@ pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     image: Option<Box<dyn BlockDevice>>,
     bgworker: SharedBgWorker,
-    sector_count: u64,
 }
 
 impl LazyBlockDevice {
@@ -283,12 +272,10 @@ impl LazyBlockDevice {
         image: Option<Box<dyn BlockDevice>>,
         bgworker: SharedBgWorker,
     ) -> Result<Box<Self>> {
-        let base_sector_count = base.sector_count();
         Ok(Box::new(LazyBlockDevice {
             base,
             image,
             bgworker,
-            sector_count: base_sector_count,
         }))
     }
 }
@@ -319,6 +306,6 @@ impl BlockDevice for LazyBlockDevice {
     }
 
     fn sector_count(&self) -> u64 {
-        self.sector_count
+        self.base.sector_count()
     }
 }

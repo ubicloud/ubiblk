@@ -67,7 +67,8 @@ mod tests {
             BgWorker::new(&source_dev, &target_dev, &metadata_dev, 512).unwrap(),
         ));
 
-        let lazy = LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone()).unwrap();
+        let lazy =
+            LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone(), false).unwrap();
         let mut chan = lazy.create_channel().unwrap();
 
         let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
@@ -133,6 +134,7 @@ mod tests {
             Box::new(target_dev),
             Some(Box::new(image_dev)),
             bgworker.clone(),
+            false,
         )
         .unwrap();
         let mut chan = lazy.create_channel().unwrap();
@@ -191,7 +193,8 @@ mod tests {
             BgWorker::new(&source_dev, &target_dev, &metadata_dev, 512).unwrap(),
         ));
 
-        let lazy = LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone()).unwrap();
+        let lazy =
+            LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone(), false).unwrap();
         let mut chan = lazy.create_channel().unwrap();
 
         let flush_id = 42;
@@ -208,5 +211,50 @@ mod tests {
         assert_eq!(results, vec![(flush_id, true)]);
         assert_eq!(target_metrics.read().unwrap().flushes, 1);
         assert_eq!(metadata_dev.flushes(), 2);
+    }
+
+    #[test]
+    fn test_track_written() {
+        let stripe_shift = 12u8;
+        let stripe_sectors = 1u64 << stripe_shift;
+        let stripe_count: usize = 4;
+        let dev_size = stripe_sectors * SECTOR_SIZE as u64 * stripe_count as u64;
+
+        let source_dev = TestBlockDevice::new(dev_size);
+        let target_dev = TestBlockDevice::new(dev_size);
+        let metadata_dev = TestBlockDevice::new(8 * 1024 * 1024);
+
+        let mut ch = metadata_dev.create_channel().unwrap();
+        let metadata = UbiMetadata::new(stripe_shift, stripe_count, stripe_count);
+        init_metadata(&metadata, &mut ch).unwrap();
+
+        let bgworker: SharedBgWorker = Arc::new(Mutex::new(
+            BgWorker::new(&source_dev, &target_dev, &metadata_dev, 512).unwrap(),
+        ));
+        let metadata_state = bgworker.lock().unwrap().shared_state();
+
+        let lazy =
+            LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone(), true).unwrap();
+        let mut chan = lazy.create_channel().unwrap();
+
+        // before write, all stripes are marked as not written to.
+        for i in 0..stripe_count {
+            assert!(!metadata_state.stripe_written(i));
+        }
+
+        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        chan.add_write(stripe_sectors + 1, 1, write_buf.clone(), 1);
+        chan.submit().unwrap();
+        let _ = drive(&bgworker, &mut chan);
+
+        // after write, stripe 1 is marked as written to.
+        assert!(metadata_state.stripe_written(1));
+        for i in 0..stripe_count {
+            if i == 1 {
+                assert!(metadata_state.stripe_written(i));
+            } else {
+                assert!(!metadata_state.stripe_written(i));
+            }
+        }
     }
 }

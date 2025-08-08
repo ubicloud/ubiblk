@@ -30,6 +30,7 @@ mod tests {
             poll_queue_timeout_us: 1000,
             skip_sync: false,
             copy_on_read: false,
+            track_written: false,
             direct_io: false,
             encryption_key: None,
             device_id: "ubiblk".to_string(),

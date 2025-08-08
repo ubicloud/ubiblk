@@ -358,6 +358,7 @@ pub fn start_block_backend(
             base_block_device,
             maybe_image_bdev,
             bgworker.clone(),
+            options.track_written,
         )?;
         (block_device, Some(bgworker), bgworker_ch)
     } else {

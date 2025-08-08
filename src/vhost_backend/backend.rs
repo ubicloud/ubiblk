@@ -473,11 +473,24 @@ pub fn init_metadata(
             })?;
     let base_bdev = build_block_device(&config.path, config, kek.clone())?;
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;
-    let stripe_count = base_bdev.sector_count().div_ceil(stripe_sector_count) as usize;
+    let base_stripe_count = base_bdev.sector_count().div_ceil(stripe_sector_count) as usize;
+
+    let image_stripe_count = if let Some(ref image_path) = config.image_path {
+        let readonly = true;
+        let image_bdev =
+            UringBlockDevice::new(PathBuf::from(image_path), 64, readonly, config.direct_io)?;
+        image_bdev.sector_count().div_ceil(stripe_sector_count) as usize
+    } else {
+        0
+    };
 
     let metadata_bdev = build_block_device(metadata_path, config, kek.clone())?;
     let mut ch = metadata_bdev.create_channel()?;
-    let metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count);
+    let metadata = UbiMetadata::new(
+        stripe_sector_count_shift,
+        base_stripe_count,
+        image_stripe_count,
+    );
     init_metadata_file(&metadata, &mut ch)?;
     Ok(())
 }

@@ -62,11 +62,21 @@ impl UbiMetadata {
         self.stripe_headers[stripe_id].store(value, Ordering::SeqCst);
     }
 
-    pub fn new(stripe_sector_count_shift: u8, stripe_count: usize) -> Box<Self> {
+    pub fn new(
+        stripe_sector_count_shift: u8,
+        base_stripe_count: usize,
+        image_stripe_count: usize,
+    ) -> Box<Self> {
         let mut metadata: Box<MaybeUninit<Self>> = Box::new_uninit();
 
-        let headers = (0..stripe_count)
-            .map(|_| AtomicU8::new(0))
+        let headers = (0..base_stripe_count)
+            .map(|i| {
+                if i < image_stripe_count {
+                    AtomicU8::new(0)
+                } else {
+                    AtomicU8::new(1)
+                }
+            })
             .collect::<Vec<_>>();
 
         unsafe {
@@ -157,7 +167,7 @@ mod tests {
     #[test]
     fn test_ubi_metadata_serialization() {
         const STRIPES: usize = 20;
-        let metadata = UbiMetadata::new(9, STRIPES);
+        let metadata = UbiMetadata::new(9, STRIPES, STRIPES);
 
         for i in 0..STRIPES {
             metadata.set_stripe_header(i, (i * 2) as u8);
@@ -181,6 +191,17 @@ mod tests {
 
         for i in 0..STRIPES {
             assert_eq!(loaded_metadata.stripe_header(i), metadata.stripe_header(i));
+        }
+    }
+
+    #[test]
+    fn new_marks_stripes_past_image_as_fetched() {
+        let metadata = UbiMetadata::new(9, 10, 4);
+        for i in 0..4 {
+            assert_eq!(metadata.stripe_header(i), 0);
+        }
+        for i in 4..10 {
+            assert_eq!(metadata.stripe_header(i), 1);
         }
     }
 }

@@ -60,7 +60,7 @@ mod tests {
         source_dev.write(0, &tmp, SECTOR_SIZE);
 
         let mut ch = metadata_dev.create_channel().unwrap();
-        let metadata = UbiMetadata::new(stripe_shift, stripe_count);
+        let metadata = UbiMetadata::new(stripe_shift, stripe_count, stripe_count);
         init_metadata(&metadata, &mut ch).unwrap();
 
         let bgworker: SharedBgWorker = Arc::new(Mutex::new(
@@ -122,7 +122,7 @@ mod tests {
         image_dev.write(0, &tmp, SECTOR_SIZE);
 
         let mut ch = metadata_dev.create_channel().unwrap();
-        let metadata = UbiMetadata::new(stripe_shift, stripe_count);
+        let metadata = UbiMetadata::new(stripe_shift, stripe_count, stripe_count);
         init_metadata(&metadata, &mut ch).unwrap();
 
         let bgworker: SharedBgWorker = Arc::new(Mutex::new(
@@ -184,7 +184,7 @@ mod tests {
         let target_metrics = target_dev.metrics.clone();
 
         let mut ch = metadata_dev.create_channel().unwrap();
-        let metadata = UbiMetadata::new(stripe_shift, stripe_count);
+        let metadata = UbiMetadata::new(stripe_shift, stripe_count, stripe_count);
         init_metadata(&metadata, &mut ch).unwrap();
 
         let bgworker: SharedBgWorker = Arc::new(Mutex::new(

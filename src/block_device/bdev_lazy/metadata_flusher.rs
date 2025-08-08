@@ -164,7 +164,7 @@ mod tests {
         let stripe_count = source_sector_count.div_ceil(stripe_sector_count) as usize;
 
         let mut ch = metadata_dev.create_channel()?;
-        let metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count);
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count);
         init_metadata(&metadata, &mut ch).unwrap();
 
         let mut flusher = MetadataFlusher::new(&metadata_dev, source_sector_count)?;
@@ -217,7 +217,7 @@ mod tests {
         let stripe_shift = 11u8;
 
         let mut ch = metadata_dev.create_channel()?;
-        let metadata = UbiMetadata::new(stripe_shift, 40);
+        let metadata = UbiMetadata::new(stripe_shift, 40, 40);
         init_metadata(&metadata, &mut ch).unwrap();
         let bad_magic = [0u8; UBI_MAGIC_SIZE];
         metadata_dev.write(0, &bad_magic, UBI_MAGIC_SIZE);
@@ -237,7 +237,7 @@ mod tests {
 
         {
             let mut ch = metadata_dev.create_channel()?;
-            let metadata = UbiMetadata::new(stripe_shift, 40);
+            let metadata = UbiMetadata::new(stripe_shift, 40, 40);
             init_metadata(&metadata, &mut ch).unwrap();
         }
 
@@ -258,7 +258,7 @@ mod tests {
 
         {
             let mut ch = metadata_dev.create_channel()?;
-            let metadata = UbiMetadata::new(stripe_shift, 40);
+            let metadata = UbiMetadata::new(stripe_shift, 40, 40);
             init_metadata(&metadata, &mut ch).unwrap();
         }
 

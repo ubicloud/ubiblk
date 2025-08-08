@@ -81,6 +81,10 @@ fn default_copy_on_read() -> bool {
     false
 }
 
+fn default_track_written() -> bool {
+    false
+}
+
 fn default_direct_io() -> bool {
     true
 }
@@ -133,6 +137,9 @@ pub struct Options {
 
     #[serde(default = "default_copy_on_read")]
     pub copy_on_read: bool,
+
+    #[serde(default = "default_track_written")]
+    pub track_written: bool,
 
     #[serde(default = "default_direct_io")]
     pub direct_io: bool,
@@ -232,6 +239,7 @@ mod tests {
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert!(!options.copy_on_read);
+        assert!(!options.track_written);
         assert!(options.direct_io);
         assert_eq!(options.device_id, "ubiblk".to_string());
     }

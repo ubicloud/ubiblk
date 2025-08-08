@@ -39,6 +39,7 @@ struct LazyIoChannel {
     bgworker_ch: Sender<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     stripe_fetches_requested: HashSet<usize>,
+    track_written: bool,
 }
 
 impl LazyIoChannel {
@@ -47,6 +48,7 @@ impl LazyIoChannel {
         image: Option<Box<dyn IoChannel>>,
         bgworker_ch: Sender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
+        track_written: bool,
     ) -> Self {
         LazyIoChannel {
             base,
@@ -57,6 +59,7 @@ impl LazyIoChannel {
             bgworker_ch,
             metadata_state,
             stripe_fetches_requested: HashSet::new(),
+            track_written,
         }
     }
 }
@@ -195,6 +198,19 @@ impl IoChannel for LazyIoChannel {
                 .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
         };
 
+        if self.track_written {
+            // We'll use this bit to optimize disk moves & similar operations.
+            // So, we need to make sure all successfully written to stripes are
+            // recorded.
+            //
+            // Marking failed writes as written is acceptable since it only
+            // causes extra fetches during disk moves without affecting
+            // correctness. So, we do the tracking here in favor of simplicity.
+            for stripe_id in request.stripe_id_first..=request.stripe_id_last {
+                self.metadata_state.set_stripe_written(stripe_id);
+            }
+        }
+
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
             self.base
@@ -261,6 +277,7 @@ pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     image: Option<Box<dyn BlockDevice>>,
     bgworker: SharedBgWorker,
+    track_written: bool,
 }
 
 impl LazyBlockDevice {
@@ -268,11 +285,13 @@ impl LazyBlockDevice {
         base: Box<dyn BlockDevice>,
         image: Option<Box<dyn BlockDevice>>,
         bgworker: SharedBgWorker,
+        track_written: bool,
     ) -> Result<Box<Self>> {
         Ok(Box::new(LazyBlockDevice {
             base,
             image,
             bgworker,
+            track_written,
         }))
     }
 }
@@ -298,6 +317,7 @@ impl BlockDevice for LazyBlockDevice {
             image_channel,
             bgworker_ch,
             bgworker.shared_state(),
+            self.track_written,
         )))
     }
 

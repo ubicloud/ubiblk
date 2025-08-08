@@ -302,6 +302,7 @@ fn build_block_device(
         options.queue_size,
         false,
         options.direct_io,
+        options.sync_io,
     )
     .map_err(|e| {
         error!("Failed to create block device at {path}: {e:?}");
@@ -338,8 +339,13 @@ pub fn start_block_backend(
         })?;
         let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
         let readonly = true;
-        let image_bdev =
-            UringBlockDevice::new(PathBuf::from(path), 64, readonly, options.direct_io)?;
+        let image_bdev = UringBlockDevice::new(
+            PathBuf::from(path),
+            64,
+            readonly,
+            options.direct_io,
+            options.sync_io,
+        )?;
         let bgworker = BgWorker::new(&*image_bdev, &*base_block_device, &*metadata_dev, alignment)?;
         let bgworker = Arc::new(Mutex::new(bgworker));
         let bgworker_ch = match bgworker.lock() {
@@ -478,8 +484,13 @@ pub fn init_metadata(
 
     let image_stripe_count = if let Some(ref image_path) = config.image_path {
         let readonly = true;
-        let image_bdev =
-            UringBlockDevice::new(PathBuf::from(image_path), 64, readonly, config.direct_io)?;
+        let image_bdev = UringBlockDevice::new(
+            PathBuf::from(image_path),
+            64,
+            readonly,
+            config.direct_io,
+            config.sync_io,
+        )?;
         image_bdev.sector_count().div_ceil(stripe_sector_count) as usize
     } else {
         0

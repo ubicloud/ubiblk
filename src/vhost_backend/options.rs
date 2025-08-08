@@ -89,6 +89,10 @@ fn default_direct_io() -> bool {
     true
 }
 
+fn default_sync_io() -> bool {
+    false
+}
+
 fn default_device_id() -> String {
     "ubiblk".to_string()
 }
@@ -143,6 +147,9 @@ pub struct Options {
 
     #[serde(default = "default_direct_io")]
     pub direct_io: bool,
+
+    #[serde(default = "default_sync_io")]
+    pub sync_io: bool,
 
     #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
@@ -241,6 +248,7 @@ mod tests {
         assert!(!options.copy_on_read);
         assert!(!options.track_written);
         assert!(options.direct_io);
+        assert!(!options.sync_io);
         assert_eq!(options.device_id, "ubiblk".to_string());
     }
 
@@ -271,6 +279,17 @@ mod tests {
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert!(options.direct_io);
+    }
+
+    #[test]
+    fn test_sync_enabled() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        sync_io: true
+        "#;
+        let options: Options = from_str(yaml).unwrap();
+        assert!(options.sync_io);
     }
 
     #[test]

@@ -55,6 +55,7 @@ mod tests {
             copy_on_read: false,
             track_written: false,
             direct_io: false,
+            sync_io: false,
             encryption_key: None,
             device_id: "ubiblk".to_string(),
         }

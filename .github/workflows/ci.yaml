@@ -23,7 +23,20 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf libtool nasm clang build-essential
+          sudo apt-get install -y autoconf libtool nasm clang build-essential clang-format meson docutils
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Clone and build libblkio
+        run: |
+          git clone https://gitlab.com/libblkio/libblkio.git
+          cd libblkio
+          meson setup build --prefix=/usr/local
+          meson compile -C build
+          sudo --preserve-env=PATH,RUSTUP_HOME,CARGO_HOME,HOME meson install -C build
 
       - name: Clone and build isa-l_crypto
         run: |
@@ -34,15 +47,13 @@ jobs:
           make -j$(nproc)
           sudo make install
 
-      - name: Install Rust
-        uses: actions-rs/toolchain@v1
-        with:
-            toolchain: stable
-            override: true
-            components: rustfmt, clippy
-
-      - name: Check formatting
+      - name: Check formatting (rust)
         run: cargo fmt --all -- --check
+
+      - name: Check formatting (e2e tests)
+        run: |
+          make format-tests
+          git diff --stat --exit-code
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -61,3 +72,11 @@ jobs:
 
       - name: Run tests without isa-l_crypto
         run: cargo test --features disable-isal-crypto
+
+      - name: Build project
+        run: cargo build
+
+      - name: Run e2e tests
+        run: |
+          mkdir -p target/tests/blkio/
+          make test-e2e

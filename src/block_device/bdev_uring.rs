@@ -18,14 +18,28 @@ struct UringIoChannel {
     submissions: u64,
     completions: u64,
     finished_requests: Vec<(usize, bool)>,
+    sync_io: bool,
 }
 
 impl UringIoChannel {
-    fn new(path: &str, queue_size: usize, readonly: bool, direct_io: bool) -> Result<Self> {
+    fn new(
+        path: &str,
+        queue_size: usize,
+        readonly: bool,
+        direct_io: bool,
+        sync_io: bool,
+    ) -> Result<Self> {
         let mut opts = OpenOptions::new();
         opts.read(true).write(!readonly);
+        let mut flags = 0;
         if direct_io {
-            opts.custom_flags(libc::O_DIRECT);
+            flags |= libc::O_DIRECT;
+        }
+        if sync_io {
+            flags |= libc::O_SYNC;
+        }
+        if flags != 0 {
+            opts.custom_flags(flags);
         }
         let file = opts.open(path).map_err(|e| {
             error!("Failed to open file {path}: {e}");
@@ -47,6 +61,7 @@ impl UringIoChannel {
             submissions: 0,
             completions: 0,
             finished_requests: Vec::new(),
+            sync_io,
         })
     }
 }
@@ -85,6 +100,10 @@ impl IoChannel for UringIoChannel {
     }
 
     fn add_flush(&mut self, id: usize) {
+        if self.sync_io {
+            self.finished_requests.push((id, true));
+            return;
+        }
         let fd = self.file.as_raw_fd();
         let flush_e = io_uring::opcode::Fsync::new(io_uring::types::Fd(fd))
             .build()
@@ -138,6 +157,7 @@ pub struct UringBlockDevice {
     queue_size: usize,
     readonly: bool,
     direct_io: bool,
+    sync: bool,
 }
 
 impl BlockDevice for UringBlockDevice {
@@ -147,6 +167,7 @@ impl BlockDevice for UringBlockDevice {
             self.queue_size,
             self.readonly,
             self.direct_io,
+            self.sync,
         )?;
         Ok(Box::new(channel))
     }
@@ -162,6 +183,7 @@ impl UringBlockDevice {
         queue_size: usize,
         readonly: bool,
         direct_io: bool,
+        sync: bool,
     ) -> Result<Box<Self>> {
         if !queue_size.is_power_of_two() {
             error!("Invalid queue size: {queue_size}");
@@ -188,6 +210,7 @@ impl UringBlockDevice {
                     queue_size,
                     readonly,
                     direct_io,
+                    sync,
                 }))
             }
             Err(e) => {
@@ -224,7 +247,7 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let block_dev = UringBlockDevice::new(path.clone(), 8, false, false)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 8, false, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
         // Write sector 0
@@ -259,7 +282,7 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let block_dev = UringBlockDevice::new(path.clone(), 8, true, false)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 8, true, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
         // Read sector 0
@@ -296,7 +319,7 @@ mod tests {
                 VhostUserBlockError::IoError { source: e }
             })?;
         let path = tmpfile.path().to_owned();
-        let result = UringBlockDevice::new(path, 8, false, false);
+        let result = UringBlockDevice::new(path, 8, false, false, false);
         assert!(result.is_err());
         Ok(())
     }
@@ -306,7 +329,7 @@ mod tests {
     fn new_invalid_path_fails() -> Result<()> {
         let mut path = std::env::temp_dir();
         path.push("ubiblk_nonexistent_file");
-        let result = UringBlockDevice::new(path, 8, false, false);
+        let result = UringBlockDevice::new(path, 8, false, false, false);
         assert!(result.is_err());
         Ok(())
     }
@@ -319,7 +342,7 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let result = UringBlockDevice::new(path, 3, false, false);
+        let result = UringBlockDevice::new(path, 3, false, false, false);
         assert!(matches!(
             result,
             Err(VhostUserBlockError::InvalidParameter { .. })
@@ -335,7 +358,7 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let result = UringBlockDevice::new(path, 0, false, false);
+        let result = UringBlockDevice::new(path, 0, false, false, false);
         assert!(matches!(
             result,
             Err(VhostUserBlockError::InvalidParameter { .. })
@@ -351,7 +374,7 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let block_dev = UringBlockDevice::new(path.clone(), 8, false, false)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 8, false, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
         // Queue a write followed by a flush and ensure busy() reflects it.
@@ -368,6 +391,26 @@ mod tests {
         Ok(())
     }
 
+    // When opened with O_SYNC, flush requests should complete without issuing
+    // an fsync operation.
+    #[test]
+    fn sync_flush_noop() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {e}");
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let path = tmpfile.path().to_owned();
+        let block_dev = UringBlockDevice::new(path.clone(), 8, false, false, true)?;
+        let mut chan = block_dev.create_channel()?;
+
+        chan.add_flush(1);
+        assert!(chan.busy());
+        chan.submit()?;
+        let result = spin_until_complete(&mut chan);
+        assert_eq!(result, vec![(1, true)]);
+        Ok(())
+    }
+
     // When the submission queue is full, additional requests are rejected and
     // reported as failed.
     #[test]
@@ -378,7 +421,7 @@ mod tests {
         })?;
         let path = tmpfile.path().to_owned();
         // Queue size of one allows only a single in-flight request.
-        let block_dev = UringBlockDevice::new(path.clone(), 1, false, false)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 1, false, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
         let write_buf1 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
@@ -404,7 +447,7 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let mut chan = UringIoChannel::new(path.to_str().unwrap(), 8, false, false)?;
+        let mut chan = UringIoChannel::new(path.to_str().unwrap(), 8, false, false, false)?;
 
         assert!(!chan.busy());
 
@@ -425,7 +468,7 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let block_dev = UringBlockDevice::new(path.clone(), 8, false, true)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 8, false, true, false)?;
         let mut chan = block_dev.create_channel()?;
 
         let pattern = vec![0xACu8; SECTOR_SIZE];
@@ -457,7 +500,7 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
-        let block_dev = UringBlockDevice::new(path.clone(), 1, false, true)?;
+        let block_dev = UringBlockDevice::new(path.clone(), 1, false, true, false)?;
         let mut chan = block_dev.create_channel()?;
 
         let write_buf1 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));

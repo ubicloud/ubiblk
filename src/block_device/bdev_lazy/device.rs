@@ -38,7 +38,6 @@ struct LazyIoChannel {
     finished_requests: Vec<(usize, bool)>,
     bgworker_ch: Sender<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
-    stripe_sector_count: u64,
     stripe_fetches_requested: HashSet<usize>,
 }
 
@@ -48,7 +47,6 @@ impl LazyIoChannel {
         image: Option<Box<dyn IoChannel>>,
         bgworker_ch: Sender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
-        stripe_sector_count: u64,
     ) -> Self {
         LazyIoChannel {
             base,
@@ -58,7 +56,6 @@ impl LazyIoChannel {
             finished_requests: Vec::new(),
             bgworker_ch,
             metadata_state,
-            stripe_sector_count,
             stripe_fetches_requested: HashSet::new(),
         }
     }
@@ -89,10 +86,6 @@ impl LazyIoChannel {
             }
         }
         Ok(())
-    }
-
-    fn sector_to_stripe_id(&self, sector: u64) -> usize {
-        (sector / self.stripe_sector_count) as usize
     }
 
     fn process_queued_flush_requests(&mut self) {
@@ -167,8 +160,10 @@ impl IoChannel for LazyIoChannel {
             sector_offset,
             sector_count,
             buf: buf.clone(),
-            stripe_id_first: self.sector_to_stripe_id(sector_offset),
-            stripe_id_last: self.sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
+            stripe_id_first: self.metadata_state.sector_to_stripe_id(sector_offset),
+            stripe_id_last: self
+                .metadata_state
+                .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
         };
 
         let fetched = self.request_stripes_fetched(&request);
@@ -194,8 +189,10 @@ impl IoChannel for LazyIoChannel {
             sector_offset,
             sector_count,
             buf: buf.clone(),
-            stripe_id_first: self.sector_to_stripe_id(sector_offset),
-            stripe_id_last: self.sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
+            stripe_id_first: self.metadata_state.sector_to_stripe_id(sector_offset),
+            stripe_id_last: self
+                .metadata_state
+                .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
         };
 
         let fetched = self.request_stripes_fetched(&request);
@@ -301,7 +298,6 @@ impl BlockDevice for LazyBlockDevice {
             image_channel,
             bgworker_ch,
             bgworker.shared_state(),
-            bgworker.stripe_sector_count(),
         )))
     }
 

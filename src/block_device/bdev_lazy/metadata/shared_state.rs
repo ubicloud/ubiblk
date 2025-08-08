@@ -9,6 +9,7 @@ pub struct SharedMetadataState {
     stripe_headers: Arc<Vec<AtomicU8>>,
     metadata_version: Arc<AtomicU64>,
     metadata_version_flushed: Arc<AtomicU64>,
+    stripe_sector_count_shift: u8,
 }
 
 impl SharedMetadataState {
@@ -22,7 +23,16 @@ impl SharedMetadataState {
             stripe_headers,
             metadata_version,
             metadata_version_flushed,
+            stripe_sector_count_shift: metadata.stripe_sector_count_shift,
         }
+    }
+
+    pub fn stripe_sector_count(&self) -> u64 {
+        1u64 << self.stripe_sector_count_shift
+    }
+
+    pub fn sector_to_stripe_id(&self, sector: u64) -> usize {
+        (sector >> self.stripe_sector_count_shift) as usize
     }
 
     pub fn increment_version(&self) {

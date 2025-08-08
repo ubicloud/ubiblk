@@ -18,7 +18,6 @@ pub enum BgWorkerRequest {
 pub struct BgWorker {
     stripe_fetcher: StripeFetcher,
     metadata_flusher: MetadataFlusher,
-    stripe_sector_count: u64,
     req_receiver: Receiver<BgWorkerRequest>,
     req_sender: Sender<BgWorkerRequest>,
     done: bool,
@@ -35,12 +34,11 @@ impl BgWorker {
     ) -> Result<Self> {
         let source_sector_count = source_dev.sector_count();
         let metadata_flusher = MetadataFlusher::new(metadata_dev, source_sector_count)?;
-        let stripe_sector_count = metadata_flusher.stripe_sector_count();
         let shared_state = metadata_flusher.shared_state();
         let stripe_fetcher = StripeFetcher::new(
             source_dev,
             target_dev,
-            stripe_sector_count,
+            metadata_flusher.stripe_sector_count(),
             shared_state,
             alignment,
         )?;
@@ -48,15 +46,10 @@ impl BgWorker {
         Ok(BgWorker {
             stripe_fetcher,
             metadata_flusher,
-            stripe_sector_count,
             req_receiver: rx,
             req_sender: tx,
             done: false,
         })
-    }
-
-    pub fn stripe_sector_count(&self) -> u64 {
-        self.stripe_sector_count
     }
 
     pub fn req_sender(&self) -> Sender<BgWorkerRequest> {

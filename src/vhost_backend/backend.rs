@@ -82,6 +82,8 @@ impl UbiBlkBackend {
     ) -> Result<Self> {
         Self::validate_options(options)?;
 
+        let writeback = if options.sync_io { 0 } else { 1 };
+
         let nsectors = block_device.sector_count();
         let virtio_config = VirtioBlockConfig {
             capacity: nsectors,             /* The capacity (in SECTOR_SIZE-byte sectors). */
@@ -91,7 +93,7 @@ impl UbiBlkBackend {
             min_io_size: 1, /* minimum I/O size without performance penalty in logical blocks. */
             opt_io_size: 1, /* optimal sustained I/O size in logical blocks. */
             num_queues: options.num_queues as u16,
-            writeback: 1, /* writeback mode (if VIRTIO_BLK_F_CONFIG_WCE) */
+            writeback,
             ..Default::default()
         };
 

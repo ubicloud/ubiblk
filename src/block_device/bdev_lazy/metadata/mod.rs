@@ -8,6 +8,3 @@ pub use load::load_metadata;
 pub use shared_state::SharedMetadataState;
 pub use types::UbiMetadata;
 pub use types::UBI_MAGIC;
-
-#[cfg(test)]
-pub use types::UBI_MAGIC_SIZE;

@@ -8,16 +8,16 @@ use std::sync::{
     mpsc::{Receiver, Sender, TryRecvError},
     Arc, Mutex,
 };
+use std::{cell::RefCell, rc::Rc};
 
 pub enum BgWorkerRequest {
     Fetch(usize),
-    FlushMetadata,
     Shutdown,
 }
 
 pub struct BgWorker {
     stripe_fetcher: StripeFetcher,
-    metadata_flusher: MetadataFlusher,
+    metadata_flusher: Rc<RefCell<MetadataFlusher>>,
     req_receiver: Receiver<BgWorkerRequest>,
     req_sender: Sender<BgWorkerRequest>,
     done: bool,
@@ -33,13 +33,15 @@ impl BgWorker {
         alignment: usize,
     ) -> Result<Self> {
         let source_sector_count = source_dev.sector_count();
-        let metadata_flusher = MetadataFlusher::new(metadata_dev, source_sector_count)?;
-        let shared_state = metadata_flusher.shared_state();
+        let metadata_flusher = Rc::new(RefCell::new(MetadataFlusher::new(
+            metadata_dev,
+            source_sector_count,
+        )?));
         let stripe_fetcher = StripeFetcher::new(
             source_dev,
             target_dev,
-            metadata_flusher.stripe_sector_count(),
-            shared_state,
+            metadata_flusher.borrow().stripe_sector_count(),
+            metadata_flusher.clone(),
             alignment,
         )?;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -57,13 +59,12 @@ impl BgWorker {
     }
 
     pub fn shared_state(&self) -> SharedMetadataState {
-        self.metadata_flusher.shared_state()
+        self.metadata_flusher.borrow().shared_state()
     }
 
     pub fn process_request(&mut self, req: BgWorkerRequest) {
         match req {
             BgWorkerRequest::Fetch(id) => self.stripe_fetcher.handle_fetch_request(id),
-            BgWorkerRequest::FlushMetadata => self.metadata_flusher.request_flush(),
             BgWorkerRequest::Shutdown => {
                 info!("Received shutdown request, stopping worker");
                 self.done = true;
@@ -98,12 +99,11 @@ impl BgWorker {
 
     pub fn update(&mut self) {
         self.stripe_fetcher.update();
-        self.metadata_flusher.update();
     }
 
     pub fn run(&mut self) {
         while !self.done {
-            let busy = self.stripe_fetcher.busy() || self.metadata_flusher.busy();
+            let busy = self.stripe_fetcher.busy();
             let block = !busy;
             self.receive_requests(block);
             self.update();

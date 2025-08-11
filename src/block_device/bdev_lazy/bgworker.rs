@@ -11,7 +11,6 @@ use std::sync::{
 
 pub enum BgWorkerRequest {
     Fetch(usize),
-    FlushMetadata,
     Shutdown,
 }
 
@@ -34,12 +33,11 @@ impl BgWorker {
     ) -> Result<Self> {
         let source_sector_count = source_dev.sector_count();
         let metadata_flusher = MetadataFlusher::new(metadata_dev, source_sector_count)?;
-        let shared_state = metadata_flusher.shared_state();
         let stripe_fetcher = StripeFetcher::new(
             source_dev,
             target_dev,
             metadata_flusher.stripe_sector_count(),
-            shared_state,
+            metadata_flusher.shared_state(),
             alignment,
         )?;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -63,7 +61,6 @@ impl BgWorker {
     pub fn process_request(&mut self, req: BgWorkerRequest) {
         match req {
             BgWorkerRequest::Fetch(id) => self.stripe_fetcher.handle_fetch_request(id),
-            BgWorkerRequest::FlushMetadata => self.metadata_flusher.request_flush(),
             BgWorkerRequest::Shutdown => {
                 info!("Received shutdown request, stopping worker");
                 self.done = true;
@@ -98,6 +95,13 @@ impl BgWorker {
 
     pub fn update(&mut self) {
         self.stripe_fetcher.update();
+        for (stripe_id, success) in self.stripe_fetcher.take_finished_fetches() {
+            if success {
+                self.metadata_flusher.set_stripe_fetched(stripe_id);
+            } else {
+                error!("Stripe {stripe_id} fetch failed");
+            }
+        }
         self.metadata_flusher.update();
     }
 
@@ -113,3 +117,30 @@ impl BgWorker {
 
 unsafe impl Send for BgWorker {}
 unsafe impl Sync for BgWorker {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_device::{bdev_test::TestBlockDevice, init_metadata, UbiMetadata};
+
+    fn build_bg_worker() -> BgWorker {
+        let source_dev = TestBlockDevice::new(1024 * 1024);
+        let target_dev = TestBlockDevice::new(1024 * 1024);
+        let metadata_dev = TestBlockDevice::new(1024 * 1024);
+        init_metadata(
+            &UbiMetadata::new(11, 16, 16),
+            &mut metadata_dev.create_channel().unwrap(),
+        )
+        .expect("Failed to initialize metadata");
+
+        BgWorker::new(&source_dev, &target_dev, &metadata_dev, 4096).unwrap()
+    }
+
+    #[test]
+    fn test_bg_worker_shutdown() {
+        let mut bg_worker = build_bg_worker();
+        let sender = bg_worker.req_sender();
+        sender.send(BgWorkerRequest::Shutdown).unwrap();
+        bg_worker.run();
+    }
+}

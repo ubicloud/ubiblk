@@ -353,7 +353,7 @@ pub fn start_block_backend(
         let bgworker_ch = match bgworker.lock() {
             Ok(b) => Some(b.req_sender()),
             Err(e) => {
-                error!("Failed to lock bgworker mutex: {}", e);
+                error!("Failed to lock bgworker mutex: {e}");
                 None
             }
         };

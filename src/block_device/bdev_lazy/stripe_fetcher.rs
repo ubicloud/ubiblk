@@ -24,10 +24,11 @@ pub struct StripeFetcher {
     stripe_sector_count: u64,
     fetch_queue: VecDeque<usize>,
     fetch_buffers: Vec<SharedBuffer>,
-    shared_state: SharedMetadataState,
+    shared_metadata_state: SharedMetadataState,
     stripe_states: HashMap<usize, FetchState>,
     allocated_buffers: HashMap<usize, usize>,
     available_buffers: VecDeque<usize>,
+    finished_fetches: Vec<(usize, bool)>,
 }
 
 impl StripeFetcher {
@@ -35,7 +36,7 @@ impl StripeFetcher {
         source_dev: &dyn BlockDevice,
         target_dev: &dyn BlockDevice,
         stripe_sector_count: u64,
-        shared_state: SharedMetadataState,
+        shared_metadata_state: SharedMetadataState,
         alignment: usize,
     ) -> Result<Self> {
         let fetch_source_channel = source_dev.create_channel()?;
@@ -71,10 +72,11 @@ impl StripeFetcher {
             stripe_sector_count,
             fetch_queue: VecDeque::new(),
             fetch_buffers,
-            shared_state,
+            shared_metadata_state,
             stripe_states: HashMap::new(),
             allocated_buffers: HashMap::new(),
             available_buffers: (0..MAX_CONCURRENT_FETCHES).collect(),
+            finished_fetches: Vec::new(),
         })
     }
 
@@ -82,10 +84,11 @@ impl StripeFetcher {
         !self.fetch_queue.is_empty()
             || self.fetch_source_channel.busy()
             || self.fetch_target_channel.busy()
+            || !self.finished_fetches.is_empty()
     }
 
     pub fn handle_fetch_request(&mut self, stripe_id: usize) {
-        if self.shared_state.stripe_fetched(stripe_id) {
+        if self.shared_metadata_state.stripe_fetched(stripe_id) {
             debug!("Stripe {stripe_id} already fetched");
             return;
         }
@@ -105,6 +108,10 @@ impl StripeFetcher {
         self.poll_fetches();
     }
 
+    pub fn take_finished_fetches(&mut self) -> Vec<(usize, bool)> {
+        std::mem::take(&mut self.finished_fetches)
+    }
+
     fn start_fetches(&mut self) {
         while !self.fetch_queue.is_empty() && !self.available_buffers.is_empty() {
             let stripe_id = self.fetch_queue.pop_front().unwrap();
@@ -114,6 +121,12 @@ impl StripeFetcher {
 
             let buf = fetch_buffer.clone();
             let stripe_sector_offset = stripe_id as u64 * self.stripe_sector_count;
+            if stripe_sector_offset >= self.source_sector_count {
+                error!("Stripe {stripe_id} beyond end of source");
+                self.fetch_completed(stripe_id, false);
+                continue;
+            }
+
             let stripe_sector_count = self
                 .stripe_sector_count
                 .min(self.source_sector_count - stripe_sector_offset);
@@ -225,15 +238,13 @@ impl StripeFetcher {
         debug!("Fetch completed for stripe {stripe_id}, success={success}");
 
         self.stripe_states.remove(&stripe_id);
-        if success {
-            self.shared_state.set_stripe_fetched(stripe_id);
-        }
-
         if let Some(buffer_idx) = self.allocated_buffers.remove(&stripe_id) {
             self.available_buffers.push_back(buffer_idx);
         } else {
             error!("No buffer allocated for stripe {stripe_id} on completion");
         }
+
+        self.finished_fetches.push((stripe_id, success));
     }
 }
 

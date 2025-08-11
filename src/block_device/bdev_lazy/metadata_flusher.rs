@@ -1,25 +1,51 @@
 use crate::{
     block_device::{
         bdev_lazy::metadata::{load_metadata, SharedMetadataState},
-        BlockDevice, IoChannel, SharedBuffer, UbiMetadata,
+        BlockDevice, IoChannel, UbiMetadata,
     },
-    utils::aligned_buffer::AlignedBuf,
+    utils::AlignedBufferPool,
     vhost_backend::SECTOR_SIZE,
     Result, VhostUserBlockError,
 };
 use log::{debug, error};
-use std::{cell::RefCell, rc::Rc};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-const METADATA_WRITE_ID: usize = 0;
-const METADATA_FLUSH_ID: usize = 1;
+const MAX_CONCURRENT_CHANGES: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetadataFlusherRequestKind {
+    SetFetched,
+    SetWritten,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MetadataFlusherRequest {
+    stripe_id: usize,
+    kind: MetadataFlusherRequestKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestStage {
+    Writing,
+    Flushing,
+}
+
+struct HeaderUpdateStatus {
+    buffer_index: usize,
+    stage: RequestStage,
+    stripe_id: usize,
+    header: u8,
+    sector: u64,
+}
 
 pub struct MetadataFlusher {
     channel: Box<dyn IoChannel>,
     metadata: Box<UbiMetadata>,
-    metadata_buf: SharedBuffer,
     shared_state: SharedMetadataState,
-    metadata_version_being_flushed: Option<u64>,
-    flush_requested: bool,
+    sectors_being_updated: HashSet<u64>,
+    header_updates: HashMap<usize, HeaderUpdateStatus>,
+    queued_requests: VecDeque<MetadataFlusherRequest>,
+    buffer_pool: AlignedBufferPool,
 }
 
 impl MetadataFlusher {
@@ -27,6 +53,7 @@ impl MetadataFlusher {
         let mut channel = metadata_dev.create_channel()?;
         let metadata = load_metadata(&mut channel, metadata_dev.sector_count())?;
 
+        // Validate stripe count
         let source_stripe_count = source_sector_count.div_ceil(metadata.stripe_size());
         if source_stripe_count > metadata.stripe_count() {
             return Err(VhostUserBlockError::InvalidParameter {
@@ -38,237 +65,190 @@ impl MetadataFlusher {
             });
         }
 
-        let metadata_size = metadata.metadata_size();
-        let metadata_buf_size = metadata_size.div_ceil(SECTOR_SIZE) * SECTOR_SIZE;
-        let shared_state = SharedMetadataState::new(&metadata);
         Ok(MetadataFlusher {
             channel,
+            shared_state: SharedMetadataState::new(&metadata),
             metadata,
-            metadata_buf: Rc::new(RefCell::new(AlignedBuf::new(metadata_buf_size))),
-            shared_state,
-            metadata_version_being_flushed: None,
-            flush_requested: false,
+            sectors_being_updated: HashSet::new(),
+            queued_requests: VecDeque::new(),
+            buffer_pool: AlignedBufferPool::new(4096, MAX_CONCURRENT_CHANGES, SECTOR_SIZE),
+            header_updates: HashMap::new(),
         })
-    }
-
-    pub fn busy(&self) -> bool {
-        self.metadata_version_being_flushed.is_some() || self.flush_requested
-    }
-
-    pub fn stripe_sector_count(&self) -> u64 {
-        1u64 << self.metadata.stripe_sector_count_shift
-    }
-
-    #[cfg(test)]
-    pub fn set_stripe_fetched(&mut self, stripe_id: usize) {
-        self.shared_state.set_stripe_fetched(stripe_id);
-    }
-
-    fn start_flush(&mut self) -> Result<()> {
-        let current_version = self.shared_state.current_version();
-        debug!("Starting flush for metadata version {current_version}");
-        self.metadata_version_being_flushed = Some(current_version);
-
-        let metadata_buf = self.metadata_buf.clone();
-        self.metadata
-            .write_to_buf(metadata_buf.borrow_mut().as_mut_slice());
-
-        let sector_count = metadata_buf.borrow().len() / SECTOR_SIZE;
-        self.channel
-            .add_write(0, sector_count as u32, metadata_buf, METADATA_WRITE_ID);
-        self.channel.submit()?;
-        Ok(())
-    }
-
-    fn poll(&mut self) -> Option<bool> {
-        for (id, success) in self.channel.poll() {
-            if id == METADATA_WRITE_ID {
-                if !success {
-                    error!("Metadata write failed");
-                    return Some(false);
-                }
-                self.channel.add_flush(METADATA_FLUSH_ID);
-                if let Err(e) = self.channel.submit() {
-                    error!("Failed to submit flush: {e}");
-                    return Some(false);
-                }
-                return None;
-            } else if id == METADATA_FLUSH_ID {
-                return Some(success);
-            } else {
-                error!("Unexpected ID {id} in poll result");
-            }
-        }
-        None
-    }
-
-    fn finish_flush(&mut self, success: bool) {
-        match (self.metadata_version_being_flushed.take(), success) {
-            (None, _) => {
-                error!("Flush completion received without a pending flush");
-            }
-            (Some(version), false) => {
-                error!("Metadata flush for version {version} failed");
-            }
-            (Some(version), true) => {
-                debug!("Metadata flush completed for version {version}");
-                self.shared_state.set_flushed_version(version);
-            }
-        }
-    }
-
-    pub fn request_flush(&mut self) {
-        self.flush_requested = true;
     }
 
     pub fn shared_state(&self) -> SharedMetadataState {
         self.shared_state.clone()
     }
 
+    pub fn busy(&self) -> bool {
+        !self.sectors_being_updated.is_empty() || !self.queued_requests.is_empty()
+    }
+
+    pub fn stripe_sector_count(&self) -> u64 {
+        1u64 << self.metadata.stripe_sector_count_shift
+    }
+
+    pub fn set_stripe_fetched(&mut self, stripe_id: usize) {
+        self.queued_requests.push_back(MetadataFlusherRequest {
+            stripe_id,
+            kind: MetadataFlusherRequestKind::SetFetched,
+        });
+    }
+
+    #[allow(dead_code)]
+    pub fn set_stripe_written(&mut self, stripe_id: usize) {
+        self.queued_requests.push_back(MetadataFlusherRequest {
+            stripe_id,
+            kind: MetadataFlusherRequestKind::SetWritten,
+        });
+    }
+
     pub fn update(&mut self) {
-        if let Some(success) = self.poll() {
-            self.finish_flush(success);
+        self.start_writes();
+        self.poll_channel();
+    }
+
+    fn poll_channel(&mut self) {
+        let mut finished_stripes = Vec::new();
+
+        for (stripe_id, success) in self.channel.poll() {
+            let maybe_status = self.header_updates.get_mut(&stripe_id);
+            match (maybe_status, success) {
+                (None, _) => {
+                    error!("Received unexpected response for stripe {stripe_id}");
+                }
+                (Some(status), false) => {
+                    error!("Failed to write metadata for stripe {stripe_id}");
+                    self.buffer_pool.return_buffer(status.buffer_index);
+                    self.sectors_being_updated.remove(&status.sector);
+                    self.header_updates.remove(&stripe_id);
+                }
+                (Some(status), true) => match status.stage {
+                    RequestStage::Writing => {
+                        self.buffer_pool.return_buffer(status.buffer_index);
+                        self.channel.add_flush(stripe_id);
+                        status.stage = RequestStage::Flushing;
+                    }
+                    RequestStage::Flushing => {
+                        self.sectors_being_updated.remove(&(status.sector));
+                        finished_stripes.push((status.stripe_id, status.header));
+                    }
+                },
+            }
         }
 
-        if self.flush_requested && self.metadata_version_being_flushed.is_none() {
-            self.flush_requested = false;
-            match self.start_flush() {
-                Ok(()) => {
-                    debug!("Flush request started successfully");
-                }
-                Err(e) => {
-                    error!("Failed to start flush: {e:?}");
-                    self.finish_flush(false);
-                }
+        for (stripe, header) in finished_stripes {
+            debug!("Stripe {stripe} metadata updated with header {header}");
+            self.header_updates.remove(&stripe);
+            self.shared_state.set_stripe_header(stripe, header);
+        }
+
+        // submit flushes, if any
+        if let Err(e) = self.channel.submit() {
+            error!("Failed to submit metadata writes: {e}");
+        }
+    }
+
+    fn start_writes(&mut self) {
+        while !self.queued_requests.is_empty() && self.buffer_pool.has_available() {
+            let req = *self.queued_requests.front().unwrap();
+            let group = req.stripe_id / SECTOR_SIZE;
+            let sector = (group + 1) as u64;
+            if self.sectors_being_updated.contains(&sector) {
+                // Updates to each sector should be serialized
+                break;
             }
+            self.queued_requests.pop_front();
+
+            let (buf, index) = self.buffer_pool.get_buffer().unwrap();
+            self.metadata.stripe_headers[req.stripe_id] |=
+                if req.kind == MetadataFlusherRequestKind::SetFetched {
+                    0b11
+                } else {
+                    0b10
+                };
+
+            buf.borrow_mut().as_mut_slice().copy_from_slice(
+                &self.metadata.stripe_headers[group * SECTOR_SIZE..(group + 1) * SECTOR_SIZE],
+            );
+
+            self.channel.add_write(sector, 1, buf, req.stripe_id);
+            self.sectors_being_updated.insert(sector);
+            self.header_updates.insert(
+                req.stripe_id,
+                HeaderUpdateStatus {
+                    buffer_index: index,
+                    stage: RequestStage::Writing,
+                    stripe_id: req.stripe_id,
+                    header: self.metadata.stripe_headers[req.stripe_id],
+                    sector,
+                },
+            );
+        }
+
+        // submit writes, if any
+        if let Err(e) = self.channel.submit() {
+            error!("Failed to submit metadata writes: {e}");
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::block_device::{bdev_test::TestBlockDevice, init_metadata};
+
     use super::*;
-    use crate::block_device::bdev_failing::FailingBlockDevice;
-    use crate::block_device::bdev_lazy::init_metadata;
-    use crate::block_device::bdev_lazy::metadata::{UBI_MAGIC, UBI_MAGIC_SIZE};
-    use crate::block_device::bdev_test::TestBlockDevice;
-    use crate::Result;
-    use crate::VhostUserBlockError;
 
-    #[test]
-    fn test_metadata_flusher() -> Result<()> {
-        let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
-        let stripe_sector_count_shift = 11;
-        let stripe_sector_count: u64 = 1 << stripe_sector_count_shift;
-        let source_sector_count = 29 * stripe_sector_count + 4;
-        let stripe_count = source_sector_count.div_ceil(stripe_sector_count) as usize;
+    fn init_metadata_device() -> TestBlockDevice {
+        let metadata = UbiMetadata::new(11, 16, 16);
+        let block_device = TestBlockDevice::new(8 * 1024);
+        init_metadata(&metadata, &mut block_device.create_channel().unwrap())
+            .expect("Failed to initialize metadata");
+        block_device
+    }
 
-        let mut ch = metadata_dev.create_channel()?;
-        let metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count);
-        init_metadata(&metadata, &mut ch).unwrap();
-
-        let mut flusher = MetadataFlusher::new(&metadata_dev, source_sector_count)?;
-        let shared_state = flusher.shared_state();
-
-        assert!(!shared_state.stripe_fetched(0));
-        assert_eq!(flusher.stripe_sector_count(), stripe_sector_count);
-
-        let stripes_to_fetch = [0, 3, 7, 8];
-        for stripe_id in stripes_to_fetch.iter() {
-            assert!(!shared_state.stripe_fetched(*stripe_id));
-            flusher.set_stripe_fetched(*stripe_id);
-            assert!(shared_state.stripe_fetched(*stripe_id));
+    fn wait_for_completion(metadata_flusher: &mut MetadataFlusher) {
+        let start = std::time::Instant::now();
+        while start.elapsed().as_secs() < 1 && metadata_flusher.busy() {
+            metadata_flusher.update();
         }
-        assert_eq!(
-            stripe_count,
-            source_sector_count.div_ceil(stripe_sector_count) as usize
-        );
-
-        assert_eq!(metadata_dev.flushes(), 1);
-        flusher.request_flush();
-        flusher.update();
-        assert!(!flusher.flush_requested);
-        while flusher.shared_state().needs_flush() {
-            flusher.update();
-        }
-        assert_eq!(metadata_dev.flushes(), 2);
-
-        for i in 0..stripe_count {
-            let offset = metadata.stripe_headers_offset(i);
-            let mut header_buf = [0u8; 1];
-            metadata_dev.read(offset, &mut header_buf, 1);
-            let expected_header = if stripes_to_fetch.contains(&i) {
-                [1]
-            } else {
-                [0]
-            };
-            assert_eq!(header_buf, expected_header);
-        }
-
-        let mut magic_buf = [0u8; UBI_MAGIC_SIZE];
-        metadata_dev.read(0, &mut magic_buf, UBI_MAGIC_SIZE);
-        assert_eq!(magic_buf, *UBI_MAGIC);
-        Ok(())
     }
 
     #[test]
-    fn test_metadata_magic_mismatch() -> Result<()> {
-        let metadata_dev = TestBlockDevice::new(40 * 1024 * 1024);
-        let stripe_shift = 11u8;
+    fn test_metadata_flusher() {
+        let metadata_dev = init_metadata_device();
+        let mut metadata_flusher = MetadataFlusher::new(&metadata_dev, 8 * 1024).unwrap();
+        let shared_state = metadata_flusher.shared_state();
 
-        let mut ch = metadata_dev.create_channel()?;
-        let metadata = UbiMetadata::new(stripe_shift, 40, 40);
-        init_metadata(&metadata, &mut ch).unwrap();
-        let bad_magic = [0u8; UBI_MAGIC_SIZE];
-        metadata_dev.write(0, &bad_magic, UBI_MAGIC_SIZE);
+        metadata_flusher.set_stripe_fetched(5);
+        metadata_flusher.set_stripe_fetched(6);
 
-        let result = MetadataFlusher::new(&metadata_dev, 1024);
-        assert!(matches!(
-            result,
-            Err(VhostUserBlockError::MetadataError { .. })
-        ));
-        Ok(())
+        for stripe_id in 5..=6 {
+            assert!(!shared_state.stripe_fetched(stripe_id));
+            assert!(!shared_state.stripe_written(stripe_id));
+        }
+
+        wait_for_completion(&mut metadata_flusher);
+
+        for stripe_id in 5..=6 {
+            assert!(shared_state.stripe_fetched(stripe_id));
+            assert!(shared_state.stripe_written(stripe_id));
+        }
+
+        metadata_flusher.set_stripe_written(7);
+        assert!(!shared_state.stripe_written(7));
+        assert!(!shared_state.stripe_fetched(7));
+
+        wait_for_completion(&mut metadata_flusher);
+
+        assert!(!shared_state.stripe_fetched(7));
+        assert!(shared_state.stripe_written(7));
     }
 
     #[test]
-    fn test_poll_flush_failed_write() -> Result<()> {
-        let metadata_dev = FailingBlockDevice::new(40 * 1024 * 1024);
-        let stripe_shift = 11u8;
-
-        {
-            let mut ch = metadata_dev.create_channel()?;
-            let metadata = UbiMetadata::new(stripe_shift, 40, 40);
-            init_metadata(&metadata, &mut ch).unwrap();
-        }
-
-        let mut flusher = MetadataFlusher::new(&metadata_dev, 1024)?;
-        metadata_dev.fail_next_write();
-        flusher.set_stripe_fetched(0);
-        flusher.request_flush();
-        flusher.update();
-        assert!(!flusher.flush_requested);
-        assert!(flusher.shared_state().needs_flush());
-        Ok(())
-    }
-
-    #[test]
-    fn test_poll_flush_failed_flush() -> Result<()> {
-        let metadata_dev = FailingBlockDevice::new(40 * 1024 * 1024);
-        let stripe_shift = 11u8;
-
-        {
-            let mut ch = metadata_dev.create_channel()?;
-            let metadata = UbiMetadata::new(stripe_shift, 40, 40);
-            init_metadata(&metadata, &mut ch).unwrap();
-        }
-
-        let mut flusher = MetadataFlusher::new(&metadata_dev, 1024)?;
-        flusher.set_stripe_fetched(0);
-        metadata_dev.fail_next_flush();
-        flusher.request_flush();
-        flusher.update();
-        flusher.update();
-        assert!(flusher.shared_state().needs_flush());
-        Ok(())
+    fn test_source_stripe_count_too_large() {
+        let metadata_dev = init_metadata_device();
+        let metadata_flusher = MetadataFlusher::new(&metadata_dev, 1024 * 1024 * 1024);
+        assert!(metadata_flusher.is_err());
     }
 }

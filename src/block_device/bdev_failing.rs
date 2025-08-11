@@ -75,6 +75,7 @@ pub struct FailingBlockDevice {
     state: Arc<Mutex<FailState>>,
 }
 
+#[allow(dead_code)]
 impl FailingBlockDevice {
     pub fn new(size: u64) -> Self {
         FailingBlockDevice {

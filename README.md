@@ -120,9 +120,9 @@ perform the write operation. However, reads are handled differently based on
 - **`copy_on_read = true`** – A read from an unfetched stripe triggers a fetch
   and completes once the stripe has been copied to the base device.
 
-The metadata is created with `init-metadata` and stored at `metadata_path`.  It
-contains a magic header and a byte for each stripe indicating whether that
-stripe has been fetched.
+The metadata is created with `init-metadata` and stored at `metadata_path`. The
+first sector contains a magic header, and subsequent sectors store a byte for
+each stripe indicating whether that stripe has been fetched.
 
 ## Key Encryption Key (KEK) File
 The keys in the configuration file can be encrypted using a KEK file. The KEK file should contain the encryption key in base64 format. The backend will use this key to decrypt the block device keys at runtime.

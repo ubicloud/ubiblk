@@ -25,21 +25,14 @@ struct RWRequest {
     stripe_id_last: usize,
 }
 
-struct FlushRequest {
-    id: usize,
-    pending_metadata_version: u64,
-}
-
 struct LazyIoChannel {
     base: Box<dyn IoChannel>,
     image: Option<Box<dyn IoChannel>>,
     queued_rw_requests: VecDeque<RWRequest>,
-    queued_flush_requests: VecDeque<FlushRequest>,
     finished_requests: Vec<(usize, bool)>,
     bgworker_ch: Sender<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     stripe_fetches_requested: HashSet<usize>,
-    track_written: bool,
 }
 
 impl LazyIoChannel {
@@ -48,18 +41,15 @@ impl LazyIoChannel {
         image: Option<Box<dyn IoChannel>>,
         bgworker_ch: Sender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
-        track_written: bool,
     ) -> Self {
         LazyIoChannel {
             base,
             image,
             queued_rw_requests: VecDeque::new(),
-            queued_flush_requests: VecDeque::new(),
             finished_requests: Vec::new(),
             bgworker_ch,
             metadata_state,
             stripe_fetches_requested: HashSet::new(),
-            track_written,
         }
     }
 }
@@ -89,19 +79,6 @@ impl LazyIoChannel {
             }
         }
         Ok(())
-    }
-
-    fn process_queued_flush_requests(&mut self) {
-        let flushed_version = self.metadata_state.flushed_version();
-        while let Some(front) = self.queued_flush_requests.front() {
-            if front.pending_metadata_version > flushed_version {
-                break;
-            }
-
-            let id = front.id;
-            self.queued_flush_requests.pop_front();
-            self.base.add_flush(id);
-        }
     }
 
     fn process_queued_rw_requests(&mut self) {
@@ -198,19 +175,6 @@ impl IoChannel for LazyIoChannel {
                 .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
         };
 
-        if self.track_written {
-            // We'll use this bit to optimize disk moves & similar operations.
-            // So, we need to make sure all successfully written to stripes are
-            // recorded.
-            //
-            // Marking failed writes as written is acceptable since it only
-            // causes extra fetches during disk moves without affecting
-            // correctness. So, we do the tracking here in favor of simplicity.
-            for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-                self.metadata_state.set_stripe_written(stripe_id);
-            }
-        }
-
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
             self.base
@@ -227,22 +191,7 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn add_flush(&mut self, id: usize) {
-        if !self.metadata_state.needs_flush() {
-            self.base.add_flush(id);
-            return;
-        }
-
-        let current_metadata_version = self.metadata_state.current_version();
-
-        if let Err(e) = self.bgworker_ch.send(BgWorkerRequest::FlushMetadata) {
-            error!("Failed to send flush request: {e}");
-            self.finished_requests.push((id, false));
-        }
-
-        self.queued_flush_requests.push_back(FlushRequest {
-            id,
-            pending_metadata_version: current_metadata_version,
-        });
+        self.base.add_flush(id);
     }
 
     fn submit(&mut self) -> Result<()> {
@@ -253,7 +202,6 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
-        self.process_queued_flush_requests();
         self.process_queued_rw_requests();
 
         let mut results = std::mem::take(&mut self.finished_requests);
@@ -269,7 +217,6 @@ impl IoChannel for LazyIoChannel {
         self.base.busy()
             || self.image.as_ref().is_some_and(|ch| ch.busy())
             || !self.queued_rw_requests.is_empty()
-            || !self.queued_flush_requests.is_empty()
     }
 }
 
@@ -277,6 +224,7 @@ pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     image: Option<Box<dyn BlockDevice>>,
     bgworker: SharedBgWorker,
+    #[allow(dead_code)]
     track_written: bool,
 }
 
@@ -317,7 +265,6 @@ impl BlockDevice for LazyBlockDevice {
             image_channel,
             bgworker_ch,
             bgworker.shared_state(),
-            self.track_written,
         )))
     }
 

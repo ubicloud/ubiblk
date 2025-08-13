@@ -3,6 +3,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
 use super::metadata::SharedMetadataState;
+use super::metadata_flusher::MetadataFlusher;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error};
@@ -25,6 +26,7 @@ pub struct StripeFetcher {
     fetch_queue: VecDeque<usize>,
     fetch_buffers: Vec<SharedBuffer>,
     shared_state: SharedMetadataState,
+    metadata_flusher: Rc<RefCell<MetadataFlusher>>,
     stripe_states: HashMap<usize, FetchState>,
     allocated_buffers: HashMap<usize, usize>,
     available_buffers: VecDeque<usize>,
@@ -35,7 +37,7 @@ impl StripeFetcher {
         source_dev: &dyn BlockDevice,
         target_dev: &dyn BlockDevice,
         stripe_sector_count: u64,
-        shared_state: SharedMetadataState,
+        metadata_flusher: Rc<RefCell<MetadataFlusher>>,
         alignment: usize,
     ) -> Result<Self> {
         let fetch_source_channel = source_dev.create_channel()?;
@@ -63,6 +65,7 @@ impl StripeFetcher {
                 description: "target device too small".into(),
             });
         }
+        let shared_state = metadata_flusher.borrow().shared_state();
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,
@@ -72,6 +75,7 @@ impl StripeFetcher {
             fetch_queue: VecDeque::new(),
             fetch_buffers,
             shared_state,
+            metadata_flusher,
             stripe_states: HashMap::new(),
             allocated_buffers: HashMap::new(),
             available_buffers: (0..MAX_CONCURRENT_FETCHES).collect(),
@@ -226,7 +230,13 @@ impl StripeFetcher {
 
         self.stripe_states.remove(&stripe_id);
         if success {
-            self.shared_state.set_stripe_fetched(stripe_id);
+            if let Err(e) = self
+                .metadata_flusher
+                .borrow_mut()
+                .set_stripe_fetched(stripe_id)
+            {
+                error!("Failed to update metadata for stripe {stripe_id}: {e:?}");
+            }
         }
 
         if let Some(buffer_idx) = self.allocated_buffers.remove(&stripe_id) {

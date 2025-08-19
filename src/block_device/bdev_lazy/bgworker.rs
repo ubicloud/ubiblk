@@ -10,7 +10,8 @@ use std::sync::{
 };
 
 pub enum BgWorkerRequest {
-    Fetch(usize),
+    Fetch { stripe_id: usize },
+    SetWritten { stripe_id: usize },
     Shutdown,
 }
 
@@ -60,7 +61,8 @@ impl BgWorker {
 
     pub fn process_request(&mut self, req: BgWorkerRequest) {
         match req {
-            BgWorkerRequest::Fetch(id) => self.stripe_fetcher.handle_fetch_request(id),
+            BgWorkerRequest::Fetch { stripe_id } => self.stripe_fetcher.handle_fetch_request(stripe_id),
+            BgWorkerRequest::SetWritten { stripe_id } => self.metadata_flusher.set_stripe_written(stripe_id),
             BgWorkerRequest::Shutdown => {
                 info!("Received shutdown request, stopping worker");
                 self.done = true;

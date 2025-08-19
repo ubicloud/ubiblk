@@ -1,9 +1,8 @@
 use std::collections::{HashMap, VecDeque};
-use std::{cell::RefCell, rc::Rc};
 
 use super::super::*;
 use super::metadata::SharedMetadataState;
-use crate::utils::aligned_buffer::AlignedBuf;
+use crate::utils::aligned_buffer_pool::AlignedBufferPool;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error};
 
@@ -23,11 +22,10 @@ pub struct StripeFetcher {
     target_sector_count: u64,
     stripe_sector_count: u64,
     fetch_queue: VecDeque<usize>,
-    fetch_buffers: Vec<SharedBuffer>,
+    buffer_pool: AlignedBufferPool,
     shared_metadata_state: SharedMetadataState,
     stripe_states: HashMap<usize, FetchState>,
-    allocated_buffers: HashMap<usize, usize>,
-    available_buffers: VecDeque<usize>,
+    allocated_buffers: HashMap<usize, (SharedBuffer, usize)>,
     finished_fetches: Vec<(usize, bool)>,
 }
 
@@ -49,14 +47,7 @@ impl StripeFetcher {
             })?;
         let stripe_size = stripe_size_u64 as usize;
 
-        let fetch_buffers = (0..MAX_CONCURRENT_FETCHES)
-            .map(|_| {
-                Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
-                    stripe_size,
-                    alignment,
-                )))
-            })
-            .collect();
+        let buffer_pool = AlignedBufferPool::new(alignment, MAX_CONCURRENT_FETCHES, stripe_size);
         let source_sector_count = source_dev.sector_count();
         let target_sector_count = target_dev.sector_count();
         if target_sector_count < source_sector_count {
@@ -71,11 +62,10 @@ impl StripeFetcher {
             target_sector_count,
             stripe_sector_count,
             fetch_queue: VecDeque::new(),
-            fetch_buffers,
+            buffer_pool,
             shared_metadata_state,
             stripe_states: HashMap::new(),
             allocated_buffers: HashMap::new(),
-            available_buffers: (0..MAX_CONCURRENT_FETCHES).collect(),
             finished_fetches: Vec::new(),
         })
     }
@@ -113,13 +103,11 @@ impl StripeFetcher {
     }
 
     fn start_fetches(&mut self) {
-        while !self.fetch_queue.is_empty() && !self.available_buffers.is_empty() {
+        while !self.fetch_queue.is_empty() && self.buffer_pool.has_available() {
             let stripe_id = self.fetch_queue.pop_front().unwrap();
-            let buffer_idx = self.available_buffers.pop_front().unwrap();
-            let fetch_buffer = &mut self.fetch_buffers[buffer_idx];
-            self.allocated_buffers.insert(stripe_id, buffer_idx);
-
-            let buf = fetch_buffer.clone();
+            let (buf, buffer_idx) = self.buffer_pool.get_buffer().unwrap();
+            self.allocated_buffers
+                .insert(stripe_id, (buf.clone(), buffer_idx));
             let stripe_sector_offset = stripe_id as u64 * self.stripe_sector_count;
             if stripe_sector_offset >= self.source_sector_count {
                 error!("Stripe {stripe_id} beyond end of source");
@@ -158,15 +146,15 @@ impl StripeFetcher {
         // Handle completions from the source channel. Did any fetches from the
         // source complete? Start writing the successful ones to the target.
         for (stripe_id, success) in self.fetch_source_channel.poll() {
-            let buffer_idx = match self.allocated_buffers.get(&stripe_id) {
-                Some(idx) => *idx,
+            let buf = match self.allocated_buffers.get(&stripe_id) {
+                Some((buf, _)) => buf.clone(),
                 None => {
                     error!("Received completion for unknown stripe {stripe_id}");
                     continue;
                 }
             };
 
-            if !success || !self.start_write(buffer_idx, stripe_id) {
+            if !success || !self.start_write(buf, stripe_id) {
                 self.fetch_completed(stripe_id, false);
             }
         }
@@ -199,10 +187,7 @@ impl StripeFetcher {
         }
     }
 
-    fn start_write(&mut self, buffer_idx: usize, stripe_id: usize) -> bool {
-        let fetch_buffer = &mut self.fetch_buffers[buffer_idx];
-        let buf = fetch_buffer.clone();
-
+    fn start_write(&mut self, buf: SharedBuffer, stripe_id: usize) -> bool {
         let stripe_sector_offset = stripe_id as u64 * self.stripe_sector_count;
         let stripe_sector_count = self
             .stripe_sector_count
@@ -238,8 +223,8 @@ impl StripeFetcher {
         debug!("Fetch completed for stripe {stripe_id}, success={success}");
 
         self.stripe_states.remove(&stripe_id);
-        if let Some(buffer_idx) = self.allocated_buffers.remove(&stripe_id) {
-            self.available_buffers.push_back(buffer_idx);
+        if let Some((_, buffer_idx)) = self.allocated_buffers.remove(&stripe_id) {
+            self.buffer_pool.return_buffer(buffer_idx);
         } else {
             error!("No buffer allocated for stripe {stripe_id} on completion");
         }

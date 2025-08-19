@@ -70,7 +70,7 @@ impl LazyIoChannel {
                 && !self.stripe_fetches_requested.contains(&stripe_id)
             {
                 self.bgworker_ch
-                    .send(BgWorkerRequest::Fetch(stripe_id))
+                    .send(BgWorkerRequest::Fetch { stripe_id })
                     .map_err(|e| {
                         error!("Failed to send fetch request for stripe {stripe_id}: {e}");
                         VhostUserBlockError::ChannelError

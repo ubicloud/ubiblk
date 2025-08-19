@@ -1,5 +1,9 @@
-name: Release
+name: CI
 on:
+  push:
+    branches:
+      - main
+  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -10,11 +14,7 @@ jobs:
       matrix:
         include:
           - runner: ubicloud-standard-4
-            target: x86_64-unknown-linux-musl
-            arch: x64
           - runner: ubicloud-standard-4-arm
-            target: aarch64-unknown-linux-musl
-            arch: arm64
 
     steps:
       - name: Checkout source
@@ -41,25 +41,23 @@ jobs:
             override: true
             components: rustfmt, clippy
 
-      - name: Add musl target
-        run: rustup target add ${{ matrix.target }}
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      - name: Run tests
-        run: cargo test --target=${{ matrix.target }}
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-      - name: Build project
-        run: |
-          cargo build --release --target=${{ matrix.target }}
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
 
-      - name: Package
-        run: |
-          cd target/${{ matrix.target }}/release
-          tar -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend init-metadata
-          cd -
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
 
-      - uses: ncipollo/release-action@v1
-        if: github.ref_type == 'tag'
-        with:
-          artifacts: "${{ github.workspace }}/target/${{ matrix.target }}/release/vhost-backend-${{ matrix.arch }}.tar.gz"
-          body: "Release ${{ github.ref_name }}"
-          allowUpdates: true
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
+
+      - name: Run tests with coverage
+        run: cargo llvm-cov --fail-under-lines 78 --ignore-filename-regex src/bin/
+
+      - name: Run tests without isa-l_crypto
+        run: cargo test --features disable-isal-crypto

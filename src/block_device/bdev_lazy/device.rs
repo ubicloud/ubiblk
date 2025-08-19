@@ -9,7 +9,7 @@ use super::metadata::SharedMetadataState;
 use crate::{block_device::SharedBuffer, Result, VhostUserBlockError};
 use log::error;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestType {
     In,
     Out,
@@ -17,7 +17,7 @@ enum RequestType {
 
 struct RWRequest {
     id: usize,
-    type_: RequestType,
+    kind: RequestType,
     sector_offset: u64,
     sector_count: u32,
     buf: SharedBuffer,
@@ -33,6 +33,7 @@ struct LazyIoChannel {
     bgworker_ch: Sender<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     stripe_fetches_requested: HashSet<usize>,
+    track_written: bool,
 }
 
 impl LazyIoChannel {
@@ -41,6 +42,7 @@ impl LazyIoChannel {
         image: Option<Box<dyn IoChannel>>,
         bgworker_ch: Sender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
+        track_written: bool,
     ) -> Self {
         LazyIoChannel {
             base,
@@ -50,6 +52,7 @@ impl LazyIoChannel {
             bgworker_ch,
             metadata_state,
             stripe_fetches_requested: HashSet::new(),
+            track_written,
         }
     }
 }
@@ -58,6 +61,15 @@ impl LazyIoChannel {
     fn request_stripes_fetched(&self, request: &RWRequest) -> bool {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
             if !self.metadata_state.stripe_fetched(stripe_id) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn request_stripes_written(&self, request: &RWRequest) -> bool {
+        for stripe_id in request.stripe_id_first..=request.stripe_id_last {
+            if !self.metadata_state.stripe_written(stripe_id) {
                 return false;
             }
         }
@@ -81,11 +93,32 @@ impl LazyIoChannel {
         Ok(())
     }
 
+    fn start_stripe_set_written(&mut self, request: &RWRequest) -> Result<()> {
+        for stripe_id in request.stripe_id_first..=request.stripe_id_last {
+            if !self.metadata_state.stripe_written(stripe_id) {
+                self.bgworker_ch
+                    .send(BgWorkerRequest::SetWritten { stripe_id })
+                    .map_err(|e| {
+                        error!("Failed to send set written request for stripe {stripe_id}: {e}");
+                        VhostUserBlockError::ChannelError
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
     fn process_queued_rw_requests(&mut self) {
         let mut added_requests = Vec::new();
 
         while let Some(front) = self.queued_rw_requests.front() {
             if !self.request_stripes_fetched(front) {
+                break;
+            }
+
+            if self.track_written
+                && front.kind == RequestType::Out
+                && !self.request_stripes_written(front)
+            {
                 break;
             }
 
@@ -95,7 +128,7 @@ impl LazyIoChannel {
 
             let request = self.queued_rw_requests.pop_front().expect("front exists");
             let sector = request.sector_offset;
-            match request.type_ {
+            match request.kind {
                 RequestType::In => {
                     self.base.add_read(
                         sector,
@@ -136,7 +169,7 @@ impl IoChannel for LazyIoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let request = RWRequest {
             id,
-            type_: RequestType::In,
+            kind: RequestType::In,
             sector_offset,
             sector_count,
             buf: buf.clone(),
@@ -165,7 +198,7 @@ impl IoChannel for LazyIoChannel {
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let request = RWRequest {
             id,
-            type_: RequestType::Out,
+            kind: RequestType::Out,
             sector_offset,
             sector_count,
             buf: buf.clone(),
@@ -175,19 +208,36 @@ impl IoChannel for LazyIoChannel {
                 .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
         };
 
-        let fetched = self.request_stripes_fetched(&request);
-        if fetched {
+        let can_start = self.request_stripes_fetched(&request)
+            && (!self.track_written || self.request_stripes_written(&request));
+
+        if can_start {
             self.base
                 .add_write(sector_offset, sector_count, buf.clone(), id);
-        } else if let Err(e) = self.start_stripe_fetches(&request) {
+            return;
+        }
+
+        if let Err(e) = self.start_stripe_fetches(&request) {
             error!(
                 "Failed to send fetch request for stripe range {}-{}: {}",
                 request.stripe_id_first, request.stripe_id_last, e
             );
             self.finished_requests.push((id, false));
-        } else {
-            self.queued_rw_requests.push_back(request);
+            return;
         }
+
+        if self.track_written {
+            if let Err(e) = self.start_stripe_set_written(&request) {
+                error!(
+                    "Failed to send set written request for stripe range {}-{}: {}",
+                    request.stripe_id_first, request.stripe_id_last, e
+                );
+                self.finished_requests.push((id, false));
+                return;
+            }
+        }
+
+        self.queued_rw_requests.push_back(request);
     }
 
     fn add_flush(&mut self, id: usize) {
@@ -224,7 +274,6 @@ pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     image: Option<Box<dyn BlockDevice>>,
     bgworker: SharedBgWorker,
-    #[allow(dead_code)]
     track_written: bool,
 }
 
@@ -265,6 +314,7 @@ impl BlockDevice for LazyBlockDevice {
             image_channel,
             bgworker_ch,
             bgworker.shared_state(),
+            self.track_written,
         )))
     }
 

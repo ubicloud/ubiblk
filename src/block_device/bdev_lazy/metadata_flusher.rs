@@ -95,7 +95,6 @@ impl MetadataFlusher {
         });
     }
 
-    #[allow(dead_code)]
     pub fn set_stripe_written(&mut self, stripe_id: usize) {
         self.queued_requests.push_back(MetadataFlusherRequest {
             stripe_id,
@@ -163,7 +162,7 @@ impl MetadataFlusher {
             let (buf, index) = self.buffer_pool.get_buffer().unwrap();
             self.metadata.stripe_headers[req.stripe_id] |=
                 if req.kind == MetadataFlusherRequestKind::SetFetched {
-                    0b11
+                    0b01
                 } else {
                     0b10
                 };
@@ -232,7 +231,7 @@ mod tests {
 
         for stripe_id in 5..=6 {
             assert!(shared_state.stripe_fetched(stripe_id));
-            assert!(shared_state.stripe_written(stripe_id));
+            assert!(!shared_state.stripe_written(stripe_id));
         }
 
         metadata_flusher.set_stripe_written(7);

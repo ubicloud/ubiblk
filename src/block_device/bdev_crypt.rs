@@ -178,11 +178,13 @@ impl IoChannel for CryptIoChannel {
         for (id, result) in self.base.poll() {
             if id < self.read_requests.len() {
                 if let Some(req) = self.read_requests[id].take() {
-                    self.decrypt(
-                        req.buf.borrow_mut().as_mut_slice(),
-                        req.sector_offset,
-                        req.sector_count as u64,
-                    );
+                    if result {
+                        self.decrypt(
+                            req.buf.borrow_mut().as_mut_slice(),
+                            req.sector_offset,
+                            req.sector_count as u64,
+                        );
+                    }
                     results.push((id, result));
                     continue;
                 }

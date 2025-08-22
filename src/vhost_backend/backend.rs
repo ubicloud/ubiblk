@@ -82,7 +82,7 @@ impl UbiBlkBackend {
     ) -> Result<Self> {
         Self::validate_options(options)?;
 
-        let writeback = if options.sync_io { 0 } else { 1 };
+        let writeback = if options.write_through { 0 } else { 1 };
 
         let nsectors = block_device.sector_count();
         let virtio_config = VirtioBlockConfig {
@@ -303,8 +303,8 @@ fn build_block_device(
         PathBuf::from(&path),
         options.queue_size,
         false,
-        options.direct_io,
-        options.sync_io,
+        true,
+        options.write_through,
     )
     .map_err(|e| {
         error!("Failed to create block device at {path}: {e:?}");
@@ -325,11 +325,8 @@ pub fn start_block_backend(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
-    let mut alignment = BUFFER_ALIGNMENT;
-    if options.direct_io {
-        let stat = statfs(Path::new(&options.path))?;
-        alignment = std::cmp::max(alignment, stat.block_size() as usize);
-    }
+    let stat = statfs(Path::new(&options.path))?;
+    let alignment = std::cmp::max(BUFFER_ALIGNMENT, stat.block_size() as usize);
 
     let base_block_device = build_block_device(&options.path, options, kek.clone())?;
 
@@ -345,8 +342,8 @@ pub fn start_block_backend(
             PathBuf::from(path),
             64,
             readonly,
-            options.direct_io,
-            options.sync_io,
+            true,
+            options.write_through,
         )?;
         let bgworker = BgWorker::new(&*image_bdev, &*base_block_device, &*metadata_dev, alignment)?;
         let bgworker = Arc::new(Mutex::new(bgworker));
@@ -490,8 +487,8 @@ pub fn init_metadata(
             PathBuf::from(image_path),
             64,
             readonly,
-            config.direct_io,
-            config.sync_io,
+            true,
+            config.write_through,
         )?;
         image_bdev.sector_count().div_ceil(stripe_sector_count) as usize
     } else {

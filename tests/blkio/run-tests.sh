@@ -37,7 +37,6 @@ seg_size_max: 4096
 seg_count_max: 1
 poll_queue_timeout_us: 500
 device_id: "vm123456"
-direct_io: true
 encryption_key:
 - $key1
 - $key2

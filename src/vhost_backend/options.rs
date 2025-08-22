@@ -85,11 +85,7 @@ fn default_track_written() -> bool {
     false
 }
 
-fn default_direct_io() -> bool {
-    true
-}
-
-fn default_sync_io() -> bool {
+fn default_write_through() -> bool {
     false
 }
 
@@ -145,11 +141,8 @@ pub struct Options {
     #[serde(default = "default_track_written")]
     pub track_written: bool,
 
-    #[serde(default = "default_direct_io")]
-    pub direct_io: bool,
-
-    #[serde(default = "default_sync_io")]
-    pub sync_io: bool,
+    #[serde(default = "default_write_through")]
+    pub write_through: bool,
 
     #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
@@ -247,8 +240,7 @@ mod tests {
         let options: Options = from_str(yaml).unwrap();
         assert!(!options.copy_on_read);
         assert!(!options.track_written);
-        assert!(options.direct_io);
-        assert!(!options.sync_io);
+        assert!(!options.write_through);
         assert_eq!(options.device_id, "ubiblk".to_string());
     }
 
@@ -271,25 +263,14 @@ mod tests {
     }
 
     #[test]
-    fn test_direct_io_enabled() {
+    fn test_write_through_enabled() {
         let yaml = r#"
         path: "/path/to/image"
         socket: "/path/to/socket"
-        direct_io: true
+        write_through: true
         "#;
         let options: Options = from_str(yaml).unwrap();
-        assert!(options.direct_io);
-    }
-
-    #[test]
-    fn test_sync_enabled() {
-        let yaml = r#"
-        path: "/path/to/image"
-        socket: "/path/to/socket"
-        sync_io: true
-        "#;
-        let options: Options = from_str(yaml).unwrap();
-        assert!(options.sync_io);
+        assert!(options.write_through);
     }
 
     #[test]

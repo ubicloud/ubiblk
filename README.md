@@ -63,8 +63,7 @@ The configuration YAML must define:
 - `skip_sync`: (Optional) Skip flush handling for faster operation.
 - `copy_on_read`: (Optional) Copy stripes from the image only when accessed.
 - `track_written`: (Optional) Track stripes that have been written.
-- `direct_io`: (Optional) Use direct I/O (O_DIRECT) when accessing files. When enabled, request buffers are aligned to the larger of 4096 bytes or the host filesystem block size.
-- `sync_io`: (Optional) Open files with O_SYNC.
+- `write_through`: (Optional) Enable the write-through mode.
 - `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
 - `io_debug_path`: (Optional) Path for I/O debug log.
 - `device_id`: (Optional) Identifier returned to the guest for GET_ID.
@@ -95,8 +94,7 @@ io_debug_path: "/tmp/io_debug.log"       # Optional: path for I/O debug log
 skip_sync: false                         # Optional: skip flush handling
 copy_on_read: false                      # Optional: copy stripes on first read
 track_written: false                     # Optional: track written stripes
-direct_io: true                          # Optional: use O_DIRECT
-sync_io: false                           # Optional: use O_SYNC
+write_through: false                     # Optional: enable write-through mode
 device_id: "ubiblk"                      # Optional: device identifier
 encryption_key:                          # Optional: AES‐XTS keys (base64 encoded)
   - "x74Yhe/ovgxY4BrBaM6Wm/9firf9k/N+ayvGsskBo+hjQtrL+nslCDC5oR/HpSDL"

@@ -54,7 +54,7 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend init-metadata
+          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend init-metadata
           cd -
 
       - uses: ncipollo/release-action@v1

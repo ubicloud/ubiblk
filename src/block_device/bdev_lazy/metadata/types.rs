@@ -4,7 +4,7 @@ pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
 
 #[repr(C)]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct UbiMetadata {
     pub magic: [u8; UBI_MAGIC_SIZE],
 
@@ -19,6 +19,18 @@ pub struct UbiMetadata {
     // bit 2: no source data
     // bits 3-7: reserved
     pub stripe_headers: Vec<u8>,
+}
+
+impl std::fmt::Debug for UbiMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UbiMetadata")
+            .field("magic", &String::from_utf8_lossy(&self.magic))
+            .field("version_major", &u16::from_le_bytes(self.version_major))
+            .field("version_minor", &u16::from_le_bytes(self.version_minor))
+            .field("stripe_sector_count_shift", &self.stripe_sector_count_shift)
+            .field("stripe_headers_len", &self.stripe_headers.len())
+            .finish()
+    }
 }
 
 impl UbiMetadata {

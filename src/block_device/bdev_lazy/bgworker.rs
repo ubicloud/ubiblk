@@ -127,7 +127,9 @@ unsafe impl Sync for BgWorker {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_device::{bdev_test::TestBlockDevice, init_metadata, UbiMetadata};
+    use crate::block_device::{
+        bdev_test::TestBlockDevice, init_metadata, NullBlockDevice, UbiMetadata,
+    };
 
     fn build_bg_worker() -> BgWorker {
         let source_dev = TestBlockDevice::new(1024 * 1024);
@@ -148,5 +150,20 @@ mod tests {
         let sender = bg_worker.req_sender();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
         bg_worker.run();
+    }
+
+    #[test]
+    fn bg_worker_supports_null_source() {
+        let source_dev = NullBlockDevice::new();
+        let target_dev = TestBlockDevice::new(1024 * 1024);
+        let metadata_dev = TestBlockDevice::new(1024 * 1024);
+        init_metadata(
+            &UbiMetadata::new(11, 16, 0),
+            &mut metadata_dev.create_channel().unwrap(),
+        )
+        .expect("Failed to initialize metadata");
+
+        BgWorker::new(&*source_dev, &target_dev, &metadata_dev, 4096)
+            .expect("BgWorker should support null source device");
     }
 }

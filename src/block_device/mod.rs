@@ -21,6 +21,7 @@ pub trait BlockDevice {
 
 mod bdev_crypt;
 mod bdev_lazy;
+mod bdev_null;
 mod bdev_sync;
 mod bdev_uring;
 
@@ -32,5 +33,6 @@ pub use bdev_lazy::init_metadata;
 pub use bdev_lazy::LazyBlockDevice;
 pub use bdev_lazy::UbiMetadata;
 pub use bdev_lazy::{BgWorker, BgWorkerRequest, SharedBgWorker};
+pub use bdev_null::NullBlockDevice;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;

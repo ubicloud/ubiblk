@@ -29,7 +29,9 @@ impl IoChannel for NullIoChannel {
     fn add_read(&mut self, _sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let mut buf = buf.borrow_mut();
         let len = (sector_count as usize).saturating_mul(SECTOR_SIZE);
-        buf.as_mut_slice()[..len].fill(0);
+        let buf_slice = buf.as_mut_slice();
+        let fill_len = std::cmp::min(buf_slice.len(), len);
+        buf_slice[..fill_len].fill(0);
         self.complete_success(id);
     }
 

@@ -328,47 +328,58 @@ pub fn start_block_backend(
     let stat = statfs(Path::new(&options.path))?;
     let alignment = std::cmp::max(BUFFER_ALIGNMENT, stat.block_size() as usize);
 
+    if options.image_path.is_some() && options.metadata_path.is_none() {
+        return Err(Box::new(VhostUserBlockError::InvalidParameter {
+            description: "metadata_path is required when image_path is provided".to_string(),
+        }));
+    }
+
     let base_block_device = build_block_device(&options.path, options, kek.clone())?;
 
-    let (block_device, bgworker, bgworker_ch) = if let Some(ref path) = options.image_path {
-        let metadata_path = options.metadata_path.as_ref().ok_or_else(|| {
-            Box::new(VhostUserBlockError::InvalidParameter {
-                description: "metadata_path is required when image_path is provided".to_string(),
-            })
-        })?;
-        let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
-        let readonly = true;
-        let image_bdev = UringBlockDevice::new(
-            PathBuf::from(path),
-            64,
-            readonly,
-            true,
-            options.write_through,
-        )?;
-        let bgworker = BgWorker::new(&*image_bdev, &*base_block_device, &*metadata_dev, alignment)?;
-        let bgworker = Arc::new(Mutex::new(bgworker));
-        let bgworker_ch = match bgworker.lock() {
-            Ok(b) => Some(b.req_sender()),
-            Err(e) => {
-                error!("Failed to lock bgworker mutex: {e}");
+    let (block_device, bgworker, bgworker_ch) =
+        if let Some(metadata_path) = options.metadata_path.as_ref() {
+            let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
+            let source_bdev: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
+                let readonly = true;
+                UringBlockDevice::new(
+                    PathBuf::from(path),
+                    64,
+                    readonly,
+                    true,
+                    options.write_through,
+                )?
+            } else {
+                block_device::NullBlockDevice::new()
+            };
+            let bgworker = BgWorker::new(
+                &*source_bdev,
+                &*base_block_device,
+                &*metadata_dev,
+                alignment,
+            )?;
+            let bgworker = Arc::new(Mutex::new(bgworker));
+            let bgworker_ch = match bgworker.lock() {
+                Ok(b) => Some(b.req_sender()),
+                Err(e) => {
+                    error!("Failed to lock bgworker mutex: {e}");
+                    None
+                }
+            };
+            let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
                 None
-            }
-        };
-        let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
-            None
+            } else {
+                Some(source_bdev)
+            };
+            let block_device: Box<dyn BlockDevice> = block_device::LazyBlockDevice::new(
+                base_block_device,
+                maybe_image_bdev,
+                bgworker.clone(),
+                options.track_written,
+            )?;
+            (block_device, Some(bgworker), bgworker_ch)
         } else {
-            Some(image_bdev)
+            (base_block_device, None, None)
         };
-        let block_device: Box<dyn BlockDevice> = block_device::LazyBlockDevice::new(
-            base_block_device,
-            maybe_image_bdev,
-            bgworker.clone(),
-            options.track_written,
-        )?;
-        (block_device, Some(bgworker), bgworker_ch)
-    } else {
-        (base_block_device, None, None)
-    };
 
     let backend = Arc::new(
         UbiBlkBackend::new(options, mem.clone(), block_device, alignment).map_err(|e| {

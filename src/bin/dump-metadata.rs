@@ -191,11 +191,8 @@ fn main() {
         .collect();
 
     println!("data file: {} ({} bytes)", options.path, data_size);
-    println!(
-        "base image file: {} ({} bytes)",
-        image_path_display, image_size
-    );
-    println!("stripe size: {} bytes", stripe_size);
+    println!("base image file: {image_path_display} ({image_size} bytes)");
+    println!("stripe size: {stripe_size} bytes");
     println!("fetched stripes: {}", format_list(&fetched));
     println!("written stripes: {}", format_list(&written));
 }

@@ -45,10 +45,7 @@ impl AlignedBufferPool {
         );
 
         if !self.in_use[index] {
-            panic!(
-                "Buffer index {} was returned to the pool but is not currently in use",
-                index
-            );
+            panic!("Buffer index {index} was returned to the pool but is not currently in use");
         }
 
         self.in_use[index] = false;

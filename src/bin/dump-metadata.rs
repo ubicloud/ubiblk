@@ -44,10 +44,39 @@ fn build_block_device(
 }
 
 fn format_list(list: &[usize]) -> String {
-    list.iter()
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
+    if list.is_empty() {
+        return String::new();
+    }
+
+    let mut formatted = Vec::new();
+    let mut start = list[0];
+    let mut prev = list[0];
+
+    for &value in &list[1..] {
+        if value == prev + 1 {
+            prev = value;
+            continue;
+        }
+
+        push_range(&mut formatted, start, prev);
+        start = value;
+        prev = value;
+    }
+
+    push_range(&mut formatted, start, prev);
+
+    formatted.join(", ")
+}
+
+fn push_range(output: &mut Vec<String>, start: usize, end: usize) {
+    match end - start {
+        0 => output.push(start.to_string()),
+        1 => {
+            output.push(start.to_string());
+            output.push(end.to_string());
+        }
+        _ => output.push(format!("{start}-{end}")),
+    }
 }
 
 fn main() {

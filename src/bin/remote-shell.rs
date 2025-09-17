@@ -1,9 +1,11 @@
 use std::collections::HashMap;
-use std::io::{self, BufRead, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::TcpStream;
 use std::num::TryFromIntError;
 
 use clap::Parser;
+use rustyline::error::ReadlineError;
+use rustyline::DefaultEditor;
 use ubiblk::block_device::UbiMetadata;
 use ubiblk::vhost_backend::SECTOR_SIZE;
 
@@ -34,25 +36,27 @@ fn main() -> io::Result<()> {
 
     let stripe_len_bytes = stripe_len_bytes(&metadata)?;
 
-    let stdin = io::stdin();
-    let mut stdin_lock = stdin.lock();
-    let mut stdout = io::stdout();
-    let mut line = String::new();
+    let mut rl = DefaultEditor::new().map_err(readline_err_to_io)?;
     let mut fetched_stripes: HashMap<u64, Vec<u8>> = HashMap::new();
 
     loop {
-        write!(stdout, "> ")?;
-        stdout.flush()?;
-
-        line.clear();
-        let bytes = stdin_lock.read_line(&mut line)?;
-        if bytes == 0 {
-            break;
-        }
+        let line = match rl.readline("> ") {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) => {
+                println!("^C");
+                continue;
+            }
+            Err(ReadlineError::Eof) => break,
+            Err(err) => return Err(readline_err_to_io(err)),
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
+        }
+
+        if let Err(err) = rl.add_history_entry(trimmed) {
+            eprintln!("Failed to store command in history: {err}");
         }
 
         let mut parts = trimmed.split_whitespace();
@@ -138,6 +142,13 @@ fn print_help() {
     println!("      Fetch the stripe from the remote server and cache it locally.");
     println!("  dump_stripe <stripe_index> <offset> <length>");
     println!("      Dump hexadecimal data from a previously fetched stripe.");
+}
+
+fn readline_err_to_io(err: ReadlineError) -> io::Error {
+    match err {
+        ReadlineError::Io(io_err) => io_err,
+        other => io::Error::other(other),
+    }
 }
 
 fn parse_usize(input: Option<&str>) -> Result<usize, String> {

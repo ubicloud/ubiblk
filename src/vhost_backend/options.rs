@@ -102,6 +102,7 @@ where
 pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
+    pub remote_image_address: Option<String>,
     pub metadata_path: Option<String>,
     pub io_debug_path: Option<String>,
     pub status_path: Option<String>,
@@ -283,5 +284,19 @@ mod tests {
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert_eq!(options.cpus, Some(vec![1, 2]));
+    }
+
+    #[test]
+    fn test_remote_image_address() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        remote_image_address: "127.0.0.1:12345"
+        "#;
+        let options: Options = from_str(yaml).unwrap();
+        assert_eq!(
+            options.remote_image_address,
+            Some("127.0.0.1:12345".to_string())
+        );
     }
 }

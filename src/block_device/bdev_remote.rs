@@ -115,7 +115,7 @@ impl BlockDevice for RemoteBlockDevice {
     fn sector_count(&self) -> u64 {
         self.sector_count
     }
-    
+
     fn clone(&self) -> Box<dyn BlockDevice> {
         Box::new(Self {
             server_addr: self.server_addr.clone(),

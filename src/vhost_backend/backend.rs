@@ -328,9 +328,13 @@ pub fn start_block_backend(
     let stat = statfs(Path::new(&options.path))?;
     let alignment = std::cmp::max(BUFFER_ALIGNMENT, stat.block_size() as usize);
 
-    if options.image_path.is_some() && options.metadata_path.is_none() {
+    if (options.image_path.is_some() || options.remote_image_address.is_some())
+        && options.metadata_path.is_none()
+    {
         return Err(Box::new(VhostUserBlockError::InvalidParameter {
-            description: "metadata_path is required when image_path is provided".to_string(),
+            description:
+                "metadata_path is required when image_path or remote_image_address is provided"
+                    .to_string(),
         }));
     }
 
@@ -339,18 +343,21 @@ pub fn start_block_backend(
     let (block_device, bgworker, bgworker_ch) =
         if let Some(metadata_path) = options.metadata_path.as_ref() {
             let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
-            let source_bdev: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
-                let readonly = true;
-                UringBlockDevice::new(
-                    PathBuf::from(path),
-                    64,
-                    readonly,
-                    true,
-                    options.write_through,
-                )?
-            } else {
-                block_device::NullBlockDevice::new()
-            };
+            let source_bdev: Box<dyn BlockDevice> =
+                if let Some(ref address) = options.remote_image_address {
+                    block_device::RemoteBlockDevice::new(address.clone())?
+                } else if let Some(ref path) = options.image_path {
+                    let readonly = true;
+                    UringBlockDevice::new(
+                        PathBuf::from(path),
+                        64,
+                        readonly,
+                        true,
+                        options.write_through,
+                    )?
+                } else {
+                    block_device::NullBlockDevice::new()
+                };
             let bgworker = BgWorker::new(
                 &*source_bdev,
                 &*base_block_device,

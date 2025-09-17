@@ -42,6 +42,7 @@ mod tests {
         Options {
             path: path.to_string(),
             image_path: None,
+            remote_image_address: None,
             metadata_path: None,
             io_debug_path: None,
             socket: "sock".to_string(),

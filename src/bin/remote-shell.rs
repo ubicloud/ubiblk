@@ -60,6 +60,9 @@ fn main() -> io::Result<()> {
 
         match cmd {
             "exit" | "quit" => break,
+            "help" => {
+                print_help();
+            }
             "stripe_header" => match parse_usize(parts.next()) {
                 Ok(stripe_idx) => {
                     if stripe_idx >= metadata.stripe_headers.len() {
@@ -115,11 +118,26 @@ fn main() -> io::Result<()> {
             },
             other => {
                 println!("UNKNOWN_COMMAND: {other}");
+                println!("Type 'help' to see the list of available commands.");
             }
         }
     }
 
     Ok(())
+}
+
+fn print_help() {
+    println!("Available commands:");
+    println!("  help");
+    println!("      Show this message.");
+    println!("  exit | quit");
+    println!("      Exit the shell.");
+    println!("  stripe_header <stripe_index>");
+    println!("      Print the raw header byte and status for the given stripe.");
+    println!("  fetch_stripe <stripe_index>");
+    println!("      Fetch the stripe from the remote server and cache it locally.");
+    println!("  dump_stripe <stripe_index> <offset> <length>");
+    println!("      Dump hexadecimal data from a previously fetched stripe.");
 }
 
 fn parse_usize(input: Option<&str>) -> Result<usize, String> {

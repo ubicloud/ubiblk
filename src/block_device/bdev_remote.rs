@@ -85,8 +85,7 @@ impl RemoteBlockDevice {
         if stripe_sector_count > max_stripe_sectors {
             return Err(VhostUserBlockError::MetadataError {
                 description: format!(
-                    "stripe size {} sectors is too large for host architecture",
-                    stripe_sector_count
+                    "stripe size {stripe_sector_count} sectors is too large for host architecture"
                 ),
             });
         }

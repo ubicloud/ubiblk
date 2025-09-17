@@ -121,8 +121,10 @@ fn handle_client(
     image: Arc<Mutex<File>>,
     stripe_len_bytes: usize,
 ) -> Result<(), Box<dyn Error>> {
+    info!("sending metadata to client {peer} ...");
     stream.write_all(&(metadata_bytes.len() as u32).to_le_bytes())?;
     stream.write_all(&metadata_bytes)?;
+    info!("sent metadata to client {peer}");
 
     loop {
         let mut request = [0u8; 9];
@@ -140,17 +142,21 @@ fn handle_client(
                 let mut stripe_bytes = [0u8; 8];
                 stripe_bytes.copy_from_slice(&request[1..]);
                 let stripe_id = u64::from_le_bytes(stripe_bytes);
+                info!("client {peer} requests stripe {stripe_id}");
                 if stripe_id > usize::MAX as u64 {
+                    error!("client {peer} requests invalid stripe {stripe_id}");
                     stream.write_all(&[STATUS_INVALID_STRIPE])?;
                     continue;
                 }
                 let stripe_idx = stripe_id as usize;
                 if stripe_idx >= metadata.stripe_headers.len() {
+                    error!("client {peer} requests out-of-bounds stripe {stripe_id}");
                     stream.write_all(&[STATUS_INVALID_STRIPE])?;
                     continue;
                 }
                 let header = metadata.stripe_headers[stripe_idx];
                 if header & STRIPE_WRITTEN_MASK == 0 {
+                    info!("client {peer} requests unwritten stripe {stripe_id}");
                     stream.write_all(&[STATUS_UNWRITTEN])?;
                     continue;
                 }
@@ -159,6 +165,7 @@ fn handle_client(
                     Ok(data) => {
                         stream.write_all(&[STATUS_OK])?;
                         stream.write_all(&data)?;
+                        info!("served stripe {stripe_id} to client {peer}");
                     }
                     Err(err) => {
                         error!("client {peer} failed to read stripe {stripe_idx}: {err}");

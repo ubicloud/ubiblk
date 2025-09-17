@@ -106,6 +106,31 @@ fn main() -> io::Result<()> {
                 parse_usize(parts.next()),
             ) {
                 (Ok(stripe_idx), Ok(offset), Ok(len)) => {
+                    let stripe_idx_usize = match usize::try_from(stripe_idx) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            println!("INVALID_STRIPE");
+                            continue;
+                        }
+                    };
+
+                    if stripe_idx_usize >= metadata.stripe_headers.len() {
+                        println!("INVALID_STRIPE");
+                        continue;
+                    }
+
+                    let header = metadata.stripe_headers[stripe_idx_usize];
+                    if header & STRIPE_WRITTEN_MASK == 0 {
+                        if offset.saturating_add(len) > stripe_len_bytes {
+                            println!("INVALID_RANGE");
+                            continue;
+                        }
+                        let zeros = vec![0u8; len];
+                        let hex = hex::encode(zeros);
+                        println!("{hex}");
+                        continue;
+                    }
+
                     if let Some(data) = fetched_stripes.get(&stripe_idx) {
                         if offset.saturating_add(len) > data.len() {
                             println!("INVALID_RANGE");

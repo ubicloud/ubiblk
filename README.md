@@ -154,6 +154,17 @@ init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \
 
 ## Developer Tools
 
+#### dump-metadata
+
+`dump-metadata` inspects the metadata file referenced by a backend
+configuration and prints a summary of fetched and written stripes. Provide the
+same configuration file that the backend uses, plus an optional KEK file when
+working with encrypted metadata.
+
+```bash
+dump-metadata --config config.yaml [--kek kek.yaml]
+```
+
 #### replay-log
 
 `replay-log` replays READ and WRITE operations stored in an I/O debug log onto a

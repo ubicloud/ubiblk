@@ -282,7 +282,7 @@ impl UbiBlkBackendThread {
 
     fn process_read(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
         let len = self.request_len(request);
-        if len % SECTOR_SIZE != 0 {
+        if !len.is_multiple_of(SECTOR_SIZE) {
             error!("read request length is not a multiple of sector size: {len}");
             self.complete_io(
                 vring,
@@ -306,7 +306,7 @@ impl UbiBlkBackendThread {
 
     fn process_write(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
         let len = self.request_len(request);
-        if len % SECTOR_SIZE != 0 {
+        if !len.is_multiple_of(SECTOR_SIZE) {
             error!("write request length is not a multiple of sector size: {len}");
             self.complete_io(
                 vring,

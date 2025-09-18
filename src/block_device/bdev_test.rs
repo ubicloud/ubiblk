@@ -76,7 +76,7 @@ pub struct TestBlockDevice {
 
 impl TestBlockDevice {
     pub fn new(size: u64) -> Self {
-        if size % SECTOR_SIZE as u64 != 0 {
+        if !size.is_multiple_of(SECTOR_SIZE as u64) {
             panic!("Size must be a multiple of SECTOR_SIZE");
         }
         let sector_count = size / SECTOR_SIZE as u64;

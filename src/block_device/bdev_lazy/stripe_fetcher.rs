@@ -37,18 +37,18 @@ struct FetchBuffer {
 pub struct StripeFetcher {
     fetch_source_channel: Box<dyn IoChannel>,
     fetch_target_channel: Box<dyn IoChannel>,
-    source_sector_count: u64,
-    target_sector_count: u64,
+    pub source_sector_count: u64,
+    pub target_sector_count: u64,
     metadata_manager: Box<StripeMetadataManager>,
-    fetch_queue: VecDeque<usize>,
+    pub fetch_queue: VecDeque<usize>,
     req_mpsc_pairs: Vec<(
         Sender<StripeFetcherResponse>,
         Receiver<StripeFetcherRequest>,
     )>,
     fetch_buffers: Vec<FetchBuffer>,
-    stripes_fetched: usize,
-    pending_flush_requests: Vec<(Sender<StripeFetcherResponse>, usize)>,
-    inprogress_flush_requests: Vec<(Sender<StripeFetcherResponse>, usize)>,
+    pub stripes_fetched: usize,
+    pub pending_flush_requests: Vec<(Sender<StripeFetcherResponse>, usize)>,
+    pub inprogress_flush_requests: Vec<(Sender<StripeFetcherResponse>, usize)>,
     killfd: EventFd,
 }
 

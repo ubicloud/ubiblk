@@ -174,6 +174,18 @@ disk image. The log is produced by the backend when `io_debug_path` is set.
 replay-log --log io_debug.log --disk disk.img
 ```
 
+#### xts
+
+`xts` encodes or decodes AES-XTS encrypted data files using the same
+configuration format as the backend. The tool reads keys from the configuration
+file (and optional KEK file) and processes sectors from an input file into an
+output file.
+
+```bash
+xts --config config.yaml [--kek kek.yaml] [--start <SECTOR>] [--len <SECTORS>] \
+    [--action encode|decode] <INPUT> <OUTPUT>
+```
+
 ## License
 
 This project is licensed under the GNU Affero General Public License v3.0 or

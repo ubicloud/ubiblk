@@ -13,6 +13,7 @@ enum FetchState {
     Queued,
     Fetching,
     Flushing,
+    Fetched,
 }
 
 pub struct StripeFetcher {
@@ -84,7 +85,7 @@ impl StripeFetcher {
         }
 
         if self.stripe_states.contains_key(&stripe_id) {
-            debug!("Stripe {stripe_id} is already queued or fetching");
+            debug!("Stripe {stripe_id} has already been requested");
             return;
         }
 
@@ -222,7 +223,12 @@ impl StripeFetcher {
     fn fetch_completed(&mut self, stripe_id: usize, success: bool) {
         debug!("Fetch completed for stripe {stripe_id}, success={success}");
 
-        self.stripe_states.remove(&stripe_id);
+        if success {
+            self.stripe_states.insert(stripe_id, FetchState::Fetched);
+        } else {
+            self.stripe_states.remove(&stripe_id);
+        }
+
         if let Some((_, buffer_idx)) = self.allocated_buffers.remove(&stripe_id) {
             self.buffer_pool.return_buffer(buffer_idx);
         } else {
@@ -235,3 +241,102 @@ impl StripeFetcher {
 
 unsafe impl Send for StripeFetcher {}
 unsafe impl Sync for StripeFetcher {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::block_device::bdev_test::TestBlockDevice;
+
+    struct TestState {
+        source_dev: Box<TestBlockDevice>,
+        target_dev: Box<TestBlockDevice>,
+        fetcher: StripeFetcher,
+    }
+
+    fn prep() -> TestState {
+        let source_size: u64 = 1024 * 1024; // 1 MiB
+        let target_size: u64 = 2 * 1024 * 1024; // 2 MiB
+        let stripe_sector_count_shift = 3; // 8 sectors per stripe
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+        let source_stripe_count = source_size.div_ceil(stripe_sector_count * 512) as usize;
+        let target_stripe_count = target_size.div_ceil(stripe_sector_count * 512) as usize;
+
+        let source_dev = Box::new(TestBlockDevice::new(source_size));
+        let target_dev = Box::new(TestBlockDevice::new(target_size));
+
+        let metadata = UbiMetadata::new(
+            stripe_sector_count_shift,
+            target_stripe_count,
+            source_stripe_count,
+        );
+
+        let shared_metadata_state = SharedMetadataState::new(&metadata);
+
+        let fetcher = StripeFetcher::new(
+            &*source_dev,
+            &*target_dev,
+            stripe_sector_count,
+            shared_metadata_state.clone(),
+            512,
+        )
+        .unwrap();
+
+        TestState {
+            source_dev,
+            target_dev,
+            fetcher,
+        }
+    }
+
+    #[test]
+    fn test_basic_fetch() {
+        let mut state = prep();
+        state.fetcher.handle_fetch_request(0);
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        let finished = state.fetcher.take_finished_fetches();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0], (0, true));
+
+        let source_metrics = state.source_dev.metrics.read().unwrap();
+        assert_eq!(source_metrics.reads, 1);
+        assert_eq!(source_metrics.writes, 0);
+        assert_eq!(source_metrics.flushes, 0);
+
+        let target_metrics = state.target_dev.metrics.read().unwrap();
+        assert_eq!(target_metrics.reads, 0);
+        assert_eq!(target_metrics.writes, 1);
+        assert_eq!(target_metrics.flushes, 1);
+    }
+
+    #[test]
+    fn test_repeat_requests_ignored() {
+        let mut state = prep();
+        state.fetcher.handle_fetch_request(1);
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        let finished = state.fetcher.take_finished_fetches();
+        assert_eq!(finished.len(), 1);
+        assert_eq!(finished[0], (1, true));
+
+        state.fetcher.handle_fetch_request(1);
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        let finished = state.fetcher.take_finished_fetches();
+        assert_eq!(finished.len(), 0);
+
+        let source_metrics = state.source_dev.metrics.read().unwrap();
+        assert_eq!(source_metrics.reads, 1);
+        assert_eq!(source_metrics.writes, 0);
+        assert_eq!(source_metrics.flushes, 0);
+
+        let target_metrics = state.target_dev.metrics.read().unwrap();
+        assert_eq!(target_metrics.reads, 0);
+        assert_eq!(target_metrics.writes, 1);
+        assert_eq!(target_metrics.flushes, 1);
+    }
+}

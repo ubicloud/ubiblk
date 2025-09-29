@@ -2,11 +2,16 @@
 
 set -e
 
+export RUST_LOG="${RUST_LOG:-debug}"
+
 exit_code=0
 PROJECT_ROOT=$(pwd)
 # To find the vhost-backend and init-metadata binaries
 export PATH=$(pwd)/target/debug:$PATH
 cd target/tests/blkio
+
+LOG_FILE="vhost-backend.log"
+: > "$LOG_FILE"
 
 echo "Setting up disk..."
 # Always create/recreate these files
@@ -52,7 +57,7 @@ echo "Initializing metadata with stripe sector count shift: $STRIPE_SECTOR_COUNT
 init-metadata --config "$CONFIG_FILE" --stripe-sector-count-shift "$STRIPE_SECTOR_COUNT_SHIFT"
 
 echo "Starting vhost-backend in background..."
-vhost-backend --config "$CONFIG_FILE" &
+vhost-backend --config "$CONFIG_FILE" >"$LOG_FILE" 2>&1 &
 VHOST_PID=$!
 echo "vhost-backend started with PID: $VHOST_PID"
 

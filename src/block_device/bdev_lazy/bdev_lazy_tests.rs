@@ -120,6 +120,9 @@ mod tests {
         let env = setup_env(false, false, b"copy_on_read_data");
         let mut chan = env.lazy.create_channel().unwrap();
 
+        assert_eq!(env.target_metrics.read().unwrap().reads, 0);
+        assert_eq!(env.target_metrics.read().unwrap().writes, 0);
+
         let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
@@ -133,6 +136,9 @@ mod tests {
             &env.target_mem.read().unwrap()[0.."copy_on_read_data".len()],
             b"copy_on_read_data"
         );
+
+        assert_eq!(env.target_metrics.read().unwrap().reads, 1);
+        assert_eq!(env.target_metrics.read().unwrap().writes, 1);
 
         let write_data = b"queued_write";
         let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
@@ -161,6 +167,10 @@ mod tests {
         let env = setup_env(true, false, b"image_read");
         let mut chan = env.lazy.create_channel().unwrap();
 
+        assert_eq!(env.image_metrics.as_ref().unwrap().read().unwrap().reads, 0);
+        assert_eq!(env.target_metrics.read().unwrap().reads, 0);
+        assert_eq!(env.target_metrics.read().unwrap().writes, 0);
+
         let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
@@ -176,6 +186,7 @@ mod tests {
         );
         assert_eq!(env.image_metrics.as_ref().unwrap().read().unwrap().reads, 1);
         assert_eq!(env.target_metrics.read().unwrap().reads, 0);
+        assert_eq!(env.target_metrics.read().unwrap().writes, 0);
 
         let write_data = b"write_after_fetch";
         let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
@@ -195,6 +206,44 @@ mod tests {
         chan.submit().unwrap();
         let results = drive(&env.bgworker, &mut chan);
         assert_eq!(results, vec![(flush_id, true)]);
+    }
+
+    /// Verify that on multi-stripe reads, we fetch stripes regardless of
+    /// whether copy-on-read is enabled or not.
+    #[test]
+    fn test_copy_on_read_false_multistripe() {
+        let env = setup_env(true, false, b"image_read");
+        let mut chan = env.lazy.create_channel().unwrap();
+
+        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE * 4)));
+        chan.add_read(STRIPE_SECTORS - 2, 4, read_buf.clone(), 1);
+        chan.submit().unwrap();
+        let results = drive(&env.bgworker, &mut chan);
+        assert_eq!(results, vec![(1, true)]);
+
+        {
+            let image_metrics = env.image_metrics.as_ref().unwrap().read().unwrap();
+            let target_metrics = env.target_metrics.read().unwrap();
+            assert_eq!(image_metrics.reads, 2);
+            assert_eq!(image_metrics.writes, 0);
+            assert_eq!(target_metrics.reads, 1);
+            assert_eq!(target_metrics.writes, 2);
+        }
+
+        // 2nd read should be served from target device
+        chan.add_read(STRIPE_SECTORS - 2, 4, read_buf.clone(), 2);
+        chan.submit().unwrap();
+        let results = drive(&env.bgworker, &mut chan);
+        assert_eq!(results, vec![(2, true)]);
+
+        {
+            let image_metrics = env.image_metrics.as_ref().unwrap().read().unwrap();
+            let target_metrics = env.target_metrics.read().unwrap();
+            assert_eq!(image_metrics.reads, 2);
+            assert_eq!(image_metrics.writes, 0);
+            assert_eq!(target_metrics.reads, 2);
+            assert_eq!(target_metrics.writes, 2);
+        }
     }
 
     /// Verify that stripes are marked written when tracking is enabled.

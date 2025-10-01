@@ -182,9 +182,17 @@ impl IoChannel for LazyIoChannel {
         let fetched = self.request_stripes_fetched(&request);
         if fetched {
             self.base.add_read(sector_offset, sector_count, buf, id);
-        } else if let Some(image_channel) = &mut self.image {
-            image_channel.add_read(sector_offset, sector_count, buf, id);
-        } else if let Err(e) = self.start_stripe_fetches(&request) {
+            return;
+        }
+
+        if request.stripe_id_first == request.stripe_id_last {
+            if let Some(image_channel) = &mut self.image {
+                image_channel.add_read(sector_offset, sector_count, buf, id);
+                return;
+            }
+        }
+
+        if let Err(e) = self.start_stripe_fetches(&request) {
             error!(
                 "Failed to send fetch request for stripe range {}-{}: {}",
                 request.stripe_id_first, request.stripe_id_last, e

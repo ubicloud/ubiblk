@@ -177,6 +177,15 @@ impl RemoteIoChannel {
 }
 
 impl IoChannel for RemoteIoChannel {
+    fn stripe_has_data(&self, stripe_id: u64) -> bool {
+        let stripe_id = stripe_id as usize;
+        if stripe_id >= self.metadata.stripe_headers.len() {
+            return false;
+        }
+        let header = self.metadata.stripe_headers[stripe_id];
+        header & STRIPE_WRITTEN_MASK != 0
+    }
+
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         if self.stripe_sector_count == 0 {
             error!("Remote stripe size is zero");

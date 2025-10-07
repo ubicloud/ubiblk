@@ -25,6 +25,8 @@ pub enum VhostUserBlockError {
     InvalidParameter { description: String },
     #[error("Metadata error: {description}")]
     MetadataError { description: String },
+    #[error("Other error: {description}")]
+    Other { description: String },
 }
 
 pub type Result<T> = std::result::Result<T, VhostUserBlockError>;

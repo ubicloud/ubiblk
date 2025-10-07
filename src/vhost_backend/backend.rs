@@ -319,160 +319,187 @@ fn build_block_device(
     Ok(block_device)
 }
 
-pub fn start_block_backend(
-    options: &Options,
-    kek: KeyEncryptionCipher,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
-
-    let stat = statfs(Path::new(&options.path))?;
-    let alignment = std::cmp::max(BUFFER_ALIGNMENT, stat.block_size() as usize);
-
-    if options.image_path.is_some() && options.metadata_path.is_none() {
-        return Err(Box::new(VhostUserBlockError::InvalidParameter {
-            description: "metadata_path is required when image_path is provided".to_string(),
-        }));
-    }
-
-    let base_block_device = build_block_device(&options.path, options, kek.clone())?;
-
-    let (block_device, bgworker, bgworker_ch) =
-        if let Some(metadata_path) = options.metadata_path.as_ref() {
-            let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
-            let source_bdev: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
-                let readonly = true;
-                UringBlockDevice::new(
-                    PathBuf::from(path),
-                    64,
-                    readonly,
-                    true,
-                    options.write_through,
-                )?
-            } else {
-                block_device::NullBlockDevice::new()
-            };
-            let bgworker = BgWorker::new(
-                &*source_bdev,
-                &*base_block_device,
-                &*metadata_dev,
-                alignment,
-            )?;
-            let bgworker = Arc::new(Mutex::new(bgworker));
-            let bgworker_ch = match bgworker.lock() {
-                Ok(b) => Some(b.req_sender()),
-                Err(e) => {
-                    error!("Failed to lock bgworker mutex: {e}");
-                    None
-                }
-            };
-            let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
-                None
-            } else {
-                Some(source_bdev)
-            };
-            let block_device: Box<dyn BlockDevice> = block_device::LazyBlockDevice::new(
-                base_block_device,
-                maybe_image_bdev,
-                bgworker.clone(),
-                options.track_written,
-            )?;
-            (block_device, Some(bgworker), bgworker_ch)
-        } else {
-            (base_block_device, None, None)
-        };
-
-    let backend = Arc::new(
-        UbiBlkBackend::new(options, mem.clone(), block_device, alignment).map_err(|e| {
-            error!("Failed to create UbiBlkBackend: {e:?}");
-            Box::new(e)
-        })?,
-    );
-
-    info!("Backend is created!");
-
-    let bgworker_thread = if let Some(bgworker) = bgworker.clone() {
-        Some(
-            std::thread::Builder::new()
-                .name("bgworker".to_string())
-                .spawn(move || {
-                    if let Ok(mut b) = bgworker.lock() {
-                        b.run();
-                    } else {
-                        error!("Failed to lock bgworker in thread");
-                    }
-                })?,
-        )
-    } else {
-        None
-    };
-
-    let name = "ubiblk-backend";
-    let mut daemon = VhostUserDaemon::new(name.to_string(), backend.clone(), mem).map_err(|e| {
-        Box::new(std::io::Error::other(format!(
-            "VhostUserDaemon::new error: {e:?}"
-        )))
-    })?;
-
-    info!("Daemon is created!");
-
-    if let Err(e) = daemon.serve(&options.socket) {
-        return Err(Box::new(std::io::Error::other(format!(
-            "VhostUserDaemon::wait error: {e:?}"
-        ))));
-    };
-
-    info!("Finished serving socket!");
-
-    for thread in backend.threads.iter() {
-        match thread.lock() {
-            Ok(t) => {
-                if let Err(e) = t.kill_evt.write(1) {
-                    error!("Error shutting down worker thread: {e:?}");
-                }
-            }
-            Err(_) => error!("Failed to lock worker thread for shutdown"),
-        }
-    }
-
-    info!("Finished shutting down worker threads!");
-
-    if let Some(handle) = bgworker_thread {
-        info!("Shutting down bgworker thread ...");
-        if let Some(ch) = bgworker_ch {
-            if let Err(e) = ch.send(BgWorkerRequest::Shutdown) {
-                error!("Failed to send shutdown request to bgworker: {e:?}");
-            }
-        }
-        info!("Waiting for bgworker thread to join ...");
-        if let Err(e) = handle.join() {
-            error!("Failed to join bgworker thread: {e:?}");
-        }
-        info!("Bgworker thread joined");
-    } else {
-        info!("No bgworker thread to join");
-    }
-
-    info!("Daemon is finished!");
-
-    Ok(())
+struct BackendEnv {
+    bdev: Box<dyn BlockDevice>,
+    bgworker: Option<Arc<Mutex<BgWorker>>>,
+    bgworker_ch: Option<std::sync::mpsc::Sender<BgWorkerRequest>>,
+    bgworker_thread: Option<std::thread::JoinHandle<()>>,
+    alignment: usize,
+    options: Options,
 }
 
-pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) {
+impl BackendEnv {
+    fn build(options: &Options, kek: KeyEncryptionCipher) -> Result<Self> {
+        if options.image_path.is_some() && options.metadata_path.is_none() {
+            return Err(VhostUserBlockError::InvalidParameter {
+                description: "metadata_path is required when image_path is provided".to_string(),
+            });
+        }
+        let base_block_device = build_block_device(&options.path, options, kek.clone())?;
+
+        let stat = statfs(Path::new(&options.path)).map_err(|e| {
+            VhostUserBlockError::InvalidParameter {
+                description: format!("Failed to statfs {}: {e}", &options.path),
+            }
+        })?;
+
+        let alignment = std::cmp::max(BUFFER_ALIGNMENT, stat.block_size() as usize);
+
+        let (block_device, bgworker, bgworker_ch) =
+            if let Some(metadata_path) = options.metadata_path.as_ref() {
+                let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
+                let source_bdev: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
+                    let readonly = true;
+                    UringBlockDevice::new(
+                        PathBuf::from(path),
+                        64,
+                        readonly,
+                        true,
+                        options.write_through,
+                    )?
+                } else {
+                    block_device::NullBlockDevice::new()
+                };
+                let bgworker = BgWorker::new(
+                    &*source_bdev,
+                    &*base_block_device,
+                    &*metadata_dev,
+                    alignment,
+                )?;
+                let bgworker = Arc::new(Mutex::new(bgworker));
+                let (bgworker_ch, metadata_state) = {
+                    let guard = bgworker.lock().map_err(|e| {
+                        error!("Failed to lock bgworker mutex: {e}");
+                        VhostUserBlockError::ChannelError
+                    })?;
+                    (guard.req_sender(), guard.shared_state())
+                };
+                let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
+                    None
+                } else {
+                    Some(source_bdev)
+                };
+                let block_device: Box<dyn BlockDevice> = block_device::LazyBlockDevice::new(
+                    base_block_device,
+                    maybe_image_bdev,
+                    bgworker_ch.clone(),
+                    metadata_state,
+                    options.track_written,
+                )?;
+                (block_device, Some(bgworker), Some(bgworker_ch))
+            } else {
+                (base_block_device, None, None)
+            };
+
+        Ok(BackendEnv {
+            bdev: block_device,
+            bgworker,
+            bgworker_ch,
+            alignment,
+            options: options.clone(),
+            bgworker_thread: None,
+        })
+    }
+
+    fn run_bgworker_thread(&mut self) -> Result<()> {
+        if let Some(bgworker) = self.bgworker.clone() {
+            self.bgworker_thread = Some(
+                std::thread::Builder::new()
+                    .name("bgworker".to_string())
+                    .spawn(move || {
+                        if let Ok(mut b) = bgworker.lock() {
+                            b.run();
+                        } else {
+                            error!("Failed to lock bgworker in thread");
+                        }
+                    })
+                    .map_err(|e| {
+                        error!("Failed to spawn bgworker thread: {e}");
+                        VhostUserBlockError::Other {
+                            description: format!("Failed to spawn bgworker thread: {e}"),
+                        }
+                    })?,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn stop_bgworker_thread(&mut self) {
+        if let Some(ch) = self.bgworker_ch.take() {
+            if let Err(e) = ch.send(BgWorkerRequest::Shutdown) {
+                error!("Failed to send shutdown request to bgworker: {e}");
+            }
+        }
+
+        if let Some(handle) = self.bgworker_thread.take() {
+            if let Err(e) = handle.join() {
+                error!("Failed to join bgworker thread: {e:?}");
+            }
+        }
+    }
+
+    fn serve(&self) -> Result<()> {
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+
+        info!("Creating backend ...");
+
+        let backend = Arc::new(UbiBlkBackend::new(
+            &self.options,
+            mem.clone(),
+            self.bdev.clone(),
+            self.alignment,
+        )?);
+
+        info!("Backend is created!");
+
+        let name = "ubiblk-backend";
+        let mut daemon =
+            VhostUserDaemon::new(name.to_string(), backend.clone(), mem).map_err(|e| {
+                error!("Failed to create VhostUserDaemon: {e:?}");
+                VhostUserBlockError::Other {
+                    description: e.to_string(),
+                }
+            })?;
+
+        info!("Daemon is created!");
+
+        if let Err(e) = daemon.serve(&self.options.socket) {
+            return Err(VhostUserBlockError::Other {
+                description: e.to_string(),
+            });
+        }
+
+        info!("Finished serving socket!");
+
+        for thread in backend.threads.iter() {
+            match thread.lock() {
+                Ok(t) => {
+                    if let Err(e) = t.kill_evt.write(1) {
+                        error!("Error shutting down worker thread: {e:?}");
+                    }
+                }
+                Err(_) => error!("Failed to lock worker thread for shutdown"),
+            }
+        }
+
+        info!("Finished shutting down worker threads!");
+
+        Ok(())
+    }
+}
+
+pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<()> {
     info!("Starting vhost-user-blk backend with options: {config:?}");
 
     info!("Process ID: {}", std::process::id());
 
+    let mut backend_env = BackendEnv::build(config, kek.clone())?;
+    backend_env.run_bgworker_thread()?;
+
     loop {
-        match start_block_backend(config, kek.clone()) {
-            Err(e) => {
-                error!("An error occurred: {e:?}");
-                break;
-            }
-            Ok(_) => {
-                info!("Disconnected from the socket, restarting ...");
-                continue;
-            }
-        }
+        backend_env.serve()?;
     }
 }
 

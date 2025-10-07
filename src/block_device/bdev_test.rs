@@ -123,6 +123,14 @@ impl BlockDevice for TestBlockDevice {
     fn sector_count(&self) -> u64 {
         self.sector_count
     }
+
+    fn clone(&self) -> Box<dyn BlockDevice> {
+        Box::new(TestBlockDevice {
+            sector_count: self.sector_count,
+            mem: self.mem.clone(),
+            metrics: self.metrics.clone(),
+        })
+    }
 }
 
 #[cfg(test)]

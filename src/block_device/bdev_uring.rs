@@ -184,6 +184,17 @@ impl BlockDevice for UringBlockDevice {
     fn sector_count(&self) -> u64 {
         self.sector_count
     }
+
+    fn clone(&self) -> Box<dyn BlockDevice> {
+        Box::new(UringBlockDevice {
+            path: self.path.clone(),
+            sector_count: self.sector_count,
+            queue_size: self.queue_size,
+            readonly: self.readonly,
+            direct_io: self.direct_io,
+            sync: self.sync,
+        })
+    }
 }
 
 impl UringBlockDevice {

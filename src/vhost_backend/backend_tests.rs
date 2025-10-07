@@ -4,11 +4,9 @@ mod tests {
     use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
     use crate::utils::block::VirtioBlockConfig;
     use crate::vhost_backend::{
-        init_metadata, start_block_backend, KeyEncryptionCipher, Options, UbiBlkBackend,
-        SECTOR_SIZE,
+        init_metadata, KeyEncryptionCipher, Options, UbiBlkBackend, SECTOR_SIZE,
     };
     use crate::VhostUserBlockError;
-    use tempfile::NamedTempFile;
     use vhost::vhost_user::message::VhostUserProtocolFeatures;
     use vhost_user_backend::VhostUserBackend;
     use virtio_bindings::virtio_blk::VIRTIO_BLK_F_FLUSH;
@@ -100,17 +98,6 @@ mod tests {
         let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
         let err = backend.handle_event(1, EventSet::IN, &[], 0).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
-    }
-
-    /// start_block_backend should return an error when image_path is specified without metadata_path.
-    #[test]
-    fn start_backend_missing_metadata() {
-        let tmp = NamedTempFile::new().unwrap();
-        tmp.as_file().set_len(SECTOR_SIZE as u64 * 8).unwrap();
-        let mut opts = default_options(tmp.path().to_string_lossy().to_string());
-        opts.image_path = Some("img2".to_string());
-        let res = start_block_backend(&opts, KeyEncryptionCipher::default());
-        assert!(res.is_err());
     }
 
     /// init_metadata should fail when metadata_path is missing.

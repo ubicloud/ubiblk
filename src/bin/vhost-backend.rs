@@ -80,5 +80,8 @@ fn main() {
         }
     }
 
-    block_backend_loop(&options, kek);
+    if let Err(e) = block_backend_loop(&options, kek) {
+        error!("Backend exited with error: {e}");
+        process::exit(1);
+    }
 }

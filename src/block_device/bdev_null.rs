@@ -76,6 +76,10 @@ impl BlockDevice for NullBlockDevice {
     fn sector_count(&self) -> u64 {
         0
     }
+
+    fn clone(&self) -> Box<dyn BlockDevice> {
+        Box::new(NullBlockDevice)
+    }
 }
 
 #[cfg(test)]

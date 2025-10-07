@@ -131,6 +131,14 @@ impl BlockDevice for SyncBlockDevice {
     fn sector_count(&self) -> u64 {
         self.sector_count
     }
+
+    fn clone(&self) -> Box<dyn BlockDevice> {
+        Box::new(SyncBlockDevice {
+            path: self.path.clone(),
+            sector_count: self.sector_count,
+            readonly: self.readonly,
+        })
+    }
 }
 
 impl SyncBlockDevice {

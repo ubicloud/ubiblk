@@ -50,10 +50,15 @@ mod tests {
             let bgworker: SharedBgWorker = Arc::new(Mutex::new(
                 BgWorker::new(&image_dev, &target_dev, &metadata_dev, 512).unwrap(),
             ));
+            let (bgworker_ch, metadata_state) = {
+                let guard = bgworker.lock().unwrap();
+                (guard.req_sender(), guard.shared_state())
+            };
             let lazy = LazyBlockDevice::new(
                 Box::new(target_dev),
                 Some(Box::new(image_dev)),
-                bgworker.clone(),
+                bgworker_ch,
+                metadata_state,
                 track_written,
             )
             .unwrap();
@@ -75,9 +80,18 @@ mod tests {
             let bgworker: SharedBgWorker = Arc::new(Mutex::new(
                 BgWorker::new(&source_dev, &target_dev, &metadata_dev, 512).unwrap(),
             ));
-            let lazy =
-                LazyBlockDevice::new(Box::new(target_dev), None, bgworker.clone(), track_written)
-                    .unwrap();
+            let (bgworker_ch, metadata_state) = {
+                let guard = bgworker.lock().unwrap();
+                (guard.req_sender(), guard.shared_state())
+            };
+            let lazy = LazyBlockDevice::new(
+                Box::new(target_dev),
+                None,
+                bgworker_ch,
+                metadata_state,
+                track_written,
+            )
+            .unwrap();
             TestEnv {
                 lazy,
                 bgworker,

@@ -215,6 +215,14 @@ impl BlockDevice for CryptBlockDevice {
     fn sector_count(&self) -> u64 {
         self.base.sector_count()
     }
+
+    fn clone(&self) -> Box<dyn BlockDevice> {
+        Box::new(CryptBlockDevice {
+            base: self.base.clone(),
+            key1: self.key1,
+            key2: self.key2,
+        })
+    }
 }
 
 impl CryptBlockDevice {

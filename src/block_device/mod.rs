@@ -17,6 +17,13 @@ pub trait IoChannel {
 pub trait BlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>>;
     fn sector_count(&self) -> u64;
+    fn clone(&self) -> Box<dyn BlockDevice>;
+}
+
+impl Clone for Box<dyn BlockDevice> {
+    fn clone(&self) -> Box<dyn BlockDevice> {
+        self.as_ref().clone()
+    }
 }
 
 mod bdev_crypt;

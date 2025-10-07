@@ -14,4 +14,4 @@ mod backend_tests;
 mod backend_thread_tests;
 
 #[cfg(test)]
-pub use backend::{start_block_backend, UbiBlkBackend};
+pub use backend::UbiBlkBackend;

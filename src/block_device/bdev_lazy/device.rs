@@ -4,7 +4,7 @@ use std::{
 };
 
 use super::super::*;
-use super::bgworker::{BgWorkerRequest, SharedBgWorker};
+use super::bgworker::BgWorkerRequest;
 use super::metadata::SharedMetadataState;
 use crate::{block_device::SharedBuffer, Result, VhostUserBlockError};
 use log::error;
@@ -281,7 +281,8 @@ impl IoChannel for LazyIoChannel {
 pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     image: Option<Box<dyn BlockDevice>>,
-    bgworker: SharedBgWorker,
+    bgworker_ch: Sender<BgWorkerRequest>,
+    metadata_state: SharedMetadataState,
     track_written: bool,
 }
 
@@ -289,13 +290,15 @@ impl LazyBlockDevice {
     pub fn new(
         base: Box<dyn BlockDevice>,
         image: Option<Box<dyn BlockDevice>>,
-        bgworker: SharedBgWorker,
+        bgworker_ch: Sender<BgWorkerRequest>,
+        metadata_state: SharedMetadataState,
         track_written: bool,
     ) -> Result<Box<Self>> {
         Ok(Box::new(LazyBlockDevice {
             base,
             image,
-            bgworker,
+            bgworker_ch,
+            metadata_state,
             track_written,
         }))
     }
@@ -310,23 +313,26 @@ impl BlockDevice for LazyBlockDevice {
             None
         };
 
-        let bgworker = self.bgworker.lock().map_err(|e| {
-            error!("Failed to lock background worker: {e}");
-            VhostUserBlockError::ChannelError
-        })?;
-
-        let bgworker_ch = bgworker.req_sender();
-
         Ok(Box::new(LazyIoChannel::new(
             base_channel,
             image_channel,
-            bgworker_ch,
-            bgworker.shared_state(),
+            self.bgworker_ch.clone(),
+            self.metadata_state.clone(),
             self.track_written,
         )))
     }
 
     fn sector_count(&self) -> u64 {
         self.base.sector_count()
+    }
+
+    fn clone(&self) -> Box<dyn BlockDevice> {
+        Box::new(LazyBlockDevice {
+            base: self.base.clone(),
+            image: self.image.clone(),
+            bgworker_ch: self.bgworker_ch.clone(),
+            metadata_state: self.metadata_state.clone(),
+            track_written: self.track_written,
+        })
     }
 }

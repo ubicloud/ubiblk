@@ -82,4 +82,5 @@ jobs:
           make test-e2e
 
       - name: Dump vhost-backend logs
+        if: ${{ always() }}
         run: cat target/tests/blkio/vhost-backend.log

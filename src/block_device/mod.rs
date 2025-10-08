@@ -12,6 +12,10 @@ pub trait IoChannel {
 
     fn poll(&mut self) -> Vec<(usize, bool)>;
     fn busy(&self) -> bool;
+
+    fn stripe_has_data(&self, _stripe_id: u64) -> bool {
+        true
+    }
 }
 
 pub trait BlockDevice {

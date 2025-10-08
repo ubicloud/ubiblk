@@ -48,7 +48,7 @@ mod tests {
             }
             let image_metrics = image_dev.metrics.clone();
             let bgworker: SharedBgWorker = Arc::new(Mutex::new(
-                BgWorker::new(&image_dev, &target_dev, &metadata_dev, 512).unwrap(),
+                BgWorker::new(&image_dev, &target_dev, &metadata_dev, 512, None).unwrap(),
             ));
             let (bgworker_ch, metadata_state) = {
                 let guard = bgworker.lock().unwrap();
@@ -78,7 +78,7 @@ mod tests {
                 source_dev.write(0, &tmp, SECTOR_SIZE);
             }
             let bgworker: SharedBgWorker = Arc::new(Mutex::new(
-                BgWorker::new(&source_dev, &target_dev, &metadata_dev, 512).unwrap(),
+                BgWorker::new(&source_dev, &target_dev, &metadata_dev, 512, None).unwrap(),
             ));
             let (bgworker_ch, metadata_state) = {
                 let guard = bgworker.lock().unwrap();

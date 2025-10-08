@@ -19,6 +19,7 @@ mod tests {
             image_path: None,
             metadata_path: None,
             io_debug_path: None,
+            status_path: None,
             socket: "sock".to_string(),
             cpus: None,
             num_queues: 1,

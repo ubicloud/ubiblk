@@ -1,6 +1,6 @@
 use super::UbiMetadata;
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicU64, AtomicU8, Ordering},
     Arc,
 };
 
@@ -8,6 +8,7 @@ use std::sync::{
 pub struct SharedMetadataState {
     stripe_headers: Arc<Vec<AtomicU8>>,
     stripe_sector_count_shift: u8,
+    fetched_stripes: Arc<AtomicU64>,
 }
 
 impl SharedMetadataState {
@@ -20,9 +21,16 @@ impl SharedMetadataState {
                 .collect::<Vec<_>>(),
         );
 
+        let fetched_stripes = metadata
+            .stripe_headers
+            .iter()
+            .filter(|h| *h & (1 << 0) != 0)
+            .count() as u64;
+
         Self {
             stripe_headers,
             stripe_sector_count_shift: metadata.stripe_sector_count_shift,
+            fetched_stripes: Arc::new(AtomicU64::new(fetched_stripes)),
         }
     }
 
@@ -45,6 +53,13 @@ impl SharedMetadataState {
     }
 
     pub fn set_stripe_header(&self, stripe_id: usize, header: u8) {
+        if !self.stripe_fetched(stripe_id) && header & (1 << 0) != 0 {
+            self.fetched_stripes.fetch_add(1, Ordering::AcqRel);
+        }
         self.stripe_headers[stripe_id].store(header, Ordering::Release);
+    }
+
+    pub fn fetched_stripes(&self) -> u64 {
+        self.fetched_stripes.load(Ordering::Acquire)
     }
 }

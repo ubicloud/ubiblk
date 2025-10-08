@@ -112,6 +112,7 @@ pub struct Options {
     pub image_path: Option<String>,
     pub metadata_path: Option<String>,
     pub io_debug_path: Option<String>,
+    pub status_path: Option<String>,
     pub socket: String,
 
     #[serde(default)]
@@ -242,6 +243,7 @@ mod tests {
         assert!(!options.track_written);
         assert!(!options.write_through);
         assert_eq!(options.device_id, "ubiblk".to_string());
+        assert!(options.status_path.is_none());
     }
 
     #[test]

@@ -56,6 +56,7 @@ mod tests {
             copy_on_read: false,
             track_written: false,
             write_through: true,
+            autofetch: false,
             encryption_key: None,
             device_id: "ubiblk".to_string(),
         }

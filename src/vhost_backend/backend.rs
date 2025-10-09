@@ -366,6 +366,7 @@ impl BackendEnv {
                     &*metadata_dev,
                     alignment,
                     options.status_path.as_ref().map(PathBuf::from),
+                    options.autofetch,
                 )?;
                 let bgworker = Arc::new(Mutex::new(bgworker));
                 let (bgworker_ch, metadata_state) = {

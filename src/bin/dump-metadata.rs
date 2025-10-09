@@ -189,10 +189,17 @@ fn main() {
         .enumerate()
         .filter_map(|(i, h)| if h & 2 != 0 { Some(i) } else { None })
         .collect();
+    let no_source: Vec<usize> = metadata
+        .stripe_headers
+        .iter()
+        .enumerate()
+        .filter_map(|(i, h)| if h & 4 != 0 { Some(i) } else { None })
+        .collect();
 
     println!("data file: {} ({} bytes)", options.path, data_size);
     println!("base image file: {image_path_display} ({image_size} bytes)");
     println!("stripe size: {stripe_size} bytes");
     println!("fetched stripes: {}", format_list(&fetched));
     println!("written stripes: {}", format_list(&written));
+    println!("no-source-data stripes: {}", format_list(&no_source));
 }

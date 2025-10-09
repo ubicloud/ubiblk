@@ -58,12 +58,14 @@ The configuration YAML must define:
 - `path`: Base disk image path.
 - `image_path`: (Optional) Image path for lazy stripe fetch.
 - `metadata_path`: (Optional) Metadata file path used for lazy fetch. Required when `image_path` is set.
+- `status_path`: (Optional) Path where stripe statistics are written in JSON format.
 - `socket`: vhost-user socket path.
 - `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
 - `skip_sync`: (Optional) Skip flush handling for faster operation.
 - `copy_on_read`: (Optional) Copy stripes from the image only when accessed.
 - `track_written`: (Optional) Track stripes that have been written.
 - `write_through`: (Optional) Enable the write-through mode.
+- `autofetch`: (Optional) Automatically fetch stripes from the image in the background.
 - `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
 - `io_debug_path`: (Optional) Path for I/O debug log.
 - `device_id`: (Optional) Identifier returned to the guest for GET_ID.
@@ -83,6 +85,7 @@ The backend configuration YAML must match the `Options` struct fields:
 path: "/path/to/block-device.raw"        # String: base disk image path
 image_path: "/path/to/ubi-image.raw"     # Optional String: UBI image for lazy fetch
 metadata_path: "/path/to/metadata"       # Optional: metadata path for lazy fetch
+status_path: "/tmp/ubiblk-status.json"   # Optional: JSON stripe statistics output path
 socket: "/tmp/vhost.sock"                # String: vhost‐user socket path
 num_queues: 4                            # Integer: number of virtqueues
 cpus: [0, 1, 2, 3]                       # Optional: CPU list matching num_queues
@@ -95,6 +98,7 @@ skip_sync: false                         # Optional: skip flush handling
 copy_on_read: false                      # Optional: copy stripes on first read
 track_written: false                     # Optional: track written stripes
 write_through: false                     # Optional: enable write-through mode
+autofetch: false                         # Optional: fetch stripes automatically
 device_id: "ubiblk"                      # Optional: device identifier
 encryption_key:                          # Optional: AES‐XTS keys (base64 encoded)
   - "x74Yhe/ovgxY4BrBaM6Wm/9firf9k/N+ayvGsskBo+hjQtrL+nslCDC5oR/HpSDL"
@@ -121,6 +125,11 @@ perform the write operation. However, reads are handled differently based on
 The metadata is created with `init-metadata` and stored at `metadata_path`. The
 first sector contains a magic header, and subsequent sectors store a byte for
 each stripe indicating whether that stripe has been fetched.
+
+Setting `autofetch` to `true` instructs the backend to keep fetching stripes in
+the background whenever no manual fetch requests are pending. This can be used
+to progressively catch up with the base image even if the guest only accesses a
+small portion of the device.
 
 ## Key Encryption Key (KEK) File
 The keys in the configuration file can be encrypted using a KEK file. The KEK file should contain the encryption key in base64 format. The backend will use this key to decrypt the block device keys at runtime.

@@ -17,6 +17,8 @@ pub struct UbiMetadata {
 
     // bit 0: fetched or not
     // bit 1: written or not
+    // bit 2: no source data
+    // bits 3-7: reserved
     pub stripe_headers: Vec<u8>,
 }
 
@@ -58,7 +60,7 @@ impl UbiMetadata {
         let mut metadata: Box<MaybeUninit<Self>> = Box::new_uninit();
 
         let headers = (0..base_stripe_count)
-            .map(|i| if i < image_stripe_count { 0 } else { 1 })
+            .map(|i| if i < image_stripe_count { 0 } else { 1 << 2 })
             .collect::<Vec<_>>();
 
         unsafe {
@@ -175,13 +177,13 @@ mod tests {
     }
 
     #[test]
-    fn new_marks_stripes_past_image_as_fetched() {
+    fn new_marks_stripes_past_image_as_no_source() {
         let metadata = UbiMetadata::new(9, 10, 4);
         for i in 0..4 {
             assert_eq!(metadata.stripe_header(i), 0);
         }
         for i in 4..10 {
-            assert_eq!(metadata.stripe_header(i), 1);
+            assert_eq!(metadata.stripe_header(i), 1 << 2);
         }
     }
 }

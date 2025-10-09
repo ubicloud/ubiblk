@@ -60,7 +60,7 @@ impl LazyIoChannel {
 impl LazyIoChannel {
     fn request_stripes_fetched(&self, request: &RWRequest) -> bool {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if !self.metadata_state.stripe_fetched(stripe_id) {
+            if !self.metadata_state.stripe_fetched_if_needed(stripe_id) {
                 return false;
             }
         }
@@ -78,7 +78,7 @@ impl LazyIoChannel {
 
     fn start_stripe_fetches(&mut self, request: &RWRequest) -> Result<()> {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if !self.metadata_state.stripe_fetched(stripe_id)
+            if !self.metadata_state.stripe_fetched_if_needed(stripe_id)
                 && !self.stripe_fetches_requested.contains(&stripe_id)
             {
                 self.bgworker_ch

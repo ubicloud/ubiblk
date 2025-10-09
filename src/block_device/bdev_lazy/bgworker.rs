@@ -59,6 +59,7 @@ impl BgWorker {
         metadata_dev: &dyn BlockDevice,
         alignment: usize,
         status_path: Option<PathBuf>,
+        autofetch: bool,
     ) -> Result<Self> {
         let source_sector_count = source_dev.sector_count();
         let metadata_flusher = MetadataFlusher::new(metadata_dev, source_sector_count)?;
@@ -68,6 +69,7 @@ impl BgWorker {
             metadata_flusher.stripe_sector_count(),
             metadata_flusher.shared_state(),
             alignment,
+            autofetch,
         )?;
         let metadata_state = metadata_flusher.shared_state();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -209,7 +211,7 @@ mod tests {
         )
         .expect("Failed to initialize metadata");
 
-        BgWorker::new(&source_dev, &target_dev, &metadata_dev, 4096, None).unwrap()
+        BgWorker::new(&source_dev, &target_dev, &metadata_dev, 4096, None, false).unwrap()
     }
 
     #[test]
@@ -231,7 +233,7 @@ mod tests {
         )
         .expect("Failed to initialize metadata");
 
-        BgWorker::new(&*source_dev, &target_dev, &metadata_dev, 4096, None)
+        BgWorker::new(&*source_dev, &target_dev, &metadata_dev, 4096, None, false)
             .expect("BgWorker should support null source device");
     }
 }

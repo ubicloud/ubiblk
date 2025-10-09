@@ -24,11 +24,13 @@ pub struct StripeFetcher {
     stripe_sector_count: u64,
     source_stripes_with_data: u64,
     fetch_queue: VecDeque<usize>,
+    autofetch_queue: VecDeque<usize>,
     buffer_pool: AlignedBufferPool,
     shared_metadata_state: SharedMetadataState,
     stripe_states: HashMap<usize, FetchState>,
     allocated_buffers: HashMap<usize, (SharedBuffer, usize)>,
     finished_fetches: Vec<(usize, bool)>,
+    autofetch: bool,
 }
 
 impl StripeFetcher {
@@ -38,6 +40,7 @@ impl StripeFetcher {
         stripe_sector_count: u64,
         shared_metadata_state: SharedMetadataState,
         alignment: usize,
+        autofetch: bool,
     ) -> Result<Self> {
         let fetch_source_channel = source_dev.create_channel()?;
         let fetch_target_channel = target_dev.create_channel()?;
@@ -61,6 +64,13 @@ impl StripeFetcher {
         let source_stripes_with_data = (0..source_stripe_count)
             .filter(|stripe_id| fetch_source_channel.stripe_has_data(*stripe_id))
             .count() as u64;
+
+        let autofetch_queue = if autofetch {
+            (0..source_stripe_count as usize).collect()
+        } else {
+            VecDeque::new()
+        };
+
         Ok(StripeFetcher {
             fetch_source_channel,
             fetch_target_channel,
@@ -74,6 +84,8 @@ impl StripeFetcher {
             stripe_states: HashMap::new(),
             allocated_buffers: HashMap::new(),
             finished_fetches: Vec::new(),
+            autofetch,
+            autofetch_queue,
         })
     }
 
@@ -82,6 +94,7 @@ impl StripeFetcher {
             || self.fetch_source_channel.busy()
             || self.fetch_target_channel.busy()
             || !self.finished_fetches.is_empty()
+            || !self.autofetch_queue.is_empty()
     }
 
     pub fn handle_fetch_request(&mut self, stripe_id: usize) {
@@ -101,6 +114,7 @@ impl StripeFetcher {
     }
 
     pub fn update(&mut self) {
+        self.update_autofetch();
         self.start_fetches();
         self.poll_fetches();
     }
@@ -119,6 +133,14 @@ impl StripeFetcher {
 
     pub fn take_finished_fetches(&mut self) -> Vec<(usize, bool)> {
         std::mem::take(&mut self.finished_fetches)
+    }
+
+    pub fn update_autofetch(&mut self) {
+        if self.autofetch && self.fetch_queue.is_empty() {
+            if let Some(stripe_id) = self.autofetch_queue.pop_front() {
+                self.handle_fetch_request(stripe_id);
+            }
+        }
     }
 
     fn start_fetches(&mut self) {
@@ -272,7 +294,7 @@ mod tests {
         fetcher: StripeFetcher,
     }
 
-    fn prep() -> TestState {
+    fn prep(autofetch: bool) -> TestState {
         let source_size: u64 = 1024 * 1024; // 1 MiB
         let target_size: u64 = 2 * 1024 * 1024; // 2 MiB
         let stripe_sector_count_shift = 3; // 8 sectors per stripe
@@ -297,6 +319,7 @@ mod tests {
             stripe_sector_count,
             shared_metadata_state.clone(),
             512,
+            autofetch,
         )
         .unwrap();
 
@@ -309,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_basic_fetch() {
-        let mut state = prep();
+        let mut state = prep(false);
         state.fetcher.handle_fetch_request(0);
         for _ in 0..10 {
             state.fetcher.update();
@@ -331,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_repeat_requests_ignored() {
-        let mut state = prep();
+        let mut state = prep(false);
         state.fetcher.handle_fetch_request(1);
         for _ in 0..10 {
             state.fetcher.update();
@@ -356,5 +379,74 @@ mod tests {
         assert_eq!(target_metrics.reads, 0);
         assert_eq!(target_metrics.writes, 1);
         assert_eq!(target_metrics.flushes, 1);
+    }
+
+    #[test]
+    fn test_autofetch() {
+        let mut state = prep(true);
+        let finished = state.fetcher.take_finished_fetches();
+        assert_eq!(finished.len(), 0);
+        for _ in 0..1000 {
+            state.fetcher.update();
+        }
+        let mut finished = state.fetcher.take_finished_fetches();
+        let source_stripe_count = state.fetcher.source_stripe_count() as usize;
+        assert_eq!(finished.len(), source_stripe_count);
+        finished.sort_by_key(|(stripe_id, _)| *stripe_id);
+        for (idx, (stripe_id, success)) in finished.iter().enumerate() {
+            assert!(*stripe_id == idx);
+            assert!(success);
+        }
+    }
+
+    #[test]
+    fn test_autofetch_prioritizes_manual() {
+        let mut state = prep(true);
+        for _ in 0..20 {
+            state.fetcher.update();
+        }
+        let mut finished = state.fetcher.take_finished_fetches();
+        assert!(!finished.is_empty());
+
+        // We shouldn't have finished the following stripes in the first 20
+        // cycles yet.
+        let priority_list = vec![100, 110, 122];
+        for stripe_id in &priority_list {
+            assert!(finished.iter().all(|(sid, _)| *sid != *stripe_id));
+        }
+
+        // Now request those specifically.
+        for stripe_id in &priority_list {
+            state.fetcher.handle_fetch_request(*stripe_id);
+        }
+
+        for _ in 0..20 {
+            state.fetcher.update();
+        }
+        let finished_2nd_batch = state.fetcher.take_finished_fetches();
+
+        // The explicit requests should have been prioritized and completed.
+        for stripe_id in &priority_list {
+            assert!(finished_2nd_batch[..priority_list.len() + 1]
+                .iter()
+                .any(|(sid, _)| *sid == *stripe_id));
+        }
+
+        finished.extend(finished_2nd_batch);
+
+        // Now process until all the autofetches are done.
+        for _ in 0..1000 {
+            state.fetcher.update();
+        }
+
+        finished.extend(state.fetcher.take_finished_fetches());
+
+        let source_stripe_count = state.fetcher.source_stripe_count() as usize;
+        assert_eq!(finished.len(), source_stripe_count);
+        finished.sort_by_key(|(stripe_id, _)| *stripe_id);
+        for (idx, (stripe_id, success)) in finished.iter().enumerate() {
+            assert!(*stripe_id == idx);
+            assert!(success);
+        }
     }
 }

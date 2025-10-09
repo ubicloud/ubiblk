@@ -89,6 +89,10 @@ fn default_write_through() -> bool {
     false
 }
 
+fn default_autofetch() -> bool {
+    false
+}
+
 fn default_device_id() -> String {
     "ubiblk".to_string()
 }
@@ -144,6 +148,9 @@ pub struct Options {
 
     #[serde(default = "default_write_through")]
     pub write_through: bool,
+
+    #[serde(default = "default_autofetch")]
+    pub autofetch: bool,
 
     #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
@@ -244,6 +251,7 @@ mod tests {
         assert!(!options.write_through);
         assert_eq!(options.device_id, "ubiblk".to_string());
         assert!(options.status_path.is_none());
+        assert!(!options.autofetch);
     }
 
     #[test]

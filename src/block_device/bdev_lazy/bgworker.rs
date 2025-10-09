@@ -16,15 +16,9 @@ use std::{
 use tempfile::NamedTempFile;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct ImageStripesRecord {
-    total: u64,
-    with_data: u64,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct StripesRecord {
-    disk: u64,
-    image: ImageStripesRecord,
+    total: u64,
+    no_source: u64,
     fetched: u64,
 }
 
@@ -152,11 +146,8 @@ impl BgWorker {
         };
         let status = StatusReport {
             stripes: StripesRecord {
-                disk: self.stripe_fetcher.target_stripe_count(),
-                image: ImageStripesRecord {
-                    total: self.stripe_fetcher.source_stripe_count(),
-                    with_data: self.stripe_fetcher.source_stripes_with_data(),
-                },
+                total: self.stripe_fetcher.target_stripe_count(),
+                no_source: self.metadata_state.no_source_stripes(),
                 fetched: self.metadata_state.fetched_stripes(),
             },
         };

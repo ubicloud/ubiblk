@@ -22,7 +22,6 @@ pub struct StripeFetcher {
     source_sector_count: u64,
     target_sector_count: u64,
     stripe_sector_count: u64,
-    source_stripes_with_data: u64,
     fetch_queue: VecDeque<usize>,
     autofetch_queue: VecDeque<usize>,
     buffer_pool: AlignedBufferPool,
@@ -60,11 +59,8 @@ impl StripeFetcher {
                 description: "target device too small".into(),
             });
         }
-        let source_stripe_count = source_sector_count.div_ceil(stripe_sector_count);
-        let source_stripes_with_data = (0..source_stripe_count)
-            .filter(|stripe_id| fetch_source_channel.stripe_has_data(*stripe_id))
-            .count() as u64;
 
+        let source_stripe_count = source_sector_count.div_ceil(stripe_sector_count);
         let autofetch_queue = if autofetch {
             (0..source_stripe_count as usize).collect()
         } else {
@@ -77,7 +73,6 @@ impl StripeFetcher {
             source_sector_count,
             target_sector_count,
             stripe_sector_count,
-            source_stripes_with_data,
             fetch_queue: VecDeque::new(),
             buffer_pool,
             shared_metadata_state,
@@ -122,16 +117,13 @@ impl StripeFetcher {
         self.poll_fetches();
     }
 
+    #[cfg(test)]
     pub fn source_stripe_count(&self) -> u64 {
         self.source_sector_count.div_ceil(self.stripe_sector_count)
     }
 
     pub fn target_stripe_count(&self) -> u64 {
         self.target_sector_count.div_ceil(self.stripe_sector_count)
-    }
-
-    pub fn source_stripes_with_data(&self) -> u64 {
-        self.source_stripes_with_data
     }
 
     pub fn take_finished_fetches(&mut self) -> Vec<(usize, bool)> {

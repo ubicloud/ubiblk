@@ -330,7 +330,9 @@ struct BackendEnv {
 
 impl BackendEnv {
     fn build(options: &Options, kek: KeyEncryptionCipher) -> Result<Self> {
-        if options.image_path.is_some() && options.metadata_path.is_none() {
+        if (options.image_path.is_some() || options.remote_image_address.is_some())
+            && options.metadata_path.is_none()
+        {
             return Err(VhostUserBlockError::InvalidParameter {
                 description: "metadata_path is required when image_path is provided".to_string(),
             });
@@ -348,18 +350,21 @@ impl BackendEnv {
         let (block_device, bgworker, bgworker_ch) =
             if let Some(metadata_path) = options.metadata_path.as_ref() {
                 let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
-                let source_bdev: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
-                    let readonly = true;
-                    UringBlockDevice::new(
-                        PathBuf::from(path),
-                        64,
-                        readonly,
-                        true,
-                        options.write_through,
-                    )?
-                } else {
-                    block_device::NullBlockDevice::new()
-                };
+                let source_bdev: Box<dyn BlockDevice> =
+                    if let Some(ref address) = options.remote_image_address {
+                        block_device::RemoteBlockDevice::new(address.clone())?
+                    } else if let Some(ref path) = options.image_path {
+                        let readonly = true;
+                        UringBlockDevice::new(
+                            PathBuf::from(path),
+                            64,
+                            readonly,
+                            true,
+                            options.write_through,
+                        )?
+                    } else {
+                        block_device::NullBlockDevice::new()
+                    };
                 let bgworker = BgWorker::new(
                     &*source_bdev,
                     &*base_block_device,

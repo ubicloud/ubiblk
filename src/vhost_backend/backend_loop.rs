@@ -78,7 +78,9 @@ impl BackendEnv {
     }
 
     fn validate_metadata_requirements(options: &Options) -> Result<()> {
-        if options.image_path.is_some() && options.metadata_path.is_none() {
+        if (options.image_path.is_some() || options.remote_image_address.is_some())
+            && options.metadata_path.is_none()
+        {
             return Err(VhostUserBlockError::InvalidParameter {
                 description: "metadata_path is required when image_path is provided".to_string(),
             });
@@ -160,7 +162,9 @@ impl BackendEnv {
     }
 
     fn create_source_devices(options: &Options) -> Result<SourceDevices> {
-        let source: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
+        let source: Box<dyn BlockDevice> = if let Some(ref address) = options.remote_image_address {
+            block_device::RemoteBlockDevice::new(address.clone())?
+        } else if let Some(ref path) = options.image_path {
             let readonly = true;
             create_io_engine_device(
                 options.io_engine.clone(),

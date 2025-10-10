@@ -9,26 +9,25 @@ fn decode_encryption_keys<'de, D>(deserializer: D) -> Result<OptKeyPair, D::Erro
 where
     D: Deserializer<'de>,
 {
-    let opt = Option::<(String, String)>::deserialize(deserializer)?;
-    match opt {
-        Some((k1, k2)) => {
-            let decoded1 = STANDARD.decode(&k1).map_err(serde::de::Error::custom)?;
-            let decoded2 = STANDARD.decode(&k2).map_err(serde::de::Error::custom)?;
-            Ok(Some((decoded1, decoded2)))
-        }
-        None => Ok(None),
-    }
+    Option::<(String, String)>::deserialize(deserializer)?
+        .map(|(k1, k2)| {
+            let decoded1 = STANDARD.decode(k1).map_err(serde::de::Error::custom)?;
+            let decoded2 = STANDARD.decode(k2).map_err(serde::de::Error::custom)?;
+            Ok((decoded1, decoded2))
+        })
+        .transpose()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum CipherMethod {
+    #[default]
     None,
     Aes256Gcm,
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct KeyEncryptionCipher {
     pub method: CipherMethod,
 
@@ -40,17 +39,6 @@ pub struct KeyEncryptionCipher {
 
     #[serde_as(as = "Option<Base64>")]
     pub auth_data: Option<Vec<u8>>,
-}
-
-impl Default for KeyEncryptionCipher {
-    fn default() -> Self {
-        Self {
-            method: CipherMethod::None,
-            key: None,
-            init_vector: None,
-            auth_data: None,
-        }
-    }
 }
 
 fn default_poll_queue_timeout_us() -> u128 {

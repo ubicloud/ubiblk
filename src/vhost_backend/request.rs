@@ -70,10 +70,9 @@ fn sector<B: Bitmap + 'static>(
     desc_addr: GuestAddress,
 ) -> result::Result<u64, Error> {
     const SECTOR_OFFSET: usize = 8;
-    let addr = match mem.checked_offset(desc_addr, SECTOR_OFFSET) {
-        Some(v) => v,
-        None => return Err(Error::CheckedOffset(desc_addr, SECTOR_OFFSET)),
-    };
+    let addr = mem
+        .checked_offset(desc_addr, SECTOR_OFFSET)
+        .ok_or(Error::CheckedOffset(desc_addr, SECTOR_OFFSET))?;
 
     mem.read_obj(addr).map_err(Error::GuestMemory)
 }

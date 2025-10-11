@@ -41,14 +41,10 @@ pub fn load_metadata(
         });
     }
 
-    let (id, success) = match results.pop() {
-        Some(v) => v,
-        None => {
-            return Err(VhostUserBlockError::MetadataError {
-                description: "Missing poll result".to_string(),
-            });
-        }
-    };
+    let (id, success) = results.pop().ok_or(VhostUserBlockError::MetadataError {
+        description: "Missing poll result".to_string(),
+    })?;
+
     if !success || id != 0 {
         error!("Failed to read metadata: id {id}, success {success}");
         return Err(VhostUserBlockError::MetadataError {

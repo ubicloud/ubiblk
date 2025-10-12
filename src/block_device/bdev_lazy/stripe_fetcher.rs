@@ -275,9 +275,6 @@ impl StripeFetcher {
     }
 }
 
-unsafe impl Send for StripeFetcher {}
-unsafe impl Sync for StripeFetcher {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

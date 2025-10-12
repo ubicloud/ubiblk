@@ -8,10 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     io::Write,
     path::{Path, PathBuf},
-    sync::{
-        mpsc::{Receiver, Sender, TryRecvError},
-        Arc, Mutex,
-    },
+    sync::mpsc::{Receiver, TryRecvError},
 };
 use tempfile::NamedTempFile;
 
@@ -37,16 +34,14 @@ pub struct BgWorker {
     stripe_fetcher: StripeFetcher,
     metadata_flusher: MetadataFlusher,
     req_receiver: Receiver<BgWorkerRequest>,
-    req_sender: Sender<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     written_status: Option<StatusReport>,
     status_path: Option<PathBuf>,
     done: bool,
 }
 
-pub type SharedBgWorker = Arc<Mutex<BgWorker>>;
-
 impl BgWorker {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_dev: &dyn BlockDevice,
         target_dev: &dyn BlockDevice,
@@ -54,24 +49,24 @@ impl BgWorker {
         alignment: usize,
         status_path: Option<PathBuf>,
         autofetch: bool,
+        metadata_state: SharedMetadataState,
+        req_receiver: Receiver<BgWorkerRequest>,
     ) -> Result<Self> {
         let source_sector_count = source_dev.sector_count();
-        let metadata_flusher = MetadataFlusher::new(metadata_dev, source_sector_count)?;
+        let metadata_flusher =
+            MetadataFlusher::new(metadata_dev, source_sector_count, metadata_state.clone())?;
         let stripe_fetcher = StripeFetcher::new(
             source_dev,
             target_dev,
-            metadata_flusher.stripe_sector_count(),
-            metadata_flusher.shared_state(),
+            metadata_state.stripe_sector_count(),
+            metadata_state.clone(),
             alignment,
             autofetch,
         )?;
-        let metadata_state = metadata_flusher.shared_state();
-        let (tx, rx) = std::sync::mpsc::channel();
         Ok(BgWorker {
             stripe_fetcher,
             metadata_flusher,
-            req_receiver: rx,
-            req_sender: tx,
+            req_receiver,
             done: false,
             metadata_state,
             written_status: None,
@@ -79,12 +74,8 @@ impl BgWorker {
         })
     }
 
-    pub fn req_sender(&self) -> Sender<BgWorkerRequest> {
-        self.req_sender.clone()
-    }
-
     pub fn shared_state(&self) -> SharedMetadataState {
-        self.metadata_flusher.shared_state()
+        self.metadata_state.clone()
     }
 
     pub fn process_request(&mut self, req: BgWorkerRequest) {
@@ -182,17 +173,16 @@ impl BgWorker {
     }
 }
 
-unsafe impl Send for BgWorker {}
-unsafe impl Sync for BgWorker {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::block_device::{
-        bdev_test::TestBlockDevice, init_metadata, NullBlockDevice, UbiMetadata,
+        bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, init_metadata, load_metadata,
+        NullBlockDevice, UbiMetadata,
     };
+    use std::sync::mpsc::channel;
 
-    fn build_bg_worker() -> BgWorker {
+    fn build_bg_worker() -> (BgWorker, std::sync::mpsc::Sender<BgWorkerRequest>) {
         let source_dev = TestBlockDevice::new(1024 * 1024);
         let target_dev = TestBlockDevice::new(1024 * 1024);
         let metadata_dev = TestBlockDevice::new(1024 * 1024);
@@ -202,13 +192,33 @@ mod tests {
         )
         .expect("Failed to initialize metadata");
 
-        BgWorker::new(&source_dev, &target_dev, &metadata_dev, 4096, None, false).unwrap()
+        let metadata_state = {
+            let mut channel = metadata_dev.create_channel().unwrap();
+            let metadata = load_metadata(&mut channel, metadata_dev.sector_count()).unwrap();
+            SharedMetadataState::new(&metadata)
+        };
+
+        let (tx, rx) = channel();
+
+        (
+            BgWorker::new(
+                &source_dev,
+                &target_dev,
+                &metadata_dev,
+                4096,
+                None,
+                false,
+                metadata_state,
+                rx,
+            )
+            .unwrap(),
+            tx,
+        )
     }
 
     #[test]
     fn test_bg_worker_shutdown() {
-        let mut bg_worker = build_bg_worker();
-        let sender = bg_worker.req_sender();
+        let (mut bg_worker, sender) = build_bg_worker();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
         bg_worker.run();
     }
@@ -224,7 +234,24 @@ mod tests {
         )
         .expect("Failed to initialize metadata");
 
-        BgWorker::new(&*source_dev, &target_dev, &metadata_dev, 4096, None, false)
-            .expect("BgWorker should support null source device");
+        let metadata_state = {
+            let mut channel = metadata_dev.create_channel().unwrap();
+            let metadata = load_metadata(&mut channel, metadata_dev.sector_count()).unwrap();
+            SharedMetadataState::new(&metadata)
+        };
+
+        let (_tx, rx) = channel();
+
+        BgWorker::new(
+            &*source_dev,
+            &target_dev,
+            &metadata_dev,
+            4096,
+            None,
+            false,
+            metadata_state,
+            rx,
+        )
+        .expect("BgWorker should support null source device");
     }
 }

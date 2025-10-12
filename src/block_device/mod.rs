@@ -18,7 +18,7 @@ pub trait IoChannel {
     }
 }
 
-pub trait BlockDevice {
+pub trait BlockDevice: Send + Sync {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>>;
     fn sector_count(&self) -> u64;
     fn clone(&self) -> Box<dyn BlockDevice>;
@@ -44,7 +44,7 @@ pub use bdev_lazy::init_metadata;
 pub use bdev_lazy::load_metadata;
 pub use bdev_lazy::LazyBlockDevice;
 pub use bdev_lazy::UbiMetadata;
-pub use bdev_lazy::{BgWorker, BgWorkerRequest, SharedBgWorker};
+pub use bdev_lazy::{BgWorker, BgWorkerRequest, SharedMetadataState};
 pub use bdev_null::NullBlockDevice;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;

@@ -1,22 +1,26 @@
 use std::{
     ops::Deref,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc, Mutex,
+    },
     time::Instant,
 };
 
 use crate::{
-    block_device::{self, BgWorker, BlockDevice},
+    block_device::{
+        self, BgWorker, BgWorkerRequest, BlockDevice, SharedMetadataState, UringBlockDevice,
+    },
     vhost_backend::SECTOR_SIZE,
 };
 use crate::{
-    block_device::{BgWorkerRequest, UringBlockDevice},
     utils::block::{features_to_str, VirtioBlockConfig},
     VhostUserBlockError,
 };
 
 use super::{backend_thread::UbiBlkBackendThread, KeyEncryptionCipher, Options};
-use crate::block_device::{init_metadata as init_metadata_file, UbiMetadata};
+use crate::block_device::{init_metadata as init_metadata_file, load_metadata, UbiMetadata};
 use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
 use crate::Result;
 use log::{debug, error, info};
@@ -319,10 +323,21 @@ fn build_block_device(
     Ok(block_device)
 }
 
+struct BgWorkerConfig {
+    source_dev: Box<dyn BlockDevice>,
+    target_dev: Box<dyn BlockDevice>,
+    metadata_dev: Box<dyn BlockDevice>,
+    alignment: usize,
+    status_path: Option<PathBuf>,
+    autofetch: bool,
+    shared_state: SharedMetadataState,
+    receiver: Receiver<BgWorkerRequest>,
+}
+
 struct BackendEnv {
     bdev: Box<dyn BlockDevice>,
-    bgworker: Option<Arc<Mutex<BgWorker>>>,
-    bgworker_ch: Option<std::sync::mpsc::Sender<BgWorkerRequest>>,
+    bgworker_config: Option<BgWorkerConfig>,
+    bgworker_ch: Option<Sender<BgWorkerRequest>>,
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
     options: Options,
@@ -345,9 +360,13 @@ impl BackendEnv {
 
         let alignment = std::cmp::max(BUFFER_ALIGNMENT, stat.block_size() as usize);
 
-        let (block_device, bgworker, bgworker_ch) =
+        let (block_device, bgworker_config, bgworker_ch) =
             if let Some(metadata_path) = options.metadata_path.as_ref() {
                 let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
+                let mut metadata_channel = metadata_dev.create_channel()?;
+                let metadata = load_metadata(&mut metadata_channel, metadata_dev.sector_count())?;
+                let shared_state = SharedMetadataState::new(&metadata);
+
                 let source_bdev: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
                     let readonly = true;
                     UringBlockDevice::new(
@@ -360,42 +379,39 @@ impl BackendEnv {
                 } else {
                     block_device::NullBlockDevice::new()
                 };
-                let bgworker = BgWorker::new(
-                    &*source_bdev,
-                    &*base_block_device,
-                    &*metadata_dev,
-                    alignment,
-                    options.status_path.as_ref().map(PathBuf::from),
-                    options.autofetch,
-                )?;
-                let bgworker = Arc::new(Mutex::new(bgworker));
-                let (bgworker_ch, metadata_state) = {
-                    let guard = bgworker.lock().map_err(|e| {
-                        error!("Failed to lock bgworker mutex: {e}");
-                        VhostUserBlockError::ChannelError
-                    })?;
-                    (guard.req_sender(), guard.shared_state())
-                };
+                let source_clone = source_bdev.clone();
                 let maybe_image_bdev: Option<Box<dyn BlockDevice>> = if options.copy_on_read {
                     None
                 } else {
                     Some(source_bdev)
                 };
+                let target_clone = base_block_device.clone();
+                let (bgworker_tx, bgworker_rx) = channel();
                 let block_device: Box<dyn BlockDevice> = block_device::LazyBlockDevice::new(
                     base_block_device,
                     maybe_image_bdev,
-                    bgworker_ch.clone(),
-                    metadata_state,
+                    bgworker_tx.clone(),
+                    shared_state.clone(),
                     options.track_written,
                 )?;
-                (block_device, Some(bgworker), Some(bgworker_ch))
+                let bgworker_config = BgWorkerConfig {
+                    source_dev: source_clone,
+                    target_dev: target_clone,
+                    metadata_dev,
+                    alignment,
+                    status_path: options.status_path.as_ref().map(PathBuf::from),
+                    autofetch: options.autofetch,
+                    shared_state,
+                    receiver: bgworker_rx,
+                };
+                (block_device, Some(bgworker_config), Some(bgworker_tx))
             } else {
                 (base_block_device, None, None)
             };
 
         Ok(BackendEnv {
             bdev: block_device,
-            bgworker,
+            bgworker_config,
             bgworker_ch,
             alignment,
             options: options.clone(),
@@ -404,15 +420,34 @@ impl BackendEnv {
     }
 
     fn run_bgworker_thread(&mut self) -> Result<()> {
-        if let Some(bgworker) = self.bgworker.clone() {
+        if let Some(config) = self.bgworker_config.take() {
             self.bgworker_thread = Some(
                 std::thread::Builder::new()
                     .name("bgworker".to_string())
                     .spawn(move || {
-                        if let Ok(mut b) = bgworker.lock() {
-                            b.run();
-                        } else {
-                            error!("Failed to lock bgworker in thread");
+                        let BgWorkerConfig {
+                            source_dev,
+                            target_dev,
+                            metadata_dev,
+                            alignment,
+                            status_path,
+                            autofetch,
+                            shared_state,
+                            receiver,
+                        } = config;
+
+                        match BgWorker::new(
+                            &*source_dev,
+                            &*target_dev,
+                            &*metadata_dev,
+                            alignment,
+                            status_path,
+                            autofetch,
+                            shared_state,
+                            receiver,
+                        ) {
+                            Ok(mut worker) => worker.run(),
+                            Err(e) => error!("Failed to construct bgworker: {e}"),
                         }
                     })
                     .map_err(|e| {

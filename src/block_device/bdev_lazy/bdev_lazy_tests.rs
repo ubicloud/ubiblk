@@ -2,15 +2,15 @@
 mod tests {
     use crate::block_device::SharedBuffer;
     use crate::block_device::{
-        bdev_lazy::{init_metadata, BgWorker, LazyBlockDevice, SharedBgWorker, UbiMetadata},
+        bdev_lazy::{init_metadata, BgWorker, LazyBlockDevice, SharedMetadataState, UbiMetadata},
         bdev_test::{TestBlockDevice, TestDeviceMetrics},
-        BlockDevice, IoChannel,
+        load_metadata, BlockDevice, IoChannel,
     };
     use crate::utils::aligned_buffer::AlignedBuf;
     use crate::vhost_backend::SECTOR_SIZE;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::{Arc, Mutex, RwLock};
+    use std::sync::{mpsc::channel, Arc, RwLock};
     use std::thread::sleep;
     use std::time::Duration;
 
@@ -22,7 +22,8 @@ mod tests {
 
     struct TestEnv {
         lazy: Box<LazyBlockDevice>,
-        bgworker: SharedBgWorker,
+        bgworker: RefCell<BgWorker>,
+        metadata_state: SharedMetadataState,
         stripe_sectors: u64,
         target_mem: Arc<RwLock<Vec<u8>>>,
         target_metrics: Arc<RwLock<TestDeviceMetrics>>,
@@ -39,6 +40,15 @@ mod tests {
         let metadata = UbiMetadata::new(STRIPE_SHIFT, STRIPE_COUNT, STRIPE_COUNT);
         init_metadata(&metadata, &mut ch).unwrap();
 
+        let metadata_state = {
+            let mut load_ch = metadata_dev.create_channel().unwrap();
+            let loaded =
+                load_metadata(&mut load_ch, metadata_dev.sector_count()).expect("load metadata");
+            SharedMetadataState::new(&loaded)
+        };
+
+        let (bgworker_ch, bgworker_rx) = channel();
+
         if with_image {
             let image_dev = TestBlockDevice::new(DEV_SIZE);
             if !data.is_empty() {
@@ -47,24 +57,29 @@ mod tests {
                 image_dev.write(0, &tmp, SECTOR_SIZE);
             }
             let image_metrics = image_dev.metrics.clone();
-            let bgworker: SharedBgWorker = Arc::new(Mutex::new(
-                BgWorker::new(&image_dev, &target_dev, &metadata_dev, 512, None, false).unwrap(),
-            ));
-            let (bgworker_ch, metadata_state) = {
-                let guard = bgworker.lock().unwrap();
-                (guard.req_sender(), guard.shared_state())
-            };
+            let bgworker = BgWorker::new(
+                &image_dev,
+                &target_dev,
+                &metadata_dev,
+                512,
+                None,
+                false,
+                metadata_state.clone(),
+                bgworker_rx,
+            )
+            .unwrap();
             let lazy = LazyBlockDevice::new(
                 Box::new(target_dev),
                 Some(Box::new(image_dev)),
                 bgworker_ch,
-                metadata_state,
+                metadata_state.clone(),
                 track_written,
             )
             .unwrap();
             TestEnv {
                 lazy,
-                bgworker,
+                bgworker: RefCell::new(bgworker),
+                metadata_state,
                 stripe_sectors: STRIPE_SECTORS,
                 target_mem,
                 target_metrics,
@@ -77,24 +92,29 @@ mod tests {
                 tmp[..data.len()].copy_from_slice(data);
                 source_dev.write(0, &tmp, SECTOR_SIZE);
             }
-            let bgworker: SharedBgWorker = Arc::new(Mutex::new(
-                BgWorker::new(&source_dev, &target_dev, &metadata_dev, 512, None, false).unwrap(),
-            ));
-            let (bgworker_ch, metadata_state) = {
-                let guard = bgworker.lock().unwrap();
-                (guard.req_sender(), guard.shared_state())
-            };
+            let bgworker = BgWorker::new(
+                &source_dev,
+                &target_dev,
+                &metadata_dev,
+                512,
+                None,
+                false,
+                metadata_state.clone(),
+                bgworker_rx,
+            )
+            .unwrap();
             let lazy = LazyBlockDevice::new(
                 Box::new(target_dev),
                 None,
                 bgworker_ch,
-                metadata_state,
+                metadata_state.clone(),
                 track_written,
             )
             .unwrap();
             TestEnv {
                 lazy,
-                bgworker,
+                bgworker: RefCell::new(bgworker),
+                metadata_state,
                 stripe_sectors: STRIPE_SECTORS,
                 target_mem,
                 target_metrics,
@@ -104,11 +124,11 @@ mod tests {
     }
 
     /// Poll the channel and the bgworker until all operations complete.
-    fn drive(bgworker: &SharedBgWorker, chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
+    fn drive(bgworker: &RefCell<BgWorker>, chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
         let mut results = Vec::new();
         loop {
             {
-                let mut f = bgworker.lock().unwrap();
+                let mut f = bgworker.borrow_mut();
                 f.receive_requests(false);
                 f.update();
             }
@@ -119,7 +139,7 @@ mod tests {
             sleep(Duration::from_millis(1));
         }
         {
-            let mut f = bgworker.lock().unwrap();
+            let mut f = bgworker.borrow_mut();
             f.receive_requests(false);
             f.update();
         }
@@ -279,7 +299,7 @@ mod tests {
             write_data
         );
 
-        let state = env.bgworker.lock().unwrap().shared_state();
+        let state = env.metadata_state.clone();
         assert!(state.stripe_written(1));
 
         let flush_id = 2;
@@ -308,7 +328,7 @@ mod tests {
             write_data
         );
 
-        let state = env.bgworker.lock().unwrap().shared_state();
+        let state = env.metadata_state.clone();
         assert!(state.stripe_written(1));
 
         let flush_id = 2;

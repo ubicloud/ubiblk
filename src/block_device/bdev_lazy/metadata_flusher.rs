@@ -49,7 +49,11 @@ pub struct MetadataFlusher {
 }
 
 impl MetadataFlusher {
-    pub fn new(metadata_dev: &dyn BlockDevice, source_sector_count: u64) -> Result<Self> {
+    pub fn new(
+        metadata_dev: &dyn BlockDevice,
+        source_sector_count: u64,
+        shared_state: SharedMetadataState,
+    ) -> Result<Self> {
         let mut channel = metadata_dev.create_channel()?;
         let metadata = load_metadata(&mut channel, metadata_dev.sector_count())?;
 
@@ -67,7 +71,7 @@ impl MetadataFlusher {
 
         Ok(MetadataFlusher {
             channel,
-            shared_state: SharedMetadataState::new(&metadata),
+            shared_state,
             metadata,
             sectors_being_updated: HashSet::new(),
             queued_requests: VecDeque::new(),
@@ -76,16 +80,8 @@ impl MetadataFlusher {
         })
     }
 
-    pub fn shared_state(&self) -> SharedMetadataState {
-        self.shared_state.clone()
-    }
-
     pub fn busy(&self) -> bool {
         !self.sectors_being_updated.is_empty() || !self.queued_requests.is_empty()
-    }
-
-    pub fn stripe_sector_count(&self) -> u64 {
-        1u64 << self.metadata.stripe_sector_count_shift
     }
 
     pub fn set_stripe_fetched(&mut self, stripe_id: usize) {
@@ -216,8 +212,13 @@ mod tests {
     #[test]
     fn test_metadata_flusher() {
         let metadata_dev = init_metadata_device();
-        let mut metadata_flusher = MetadataFlusher::new(&metadata_dev, 8 * 1024).unwrap();
-        let shared_state = metadata_flusher.shared_state();
+        let shared_state = {
+            let mut channel = metadata_dev.create_channel().unwrap();
+            let metadata = load_metadata(&mut channel, metadata_dev.sector_count()).unwrap();
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
 
         metadata_flusher.set_stripe_fetched(5);
         metadata_flusher.set_stripe_fetched(6);
@@ -247,7 +248,13 @@ mod tests {
     #[test]
     fn test_source_stripe_count_too_large() {
         let metadata_dev = init_metadata_device();
-        let metadata_flusher = MetadataFlusher::new(&metadata_dev, 1024 * 1024 * 1024);
+        let shared_state = {
+            let mut channel = metadata_dev.create_channel().unwrap();
+            let metadata = load_metadata(&mut channel, metadata_dev.sector_count()).unwrap();
+            SharedMetadataState::new(&metadata)
+        };
+        let metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 1024 * 1024 * 1024, shared_state);
         assert!(metadata_flusher.is_err());
     }
 }

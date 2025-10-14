@@ -6,11 +6,11 @@ use crate::{Result, VhostUserBlockError};
 #[cfg(not(feature = "disable-isal-crypto"))]
 use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
 #[cfg(feature = "disable-isal-crypto")]
-use aes::cipher::generic_array::GenericArray;
+use aes::cipher::KeyInit;
 #[cfg(feature = "disable-isal-crypto")]
 use aes::Aes256;
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit as AeadKeyInit, Payload},
+    aead::{Aead, AeadCore, Payload},
     Aes256Gcm, Nonce,
 };
 use log::error;
@@ -38,8 +38,10 @@ impl CryptIoChannel {
     pub fn new(base: Box<dyn IoChannel>, key1: [u8; 32], key2: [u8; 32]) -> Self {
         #[cfg(feature = "disable-isal-crypto")]
         let xts = {
-            let cipher1 = Aes256::new(GenericArray::from_slice(&key1));
-            let cipher2 = Aes256::new(GenericArray::from_slice(&key2));
+            let cipher1 =
+                Aes256::new_from_slice(&key1).expect("XTS primary key must be exactly 32 bytes");
+            let cipher2 =
+                Aes256::new_from_slice(&key2).expect("XTS secondary key must be exactly 32 bytes");
             Xts128::new(cipher1, cipher2)
         };
 
@@ -265,6 +267,7 @@ fn decrypt_keys(
         }
 
         CipherMethod::Aes256Gcm => {
+            use aes_gcm::KeyInit;
             let kek_key = kek.key.ok_or(VhostUserBlockError::InvalidParameter {
                 description: "Key is required".to_string(),
             })?;
@@ -290,10 +293,16 @@ fn decrypt_keys(
                     description: "Initial vector must be exactly 12 bytes".to_string(),
                 });
             }
-            let nonce = KekNonce::from_slice(&kek_iv);
+            let nonce_bytes: [u8; 12] = kek_iv.as_slice().try_into().map_err(|_| {
+                error!("Initial vector must be exactly 12 bytes");
+                VhostUserBlockError::InvalidParameter {
+                    description: "Initial vector must be exactly 12 bytes".to_string(),
+                }
+            })?;
+            let nonce = KekNonce::from(nonce_bytes);
 
-            let clear1 = decrypt_block(&cipher, nonce, &kek_auth_data, &key1)?;
-            let clear2 = decrypt_block(&cipher, nonce, &kek_auth_data, &key2)?;
+            let clear1 = decrypt_block(&cipher, &nonce, &kek_auth_data, &key1)?;
+            let clear2 = decrypt_block(&cipher, &nonce, &kek_auth_data, &key2)?;
             Ok((clear1, clear2))
         }
     }
@@ -558,13 +567,13 @@ mod tests {
 
     #[test]
     fn test_decrypt_block_failure() {
-        use aes_gcm::Aes256Gcm;
+        use aes_gcm::{Aes256Gcm, KeyInit};
 
         let cipher = Aes256Gcm::new_from_slice(&[0u8; 32]).unwrap();
-        let nonce = KekNonce::from_slice(&[0u8; 12]);
+        let nonce = KekNonce::from([0u8; 12]);
         let enc = vec![0u8; 48];
 
-        let res = decrypt_block(&cipher, nonce, &[], &enc);
+        let res = decrypt_block(&cipher, &nonce, &[], &enc);
         assert!(matches!(
             res,
             Err(VhostUserBlockError::InvalidParameter { .. })
@@ -605,11 +614,11 @@ mod tests {
     fn test_decrypt_block_bad_plain_length() {
         use aes_gcm::{aead::KeyInit as AeadKeyInit, Aes256Gcm};
         let cipher = Aes256Gcm::new_from_slice(&[0u8; 32]).unwrap();
-        let nonce = KekNonce::from_slice(&[0u8; 12]);
+        let nonce = KekNonce::from([0u8; 12]);
         let data = [1u8; 8];
         let enc = cipher
             .encrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: &data,
                     aad: b"",
@@ -617,7 +626,7 @@ mod tests {
             )
             .unwrap();
 
-        let res = decrypt_block(&cipher, nonce, b"", &enc);
+        let res = decrypt_block(&cipher, &nonce, b"", &enc);
         assert!(matches!(
             res,
             Err(VhostUserBlockError::InvalidParameter { .. })

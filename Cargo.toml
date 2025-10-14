@@ -9,7 +9,7 @@ lto = true
 strip = true
 
 [dependencies]
-clap = { version = "4.5.48", features = ["cargo", "wrap_help", "derive"] }
+clap = { version = "4.5.49", features = ["cargo", "wrap_help", "derive"] }
 serde = { version = "1.0", features = ["derive"] }
 bincode = { version = "2.0.1", features = ["serde"] }
 libc = "0.2"

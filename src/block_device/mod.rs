@@ -47,6 +47,6 @@ pub use bdev_lazy::LazyBlockDevice;
 pub use bdev_lazy::UbiMetadata;
 pub use bdev_lazy::{BgWorker, BgWorkerRequest, SharedMetadataState, StatusReport, StatusReporter};
 pub use bdev_null::NullBlockDevice;
-pub use bdev_remote::RemoteBlockDevice;
+pub use bdev_remote::{RemoteBlockDevice, RemoteTlsConfig};
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;

@@ -103,6 +103,10 @@ pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
     pub remote_image_address: Option<String>,
+    #[serde(default)]
+    pub remote_tls_psk_identity: Option<String>,
+    #[serde(default)]
+    pub remote_tls_psk_key_path: Option<String>,
     pub metadata_path: Option<String>,
     pub io_debug_path: Option<String>,
     pub rpc_socket_path: Option<String>,

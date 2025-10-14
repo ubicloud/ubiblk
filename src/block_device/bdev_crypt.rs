@@ -9,10 +9,9 @@ use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
 use aes::cipher::generic_array::GenericArray;
 #[cfg(feature = "disable-isal-crypto")]
 use aes::Aes256;
-use aes_gcm::aead::Payload;
 use aes_gcm::{
-    aead::{consts::U12, generic_array::GenericArray as AeadArray, Aead, KeyInit as AeadKeyInit},
-    Aes256Gcm,
+    aead::{Aead, AeadCore, KeyInit as AeadKeyInit, Payload},
+    Aes256Gcm, Nonce,
 };
 use log::error;
 #[cfg(feature = "disable-isal-crypto")]
@@ -291,7 +290,7 @@ fn decrypt_keys(
                     description: "Initial vector must be exactly 12 bytes".to_string(),
                 });
             }
-            let nonce = Nonce::from_slice(&kek_iv);
+            let nonce = KekNonce::from_slice(&kek_iv);
 
             let clear1 = decrypt_block(&cipher, nonce, &kek_auth_data, &key1)?;
             let clear2 = decrypt_block(&cipher, nonce, &kek_auth_data, &key2)?;
@@ -300,11 +299,11 @@ fn decrypt_keys(
     }
 }
 
-type Nonce = AeadArray<u8, U12>;
+type KekNonce = Nonce<<Aes256Gcm as AeadCore>::NonceSize>;
 
 fn decrypt_block(
     cipher: &Aes256Gcm,
-    nonce: &Nonce,
+    nonce: &KekNonce,
     auth_data: &[u8],
     enc: &[u8],
 ) -> Result<[u8; 32]> {
@@ -562,7 +561,7 @@ mod tests {
         use aes_gcm::Aes256Gcm;
 
         let cipher = Aes256Gcm::new_from_slice(&[0u8; 32]).unwrap();
-        let nonce = AeadArray::from_slice(&[0u8; 12]);
+        let nonce = KekNonce::from_slice(&[0u8; 12]);
         let enc = vec![0u8; 48];
 
         let res = decrypt_block(&cipher, nonce, &[], &enc);
@@ -606,7 +605,7 @@ mod tests {
     fn test_decrypt_block_bad_plain_length() {
         use aes_gcm::{aead::KeyInit as AeadKeyInit, Aes256Gcm};
         let cipher = Aes256Gcm::new_from_slice(&[0u8; 32]).unwrap();
-        let nonce = AeadArray::from_slice(&[0u8; 12]);
+        let nonce = KekNonce::from_slice(&[0u8; 12]);
         let data = [1u8; 8];
         let enc = cipher
             .encrypt(

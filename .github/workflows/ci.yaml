@@ -23,20 +23,12 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf libtool nasm clang build-essential clang-format meson docutils
+          sudo apt-get install -y autoconf libtool nasm clang build-essential clang-format
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Clone and build libblkio
-        run: |
-          git clone https://gitlab.com/libblkio/libblkio.git
-          cd libblkio
-          meson setup build --prefix=/usr/local
-          meson compile -C build
-          sudo --preserve-env=PATH,RUSTUP_HOME,CARGO_HOME,HOME meson install -C build
 
       - name: Clone and build isa-l_crypto
         run: |
@@ -75,6 +67,38 @@ jobs:
 
       - name: Build project
         run: cargo build
+
+  e2e:
+    runs-on: ubicloud-standard-4
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf libtool nasm clang build-essential clang-format meson docutils
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Clone and build libblkio
+        run: |
+          git clone https://gitlab.com/libblkio/libblkio.git
+          cd libblkio
+          meson setup build --prefix=/usr/local
+          meson compile -C build
+          sudo --preserve-env=PATH,RUSTUP_HOME,CARGO_HOME,HOME meson install -C build
+
+      - name: Clone and build isa-l_crypto
+        run: |
+          git clone --depth 1 --branch v2.25.0 https://github.com/intel/isa-l_crypto
+          cd isa-l_crypto
+          ./autogen.sh
+          ./configure --prefix=/usr --libdir=/usr/lib
+          make -j$(nproc)
+          sudo make install
 
       - name: Run e2e tests
         run: |

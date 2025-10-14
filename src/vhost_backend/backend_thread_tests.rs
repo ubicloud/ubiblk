@@ -44,6 +44,8 @@ mod tests {
             path: path.to_string(),
             image_path: None,
             remote_image_address: None,
+            remote_tls_psk_identity: None,
+            remote_tls_psk_key_path: None,
             metadata_path: None,
             io_debug_path: None,
             rpc_socket_path: None,

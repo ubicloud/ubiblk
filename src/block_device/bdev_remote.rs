@@ -1,12 +1,20 @@
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 
 use log::{debug, error};
 
 use super::{BlockDevice, IoChannel, SharedBuffer, UbiMetadata};
+use crate::utils::tls;
 use crate::vhost_backend::SECTOR_SIZE;
 use crate::{Result, VhostUserBlockError};
+
+use openssl::ssl::SslConnector;
+
+trait ReadWrite: Read + Write {}
+impl<T: Read + Write> ReadWrite for T {}
+
+type RemoteStream = dyn ReadWrite + Send;
 
 const READ_STRIPE_CMD: u8 = 0x01;
 const STATUS_OK: u8 = 0x00;
@@ -14,7 +22,43 @@ const STATUS_INVALID_STRIPE: u8 = 0x01;
 const STATUS_UNWRITTEN: u8 = 0x02;
 const STRIPE_WRITTEN_MASK: u8 = 1 << 1;
 
-fn read_metadata_bytes(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+#[derive(Clone)]
+pub struct RemoteTlsConfig {
+    connector: Arc<SslConnector>,
+}
+
+impl RemoteTlsConfig {
+    pub fn new(identity: Vec<u8>, key: Vec<u8>) -> Result<Self> {
+        let connector =
+            tls::build_psk_connector(Arc::new(identity), Arc::new(key)).map_err(|err| {
+                VhostUserBlockError::InvalidParameter {
+                    description: format!("failed to configure TLS connector: {err}"),
+                }
+            })?;
+
+        Ok(Self {
+            connector: Arc::new(connector),
+        })
+    }
+
+    fn connect(&self, addr: SocketAddr) -> io::Result<Box<RemoteStream>> {
+        let stream = TcpStream::connect(addr)?;
+        let stream = tls::connect_psk_stream(self.connector.as_ref(), stream)?;
+        Ok(Box::new(stream))
+    }
+}
+
+fn open_stream(addr: SocketAddr, tls: Option<&RemoteTlsConfig>) -> io::Result<Box<RemoteStream>> {
+    match tls {
+        Some(cfg) => cfg.connect(addr),
+        None => {
+            let stream = TcpStream::connect(addr)?;
+            Ok(Box::new(stream))
+        }
+    }
+}
+
+fn read_metadata_bytes(stream: &mut dyn Read) -> io::Result<Vec<u8>> {
     debug!("Reading metadata from remote server");
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
@@ -62,16 +106,23 @@ fn parse_metadata(bytes: &[u8]) -> Result<Box<UbiMetadata>> {
 }
 
 pub struct RemoteBlockDevice {
-    server_addr: String,
+    server_addr: SocketAddr,
     sector_count: u64,
     stripe_sector_count: u64,
+    tls: Option<RemoteTlsConfig>,
 }
 
 impl RemoteBlockDevice {
-    pub fn new(server_addr: String) -> Result<Box<Self>> {
-        let mut stream = TcpStream::connect(&server_addr)
+    pub fn new(server_addr: String, tls: Option<RemoteTlsConfig>) -> Result<Box<Self>> {
+        let socket_addr = server_addr.parse::<SocketAddr>().map_err(|err| {
+            VhostUserBlockError::InvalidParameter {
+                description: format!("invalid remote address {server_addr}: {err}"),
+            }
+        })?;
+
+        let mut stream = open_stream(socket_addr, tls.as_ref())
             .map_err(|e| VhostUserBlockError::IoError { source: e })?;
-        let metadata_bytes = read_metadata_bytes(&mut stream)
+        let metadata_bytes = read_metadata_bytes(stream.as_mut())
             .map_err(|e| VhostUserBlockError::IoError { source: e })?;
         let metadata = parse_metadata(&metadata_bytes)?;
 
@@ -98,16 +149,18 @@ impl RemoteBlockDevice {
             })?;
 
         Ok(Box::new(Self {
-            server_addr,
+            server_addr: socket_addr,
             sector_count,
             stripe_sector_count,
+            tls,
         }))
     }
 }
 
 impl BlockDevice for RemoteBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
-        let channel = RemoteIoChannel::new(&self.server_addr, self.stripe_sector_count)?;
+        let channel =
+            RemoteIoChannel::new(self.server_addr, self.stripe_sector_count, self.tls.clone())?;
         Ok(Box::new(channel))
     }
 
@@ -117,25 +170,30 @@ impl BlockDevice for RemoteBlockDevice {
 
     fn clone(&self) -> Box<dyn BlockDevice> {
         Box::new(Self {
-            server_addr: self.server_addr.clone(),
+            server_addr: self.server_addr,
             sector_count: self.sector_count,
             stripe_sector_count: self.stripe_sector_count,
+            tls: self.tls.clone(),
         })
     }
 }
 
 struct RemoteIoChannel {
-    stream: TcpStream,
+    stream: Box<RemoteStream>,
     metadata: Arc<UbiMetadata>,
     stripe_sector_count: u64,
     finished_requests: Vec<(usize, bool)>,
 }
 
 impl RemoteIoChannel {
-    fn new(server_addr: &str, stripe_sector_count: u64) -> Result<Self> {
-        let mut stream = TcpStream::connect(server_addr)
+    fn new(
+        server_addr: SocketAddr,
+        stripe_sector_count: u64,
+        tls: Option<RemoteTlsConfig>,
+    ) -> Result<Self> {
+        let mut stream = open_stream(server_addr, tls.as_ref())
             .map_err(|e| VhostUserBlockError::IoChannelCreation { source: e })?;
-        let metadata_bytes = read_metadata_bytes(&mut stream)
+        let metadata_bytes = read_metadata_bytes(stream.as_mut())
             .map_err(|e| VhostUserBlockError::IoChannelCreation { source: e })?;
         let remote_metadata = parse_metadata(&metadata_bytes)?;
 

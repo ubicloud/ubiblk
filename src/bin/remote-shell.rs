@@ -1,13 +1,21 @@
 use std::collections::HashMap;
 use std::io::{self, ErrorKind, Read, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::num::TryFromIntError;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use ubiblk::block_device::UbiMetadata;
+use ubiblk::utils::tls;
 use ubiblk::vhost_backend::SECTOR_SIZE;
+
+trait ReadWrite: Read + Write {}
+impl<T: Read + Write> ReadWrite for T {}
+
+type DynStream = dyn ReadWrite;
 
 const READ_STRIPE_CMD: u8 = 0x01;
 const STATUS_OK: u8 = 0x00;
@@ -25,13 +33,68 @@ struct Args {
     /// Address of the remote-bdev-server, e.g. 127.0.0.1:4555
     #[arg(value_name = "IP:PORT")]
     server: String,
+
+    /// Enable TLS using the provided PSK identity when `--tls-psk-key` is set.
+    #[arg(long, requires = "tls_psk_key")]
+    tls_psk_identity: Option<String>,
+
+    /// Path to a hex-encoded PSK shared with the remote server.
+    #[arg(long, requires = "tls_psk_identity")]
+    tls_psk_key: Option<PathBuf>,
 }
 
 fn main() -> io::Result<()> {
-    let args = Args::parse();
+    let Args {
+        server,
+        tls_psk_identity,
+        tls_psk_key,
+    } = Args::parse();
 
-    let mut stream = TcpStream::connect(&args.server)?;
-    let metadata_bytes = read_metadata(&mut stream)?;
+    let server_addr: SocketAddr = server.parse().map_err(|err| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid server address {server}: {err}"),
+        )
+    })?;
+
+    let tls_connector = match (tls_psk_identity.as_deref(), tls_psk_key.as_ref()) {
+        (Some(identity), Some(key_path)) => {
+            let identity_bytes = tls::prepare_psk_identity(identity).map_err(|err| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("invalid TLS PSK identity: {err}"),
+                )
+            })?;
+            let key_bytes = tls::read_psk_key(key_path).map_err(|err| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("failed to read TLS PSK key: {err}"),
+                )
+            })?;
+            let connector = tls::build_psk_connector(Arc::new(identity_bytes), Arc::new(key_bytes))
+                .map_err(|err| {
+                    io::Error::other(format!("failed to configure TLS connector: {err}"))
+                })?;
+            Some(connector)
+        }
+        (None, None) => None,
+        _ => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "TLS PSK identity and key must either both be provided or both omitted",
+            ))
+        }
+    };
+
+    let mut stream: Box<DynStream> = match tls_connector.as_ref() {
+        Some(connector) => {
+            let tcp = TcpStream::connect(server_addr)?;
+            Box::new(tls::connect_psk_stream(connector, tcp)?)
+        }
+        None => Box::new(TcpStream::connect(server_addr)?),
+    };
+
+    let metadata_bytes = read_metadata(&mut *stream)?;
     let metadata = parse_metadata(&metadata_bytes)?;
 
     let stripe_len_bytes = stripe_len_bytes(&metadata)?;
@@ -90,7 +153,7 @@ fn main() -> io::Result<()> {
                         continue;
                     }
 
-                    match fetch_stripe(&mut stream, stripe_idx, stripe_len_bytes) {
+                    match fetch_stripe(&mut *stream, stripe_idx, stripe_len_bytes) {
                         Ok(data) => {
                             fetched_stripes.insert(stripe_idx, data);
                             println!("FETCHED");
@@ -196,7 +259,7 @@ fn parse_u64(input: Option<&str>) -> Result<u64, String> {
         })
 }
 
-fn read_metadata(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+fn read_metadata(stream: &mut dyn Read) -> io::Result<Vec<u8>> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let metadata_len = u32::from_le_bytes(len_buf) as usize;
@@ -247,7 +310,7 @@ fn stripe_len_bytes(metadata: &UbiMetadata) -> io::Result<usize> {
 }
 
 fn fetch_stripe(
-    stream: &mut TcpStream,
+    stream: &mut dyn ReadWrite,
     stripe_idx: u64,
     stripe_len: usize,
 ) -> Result<Vec<u8>, String> {

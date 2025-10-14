@@ -16,15 +16,53 @@ use super::{backend::UbiBlkBackend, rpc, IoEngine, KeyEncryptionCipher, Options}
 use crate::{
     block_device::{
         self, init_metadata as init_metadata_file, load_metadata, BgWorker, BgWorkerRequest,
-        BlockDevice, SharedMetadataState, StatusReporter, UbiMetadata, UringBlockDevice,
+        BlockDevice, RemoteTlsConfig, SharedMetadataState, StatusReporter, UbiMetadata,
+        UringBlockDevice,
     },
-    utils::aligned_buffer::BUFFER_ALIGNMENT,
+    utils::{aligned_buffer::BUFFER_ALIGNMENT, tls},
     vhost_backend::io_tracking::IoTracker,
     Result, VhostUserBlockError,
 };
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
 type SourceDevices = (Box<dyn BlockDevice>, Option<Box<dyn BlockDevice>>);
+
+fn build_remote_tls(options: &Options) -> Result<Option<RemoteTlsConfig>> {
+    let identity = options.remote_tls_psk_identity.as_deref();
+    let key_path = options.remote_tls_psk_key_path.as_deref();
+
+    match (identity, key_path) {
+        (None, None) => Ok(None),
+        (Some(identity), Some(key_path)) => {
+            if options.remote_image_address.is_none() {
+                return Err(VhostUserBlockError::InvalidParameter {
+                    description:
+                        "remote TLS PSK options require remote_image_address to be specified"
+                            .to_string(),
+                });
+            }
+
+            let identity_bytes = tls::prepare_psk_identity(identity).map_err(|err| {
+                VhostUserBlockError::InvalidParameter {
+                    description: format!("invalid remote TLS PSK identity: {err}"),
+                }
+            })?;
+
+            let key_bytes = tls::read_psk_key(Path::new(key_path)).map_err(|err| {
+                VhostUserBlockError::InvalidParameter {
+                    description: format!("failed to read remote TLS PSK key: {err}"),
+                }
+            })?;
+
+            RemoteTlsConfig::new(identity_bytes, key_bytes).map(Some)
+        }
+        (Some(_), None) | (None, Some(_)) => Err(VhostUserBlockError::InvalidParameter {
+            description:
+                "remote TLS PSK identity and key path must either both be provided or both omitted"
+                    .to_string(),
+        }),
+    }
+}
 
 struct BgWorkerConfig {
     source_dev: Box<dyn BlockDevice>,
@@ -163,7 +201,8 @@ impl BackendEnv {
 
     fn create_source_devices(options: &Options) -> Result<SourceDevices> {
         let source: Box<dyn BlockDevice> = if let Some(ref address) = options.remote_image_address {
-            block_device::RemoteBlockDevice::new(address.clone())?
+            let remote_tls = build_remote_tls(options)?;
+            block_device::RemoteBlockDevice::new(address.clone(), remote_tls)?
         } else if let Some(ref path) = options.image_path {
             let readonly = true;
             create_io_engine_device(

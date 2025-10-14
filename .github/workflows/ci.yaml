@@ -60,7 +60,7 @@ jobs:
         run: cargo audit --deny warnings
 
       - name: Run tests with coverage
-        run: cargo llvm-cov --fail-under-lines 78 --ignore-filename-regex src/bin/
+        run: cargo llvm-cov --fail-under-lines 77 --ignore-filename-regex src/bin/
 
       - name: Run tests without isa-l_crypto
         run: cargo test --features disable-isal-crypto

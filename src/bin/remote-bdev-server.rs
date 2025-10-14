@@ -8,8 +8,33 @@ use std::thread;
 
 use clap::Parser;
 use log::{error, info, warn};
+use openssl::ssl::SslAcceptor;
 use ubiblk::block_device::UbiMetadata;
+use ubiblk::utils::tls;
 use ubiblk::vhost_backend::SECTOR_SIZE;
+
+trait ReadWrite: Read + Write {}
+impl<T: Read + Write> ReadWrite for T {}
+
+type DynStream = Box<dyn ReadWrite + Send>;
+
+#[derive(Clone)]
+struct TlsServerConfig {
+    acceptor: Arc<SslAcceptor>,
+}
+
+impl TlsServerConfig {
+    fn new(acceptor: SslAcceptor) -> Self {
+        Self {
+            acceptor: Arc::new(acceptor),
+        }
+    }
+
+    fn accept(&self, stream: TcpStream) -> io::Result<DynStream> {
+        let stream = tls::accept_psk_stream(self.acceptor.as_ref(), stream)?;
+        Ok(Box::new(stream))
+    }
+}
 
 const READ_STRIPE_CMD: u8 = 0x01;
 const STATUS_OK: u8 = 0x00;
@@ -35,6 +60,14 @@ struct Args {
     /// Path to the backing image whose stripes are served to clients.
     #[arg(long)]
     image: PathBuf,
+
+    /// Enable TLS using the provided PSK identity when `--tls-psk-key` is set.
+    #[arg(long, requires = "tls_psk_key")]
+    tls_psk_identity: Option<String>,
+
+    /// Path to a hex-encoded PSK shared with clients when `--tls-psk-identity` is set.
+    #[arg(long, requires = "tls_psk_identity")]
+    tls_psk_key: Option<PathBuf>,
 }
 
 fn main() {
@@ -49,14 +82,22 @@ fn main() {
 }
 
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
-    let metadata_bytes = std::fs::read(&args.metadata)?;
+    let Args {
+        bind,
+        metadata,
+        image,
+        tls_psk_identity,
+        tls_psk_key,
+    } = args;
+
+    let metadata_bytes = std::fs::read(&metadata)?;
     if metadata_bytes.len() < UbiMetadata::HEADER_SIZE {
-        return Err(format!("metadata file {} is too small", args.metadata.display()).into());
+        return Err(format!("metadata file {} is too small", metadata.display()).into());
     }
     if metadata_bytes.len() > u32::MAX as usize {
         return Err(format!(
             "metadata file {} exceeds protocol limits",
-            args.metadata.display()
+            metadata.display()
         )
         .into());
     }
@@ -75,20 +116,38 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let metadata: Arc<UbiMetadata> = Arc::from(metadata);
     let metadata_bytes = Arc::new(metadata_bytes);
 
-    let image_file = File::open(&args.image)?;
+    let image_file = File::open(&image)?;
     let image_len = image_file.metadata()?.len();
     let expected_len = stripe_len_bytes as u64 * metadata.stripe_count();
     if image_len < expected_len {
         warn!(
             "image file {} is smaller than the metadata implies ({} < {})",
-            args.image.display(),
+            image.display(),
             image_len,
             expected_len
         );
     }
     let image = Arc::new(Mutex::new(image_file));
 
-    let listener = TcpListener::bind(&args.bind)?;
+    let tls_config = match (tls_psk_identity.as_deref(), tls_psk_key.as_ref()) {
+        (Some(identity), Some(key_path)) => {
+            let identity_bytes = tls::prepare_psk_identity(identity)
+                .map_err(|err| format!("invalid TLS PSK identity: {err}"))?;
+            let key_bytes = tls::read_psk_key(key_path)
+                .map_err(|err| format!("failed to read TLS PSK key: {err}"))?;
+            let acceptor = tls::build_psk_acceptor(Arc::new(identity_bytes), Arc::new(key_bytes))
+                .map_err(|err| format!("failed to configure TLS acceptor: {err}"))?;
+            Some(TlsServerConfig::new(acceptor))
+        }
+        (None, None) => None,
+        _ => {
+            return Err(
+                "TLS PSK identity and key must either both be provided or both omitted".into(),
+            )
+        }
+    };
+
+    let listener = TcpListener::bind(&bind)?;
     info!("listening on {}", listener.local_addr()?);
 
     loop {
@@ -97,15 +156,23 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         let metadata_bytes = Arc::clone(&metadata_bytes);
         let metadata = Arc::clone(&metadata);
         let image = Arc::clone(&image);
+        let tls_config = tls_config.clone();
         thread::spawn(move || {
-            match handle_client(
-                stream,
-                addr,
-                metadata_bytes,
-                metadata,
-                image,
-                stripe_len_bytes,
-            ) {
+            let result = (|| -> Result<(), Box<dyn Error>> {
+                let stream = match wrap_stream(stream, tls_config.as_ref()) {
+                    Ok(stream) => stream,
+                    Err(err) => return Err(Box::new(err)),
+                };
+                handle_client(
+                    stream,
+                    addr,
+                    metadata_bytes,
+                    metadata,
+                    image,
+                    stripe_len_bytes,
+                )
+            })();
+            match result {
                 Ok(()) => info!("client {addr} disconnected"),
                 Err(err) => error!("client {addr}: {err}"),
             }
@@ -113,8 +180,15 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn wrap_stream(stream: TcpStream, tls: Option<&TlsServerConfig>) -> io::Result<DynStream> {
+    match tls {
+        Some(cfg) => cfg.accept(stream),
+        None => Ok(Box::new(stream)),
+    }
+}
+
 fn handle_client(
-    mut stream: TcpStream,
+    mut stream: DynStream,
     peer: SocketAddr,
     metadata_bytes: Arc<Vec<u8>>,
     metadata: Arc<UbiMetadata>,

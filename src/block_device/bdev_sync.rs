@@ -9,6 +9,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+#[cfg(test)]
+use nix::unistd::pipe;
+
 struct SyncIoChannel {
     file: Arc<Mutex<File>>,
     finished_requests: Vec<(usize, bool)>,
@@ -172,7 +175,6 @@ impl SyncBlockDevice {
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::FromRawFd;
     use std::{cell::RefCell, rc::Rc};
 
     use tempfile::NamedTempFile;
@@ -291,10 +293,14 @@ mod tests {
     // Use a pipe to provoke seek failures during read/write operations.
     // std::mem::forget prevents the pipe file descriptor from being closed twice.
     fn seek_error_paths() -> Result<()> {
-        let mut fds = [0; 2];
-        unsafe { libc::pipe(fds.as_mut_ptr()) };
-        let file = unsafe { File::from_raw_fd(fds[1]) };
-        let _r = unsafe { File::from_raw_fd(fds[0]) };
+        let (read_fd, write_fd) = pipe().map_err(|e| {
+            error!("Failed to create pipe: {e}");
+            VhostUserBlockError::IoError {
+                source: std::io::Error::from(e),
+            }
+        })?;
+        let file = File::from(write_fd);
+        let _r = File::from(read_fd);
         let mut chan = SyncIoChannel {
             file: Arc::new(Mutex::new(file)),
             finished_requests: Vec::new(),

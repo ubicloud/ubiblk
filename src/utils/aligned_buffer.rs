@@ -1,5 +1,3 @@
-use std::slice;
-
 /// Default alignment for buffers used with O_DIRECT.
 pub const BUFFER_ALIGNMENT: usize = 4096;
 
@@ -40,19 +38,19 @@ impl AlignedBuf {
     }
 
     pub fn as_ptr(&self) -> *const u8 {
-        unsafe { self.vec.as_ptr().add(self.offset) }
+        self.vec[self.offset..self.offset + self.len].as_ptr()
     }
 
     pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        unsafe { self.vec.as_mut_ptr().add(self.offset) }
+        self.vec[self.offset..self.offset + self.len].as_mut_ptr()
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.as_ptr(), self.len) }
+        &self.vec[self.offset..self.offset + self.len]
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { slice::from_raw_parts_mut(self.as_mut_ptr(), self.len) }
+        &mut self.vec[self.offset..self.offset + self.len]
     }
 
     pub fn len(&self) -> usize {

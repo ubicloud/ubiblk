@@ -11,8 +11,12 @@ use crate::block_device::SharedBuffer;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{Result, VhostUserBlockError};
 
-use libc::{cpu_set_t, sched_setaffinity, CPU_SET, CPU_ZERO, EFD_NONBLOCK};
+use libc::EFD_NONBLOCK;
 use log::{error, info};
+use nix::{
+    sched::{sched_setaffinity, CpuSet},
+    unistd::Pid,
+};
 use vhost_user_backend::{bitmap::BitmapMmapRegion, VringState};
 use virtio_bindings::virtio_blk::*;
 use virtio_queue::{DescriptorChain, QueueT};
@@ -167,20 +171,16 @@ impl UbiBlkBackendThread {
             return;
         }
         self.pinned = true;
-        unsafe {
-            let mut set: cpu_set_t = std::mem::zeroed();
-            CPU_ZERO(&mut set);
-            CPU_SET(cpu, &mut set);
-            let ret = sched_setaffinity(0, std::mem::size_of::<cpu_set_t>(), &set);
-            if ret != 0 {
-                error!(
-                    "failed to pin thread to cpu {cpu}: {:?}",
-                    std::io::Error::last_os_error()
-                );
-            } else {
-                let thread_id = std::thread::current().id();
-                info!("pinned thread {thread_id:?} to cpu {cpu}");
-            }
+        let mut set = CpuSet::new();
+        if let Err(e) = set.set(cpu) {
+            error!("failed to configure CPU set for cpu {cpu}: {e}");
+            return;
+        }
+        if let Err(e) = sched_setaffinity(Pid::from_raw(0), &set) {
+            error!("failed to pin thread to cpu {cpu}: {e}");
+        } else {
+            let thread_id = std::thread::current().id();
+            info!("pinned thread {thread_id:?} to cpu {cpu}");
         }
     }
 

@@ -42,17 +42,19 @@ plain TCP.
 
 ## vhost-user backend configuration
 
-Add the new fields to the YAML configuration used by `ubiblk-vhost-backend`:
+Add a `remote_image` block to the YAML configuration used by
+`ubiblk-vhost-backend`:
 
 ```yaml
-remote-image-address: 203.0.113.42:4555
-remote-tls-psk-identity: ubiblk-prod
-remote-tls-psk-key-path: /path/to/tls-psk.hex
+remote_image:
+  address: 203.0.113.42:4555
+  tls_psk_identity: ubiblk-prod
+  tls_psk_key: AQIDBAUGBwgJCgsMDQ4PEA==
 ```
 
-`remote-tls-psk-identity` and `remote-tls-psk-key-path` must either both be
-present or both omitted. The key path must point to the same hex-encoded file
-that the server uses.
+`tls_psk_identity` and `tls_psk_key` must either both be present or both
+omitted. The key is base64-encoded raw bytes, so you can reuse the hexadecimal
+file generated above with `xxd -r -p tls-psk.hex | base64`.
 
 ## remote-shell
 

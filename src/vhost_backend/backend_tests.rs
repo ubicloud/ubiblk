@@ -10,7 +10,7 @@ mod tests {
     use vhost::vhost_user::message::VhostUserProtocolFeatures;
     use vhost_user_backend::VhostUserBackend;
     use virtio_bindings::virtio_blk::VIRTIO_BLK_F_FLUSH;
-    use vm_memory::{GuestMemoryAtomic, GuestMemoryMmap};
+    use vm_memory::{ByteValued, GuestMemoryAtomic, GuestMemoryMmap};
     use vmm_sys_util::epoll::EventSet;
 
     fn default_options(path: String) -> Options {
@@ -160,8 +160,7 @@ mod tests {
 
         let bytes = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
         assert_eq!(bytes.len(), std::mem::size_of::<VirtioBlockConfig>());
-        let config: VirtioBlockConfig =
-            unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const VirtioBlockConfig) };
+        let config: VirtioBlockConfig = *VirtioBlockConfig::from_slice(&bytes).unwrap();
         let capacity = config.capacity;
         let blk_size = config.blk_size;
         let queues = config.num_queues;

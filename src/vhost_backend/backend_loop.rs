@@ -404,7 +404,7 @@ pub fn init_metadata(
     Ok(())
 }
 
-fn build_block_device(
+pub fn build_block_device(
     path: &str,
     options: &Options,
     kek: KeyEncryptionCipher,

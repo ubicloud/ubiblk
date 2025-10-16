@@ -2,12 +2,14 @@
 
 When a client connects, the server sends the image metadata. Then the client
 can request stripes. For each stripe request, the server responds with a
-status byte followed by the stripe data if the request was successful.
+status byte followed by the stripe data if the request was successful. If
+TLS/PSK is enabled the handshake is completed before the metadata preamble is
+transmitted.
 
 ## Metadata exchange
 
-Immediately after the TCP connection is established the server sends the image
-metadata:
+Immediately after the transport is ready (plain TCP or a successful TLS
+handshake) the server sends the image metadata:
 
 ```
 struct MetadataPreamble {

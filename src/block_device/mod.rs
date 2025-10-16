@@ -33,18 +33,20 @@ impl Clone for Box<dyn BlockDevice> {
 mod bdev_crypt;
 mod bdev_lazy;
 mod bdev_null;
+mod bdev_remote;
 mod bdev_sync;
 mod bdev_uring;
 
 #[cfg(test)]
 pub(crate) mod bdev_test;
 
-pub use bdev_crypt::CryptBlockDevice;
+pub use bdev_crypt::{decrypt_with_kek, CryptBlockDevice};
 pub use bdev_lazy::init_metadata;
 pub use bdev_lazy::load_metadata;
 pub use bdev_lazy::LazyBlockDevice;
 pub use bdev_lazy::UbiMetadata;
 pub use bdev_lazy::{BgWorker, BgWorkerRequest, SharedMetadataState};
 pub use bdev_null::NullBlockDevice;
+pub use bdev_remote::{RemoteBlockDevice, RemoteTlsConfig};
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;

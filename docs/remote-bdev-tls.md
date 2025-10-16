@@ -29,11 +29,13 @@ Start `remote-bdev-server` with the new TLS options:
 ```bash
 remote-bdev-server \
     --bind 0.0.0.0:4555 \
-    --metadata /path/to/metadata.bin \
-    --image /path/to/image.raw \
+    --config /path/to/ubiblk.yaml \
     --tls-psk-identity ubiblk-prod \
     --tls-psk-key /path/to/tls-psk.hex
 ```
+
+The configuration file must reference the metadata and data files that the
+server will expose and omit `image_path`.
 
 If `--tls-psk-identity`/`--tls-psk-key` are omitted the server continues to use
 plain TCP.

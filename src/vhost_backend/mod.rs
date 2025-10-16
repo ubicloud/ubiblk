@@ -2,7 +2,7 @@ mod backend;
 mod backend_loop;
 mod options;
 mod request;
-pub use backend_loop::{block_backend_loop, init_metadata};
+pub use backend_loop::{block_backend_loop, build_block_device, init_metadata};
 pub use options::{CipherMethod, KeyEncryptionCipher, Options};
 mod backend_thread;
 

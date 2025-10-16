@@ -1,17 +1,20 @@
+use std::cell::RefCell;
 use std::error::Error;
 use std::fs::File;
-use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use clap::Parser;
 use log::{error, info, warn};
 use openssl::ssl::SslAcceptor;
-use ubiblk::block_device::UbiMetadata;
-use ubiblk::utils::tls;
-use ubiblk::vhost_backend::SECTOR_SIZE;
+use ubiblk::block_device::{load_metadata, BlockDevice, IoChannel, UbiMetadata};
+use ubiblk::utils::{aligned_buffer::AlignedBuf, tls};
+use ubiblk::vhost_backend::{build_block_device, KeyEncryptionCipher, Options, SECTOR_SIZE};
 
 trait ReadWrite: Read + Write {}
 impl<T: Read + Write> ReadWrite for T {}
@@ -53,13 +56,9 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:4555")]
     bind: String,
 
-    /// Path to the metadata file produced by `UbiMetadata::write_to_buf`.
-    #[arg(long)]
-    metadata: PathBuf,
-
-    /// Path to the backing image whose stripes are served to clients.
-    #[arg(long)]
-    image: PathBuf,
+    /// Path to the configuration YAML file used to describe the block device.
+    #[arg(short = 'f', long = "config")]
+    config: PathBuf,
 
     /// Enable TLS using the provided PSK identity when `--tls-psk-key` is set.
     #[arg(long, requires = "tls_psk_key")]
@@ -84,50 +83,22 @@ fn main() {
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let Args {
         bind,
-        metadata,
-        image,
+        config,
         tls_psk_identity,
         tls_psk_key,
     } = args;
 
-    let metadata_bytes = std::fs::read(&metadata)?;
-    if metadata_bytes.len() < UbiMetadata::HEADER_SIZE {
-        return Err(format!("metadata file {} is too small", metadata.display()).into());
-    }
-    if metadata_bytes.len() > u32::MAX as usize {
-        return Err(format!(
-            "metadata file {} exceeds protocol limits",
-            metadata.display()
-        )
-        .into());
+    let options = load_options(&config)?;
+    if options.image_path.is_some() {
+        return Err("config must not specify image_path when used with remote-bdev-server".into());
     }
 
-    let metadata = UbiMetadata::from_bytes(&metadata_bytes);
-    let stripe_sector_count = metadata.stripe_size();
-    if stripe_sector_count == 0 {
-        return Err("metadata describes zero-sized stripes".into());
-    }
-    let max_stripe_sectors = (usize::MAX / SECTOR_SIZE) as u64;
-    if stripe_sector_count > max_stripe_sectors {
-        return Err("stripe size is too large for this platform".into());
-    }
-    let stripe_len_bytes = (stripe_sector_count as usize) * SECTOR_SIZE;
+    let metadata_path = options
+        .metadata_path
+        .as_ref()
+        .ok_or_else(|| "config is missing metadata_path".to_string())?;
 
-    let metadata: Arc<UbiMetadata> = Arc::from(metadata);
-    let metadata_bytes = Arc::new(metadata_bytes);
-
-    let image_file = File::open(&image)?;
-    let image_len = image_file.metadata()?.len();
-    let expected_len = stripe_len_bytes as u64 * metadata.stripe_count();
-    if image_len < expected_len {
-        warn!(
-            "image file {} is smaller than the metadata implies ({} < {})",
-            image.display(),
-            image_len,
-            expected_len
-        );
-    }
-    let image = Arc::new(Mutex::new(image_file));
+    let server_state = prepare_server_state(&options, metadata_path)?;
 
     let tls_config = match (tls_psk_identity.as_deref(), tls_psk_key.as_ref()) {
         (Some(identity), Some(key_path)) => {
@@ -153,9 +124,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     loop {
         let (stream, addr) = listener.accept()?;
         info!("accepted connection from {addr}");
-        let metadata_bytes = Arc::clone(&metadata_bytes);
-        let metadata = Arc::clone(&metadata);
-        let image = Arc::clone(&image);
+        let server_state = Arc::clone(&server_state);
         let tls_config = tls_config.clone();
         thread::spawn(move || {
             let result = (|| -> Result<(), Box<dyn Error>> {
@@ -163,14 +132,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                     Ok(stream) => stream,
                     Err(err) => return Err(Box::new(err)),
                 };
-                handle_client(
-                    stream,
-                    addr,
-                    metadata_bytes,
-                    metadata,
-                    image,
-                    stripe_len_bytes,
-                )
+                handle_client(stream, addr, server_state)
             })();
             match result {
                 Ok(()) => info!("client {addr} disconnected"),
@@ -190,15 +152,17 @@ fn wrap_stream(stream: TcpStream, tls: Option<&TlsServerConfig>) -> io::Result<D
 fn handle_client(
     mut stream: DynStream,
     peer: SocketAddr,
-    metadata_bytes: Arc<Vec<u8>>,
-    metadata: Arc<UbiMetadata>,
-    image: Arc<Mutex<File>>,
-    stripe_len_bytes: usize,
+    state: Arc<ServerState>,
 ) -> Result<(), Box<dyn Error>> {
     info!("sending metadata to client {peer} ...");
-    stream.write_all(&(metadata_bytes.len() as u32).to_le_bytes())?;
-    stream.write_all(&metadata_bytes)?;
+    stream.write_all(&(state.metadata_bytes.len() as u32).to_le_bytes())?;
+    stream.write_all(state.metadata_bytes.as_slice())?;
     info!("sent metadata to client {peer}");
+
+    let mut stripe_channel = state
+        .stripe_device
+        .create_channel()
+        .map_err(into_boxed_error)?;
 
     loop {
         let mut request = [0u8; 9];
@@ -223,19 +187,24 @@ fn handle_client(
                     continue;
                 }
                 let stripe_idx = stripe_id as usize;
-                if stripe_idx >= metadata.stripe_headers.len() {
+                if stripe_idx >= state.metadata.stripe_headers.len() {
                     error!("client {peer} requests out-of-bounds stripe {stripe_id}");
                     stream.write_all(&[STATUS_INVALID_STRIPE])?;
                     continue;
                 }
-                let header = metadata.stripe_headers[stripe_idx];
+                let header = state.metadata.stripe_headers[stripe_idx];
                 if header & STRIPE_WRITTEN_MASK == 0 {
                     info!("client {peer} requests unwritten stripe {stripe_id}");
                     stream.write_all(&[STATUS_UNWRITTEN])?;
                     continue;
                 }
 
-                match read_stripe(&image, stripe_idx, stripe_len_bytes) {
+                match read_stripe(
+                    stripe_channel.as_mut(),
+                    stripe_idx,
+                    state.stripe_sector_count,
+                    state.stripe_len_bytes,
+                ) {
                     Ok(data) => {
                         stream.write_all(&[STATUS_OK])?;
                         stream.write_all(&data)?;
@@ -256,17 +225,127 @@ fn handle_client(
     }
 }
 
+fn load_options(config: &PathBuf) -> Result<Options, Box<dyn Error>> {
+    let file = File::open(config).map_err(|err| {
+        Box::<dyn Error>::from(io::Error::new(
+            err.kind(),
+            format!("failed to open config file {}: {err}", config.display()),
+        ))
+    })?;
+
+    serde_yaml::from_reader(file).map_err(|err| {
+        Box::<dyn Error>::from(io::Error::new(
+            ErrorKind::InvalidData,
+            format!("failed to parse config file {}: {err}", config.display()),
+        ))
+    })
+}
+
+fn prepare_server_state(
+    options: &Options,
+    metadata_path: &str,
+) -> Result<Arc<ServerState>, Box<dyn Error>> {
+    let kek = KeyEncryptionCipher::default();
+
+    let stripe_device =
+        build_block_device(&options.path, options, kek.clone()).map_err(into_boxed_error)?;
+    let stripe_device: Arc<dyn BlockDevice> = Arc::from(stripe_device);
+
+    let metadata_device =
+        build_block_device(metadata_path, options, kek).map_err(into_boxed_error)?;
+    let mut metadata_channel = metadata_device.create_channel().map_err(into_boxed_error)?;
+    let metadata = load_metadata(&mut metadata_channel, metadata_device.sector_count())
+        .map_err(into_boxed_error)?;
+    let metadata: Arc<UbiMetadata> = Arc::from(metadata);
+
+    let metadata_len = metadata.metadata_size();
+    if metadata_len < UbiMetadata::HEADER_SIZE {
+        return Err("metadata is too small".into());
+    }
+    if metadata_len > u32::MAX as usize {
+        return Err("metadata exceeds protocol limits".into());
+    }
+
+    let mut metadata_bytes = vec![0u8; metadata_len];
+    metadata.write_to_buf(&mut metadata_bytes);
+
+    let stripe_sector_count = metadata.stripe_size();
+    if stripe_sector_count == 0 {
+        return Err("metadata describes zero-sized stripes".into());
+    }
+    if stripe_sector_count > (usize::MAX / SECTOR_SIZE) as u64 {
+        return Err("stripe size is too large for this platform".into());
+    }
+    let stripe_sector_count_u32 =
+        u32::try_from(stripe_sector_count).map_err(|_| "stripe size exceeds IO channel limits")?;
+    let stripe_len_bytes = stripe_sector_count_u32 as usize * SECTOR_SIZE;
+
+    let available_bytes = stripe_device.sector_count() * SECTOR_SIZE as u64;
+    let expected_bytes = (stripe_len_bytes as u64)
+        .checked_mul(metadata.stripe_count())
+        .ok_or_else(|| "metadata describes too many stripes".to_string())?;
+    if available_bytes < expected_bytes {
+        warn!(
+            "data file {} is smaller than the metadata implies ({} < {})",
+            options.path, available_bytes, expected_bytes
+        );
+    }
+
+    Ok(Arc::new(ServerState {
+        metadata_bytes,
+        metadata,
+        stripe_device,
+        stripe_sector_count: stripe_sector_count_u32,
+        stripe_len_bytes,
+    }))
+}
+
 fn read_stripe(
-    image: &Arc<Mutex<File>>,
+    channel: &mut dyn IoChannel,
     stripe_idx: usize,
+    stripe_sector_count: u32,
     stripe_len_bytes: usize,
-) -> io::Result<Vec<u8>> {
-    let mut buf = vec![0u8; stripe_len_bytes];
-    let mut file = image
-        .lock()
-        .map_err(|_| io::Error::other("image file lock poisoned"))?;
-    let offset = stripe_idx as u64 * stripe_len_bytes as u64;
-    file.seek(SeekFrom::Start(offset))?;
-    file.read_exact(&mut buf)?;
-    Ok(buf)
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    let offset = stripe_idx as u64 * u64::from(stripe_sector_count);
+    let buffer = Rc::new(RefCell::new(AlignedBuf::new(stripe_len_bytes)));
+    channel.add_read(offset, stripe_sector_count, buffer.clone(), 0);
+    channel.submit().map_err(into_boxed_error)?;
+    wait_for_completion(channel, 0)?;
+    let data = buffer.borrow();
+    Ok(data.as_slice()[..stripe_len_bytes].to_vec())
+}
+
+fn wait_for_completion(
+    channel: &mut dyn IoChannel,
+    request_id: usize,
+) -> Result<(), Box<dyn Error>> {
+    loop {
+        for (id, success) in channel.poll() {
+            if id == request_id {
+                if success {
+                    return Ok(());
+                }
+                return Err(Box::new(io::Error::other("I/O request failed")));
+            }
+        }
+
+        if !channel.busy() {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+}
+
+fn into_boxed_error<E>(err: E) -> Box<dyn Error>
+where
+    E: Error + 'static,
+{
+    Box::new(err)
+}
+
+struct ServerState {
+    metadata_bytes: Vec<u8>,
+    metadata: Arc<UbiMetadata>,
+    stripe_device: Arc<dyn BlockDevice>,
+    stripe_sector_count: u32,
+    stripe_len_bytes: usize,
 }

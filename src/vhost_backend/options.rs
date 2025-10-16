@@ -41,6 +41,19 @@ pub struct KeyEncryptionCipher {
     pub auth_data: Option<Vec<u8>>,
 }
 
+#[serde_as]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq)]
+pub struct RemoteImageOptions {
+    pub address: String,
+
+    #[serde(default)]
+    pub tls_psk_identity: Option<String>,
+
+    #[serde(default)]
+    #[serde_as(as = "Option<Base64>")]
+    pub tls_psk_key: Option<Vec<u8>>,
+}
+
 fn default_poll_queue_timeout_us() -> u128 {
     1000
 }
@@ -102,11 +115,8 @@ where
 pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
-    pub remote_image_address: Option<String>,
     #[serde(default)]
-    pub remote_tls_psk_identity: Option<String>,
-    #[serde(default)]
-    pub remote_tls_psk_key_path: Option<String>,
+    pub remote_image: Option<RemoteImageOptions>,
     pub metadata_path: Option<String>,
     pub io_debug_path: Option<String>,
     pub rpc_socket_path: Option<String>,
@@ -322,16 +332,19 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_image_address() {
+    fn test_remote_image_options() {
         let yaml = r#"
         path: "/path/to/image"
         socket: "/path/to/socket"
-        remote_image_address: "127.0.0.1:12345"
+        remote_image:
+          address: "127.0.0.1:12345"
+          tls_psk_identity: "client"
+          tls_psk_key: "AQIDBA=="
         "#;
         let options: Options = from_str(yaml).unwrap();
-        assert_eq!(
-            options.remote_image_address,
-            Some("127.0.0.1:12345".to_string())
-        );
+        let remote = options.remote_image.as_ref().unwrap();
+        assert_eq!(remote.address, "127.0.0.1:12345");
+        assert_eq!(remote.tls_psk_identity.as_deref(), Some("client"));
+        assert_eq!(remote.tls_psk_key.as_deref(), Some(&[1u8, 2, 3, 4][..]));
     }
 }

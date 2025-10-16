@@ -13,11 +13,12 @@ use vhost_user_backend::VhostUserDaemon;
 use vm_memory::GuestMemoryAtomic;
 
 use super::{backend::UbiBlkBackend, rpc, IoEngine, KeyEncryptionCipher, Options};
+use super::options::RemoteImageOptions;
 use crate::{
     block_device::{
-        self, init_metadata as init_metadata_file, load_metadata, BgWorker, BgWorkerRequest,
-        BlockDevice, RemoteTlsConfig, SharedMetadataState, StatusReporter, UbiMetadata,
-        UringBlockDevice,
+        self, decrypt_with_kek, init_metadata as init_metadata_file, load_metadata, BgWorker,
+        BgWorkerRequest, BlockDevice, RemoteTlsConfig, SharedMetadataState, StatusReporter,
+        UbiMetadata, UringBlockDevice,
     },
     utils::{aligned_buffer::BUFFER_ALIGNMENT, tls},
     vhost_backend::io_tracking::IoTracker,
@@ -27,38 +28,29 @@ use crate::{
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
 type SourceDevices = (Box<dyn BlockDevice>, Option<Box<dyn BlockDevice>>);
 
-fn build_remote_tls(options: &Options) -> Result<Option<RemoteTlsConfig>> {
-    let identity = options.remote_tls_psk_identity.as_deref();
-    let key_path = options.remote_tls_psk_key_path.as_deref();
+fn build_remote_tls(
+    remote: &RemoteImageOptions,
+    kek: &KeyEncryptionCipher,
+) -> Result<Option<RemoteTlsConfig>> {
+    let identity = remote.tls_psk_identity.as_deref();
+    let key = remote.tls_psk_key.as_deref();
 
-    match (identity, key_path) {
+    match (identity, key) {
         (None, None) => Ok(None),
-        (Some(identity), Some(key_path)) => {
-            if options.remote_image_address.is_none() {
-                return Err(VhostUserBlockError::InvalidParameter {
-                    description:
-                        "remote TLS PSK options require remote_image_address to be specified"
-                            .to_string(),
-                });
-            }
-
+        (Some(identity), Some(key)) => {
             let identity_bytes = tls::prepare_psk_identity(identity).map_err(|err| {
                 VhostUserBlockError::InvalidParameter {
                     description: format!("invalid remote TLS PSK identity: {err}"),
                 }
             })?;
 
-            let key_bytes = tls::read_psk_key(Path::new(key_path)).map_err(|err| {
-                VhostUserBlockError::InvalidParameter {
-                    description: format!("failed to read remote TLS PSK key: {err}"),
-                }
-            })?;
+            let key_bytes = decrypt_with_kek(key, kek)?;
 
             RemoteTlsConfig::new(identity_bytes, key_bytes).map(Some)
         }
         (Some(_), None) | (None, Some(_)) => Err(VhostUserBlockError::InvalidParameter {
             description:
-                "remote TLS PSK identity and key path must either both be provided or both omitted"
+                "remote TLS PSK identity and key must either both be provided or both omitted"
                     .to_string(),
         }),
     }
@@ -116,11 +108,13 @@ impl BackendEnv {
     }
 
     fn validate_metadata_requirements(options: &Options) -> Result<()> {
-        if (options.image_path.is_some() || options.remote_image_address.is_some())
+        if (options.image_path.is_some() || options.remote_image.is_some())
             && options.metadata_path.is_none()
         {
             return Err(VhostUserBlockError::InvalidParameter {
-                description: "metadata_path is required when image_path is provided".to_string(),
+                description:
+                    "metadata_path is required when image_path or remote_image is provided"
+                        .to_string(),
             });
         }
 
@@ -166,7 +160,7 @@ impl BackendEnv {
         let metadata = load_metadata(&mut metadata_channel, metadata_dev.sector_count())?;
         let shared_state = SharedMetadataState::new(&metadata);
 
-        let (source_clone, maybe_image_bdev) = Self::create_source_devices(options)?;
+        let (source_clone, maybe_image_bdev) = Self::create_source_devices(options, &kek)?;
         let target_clone = base_device.clone();
         let target_sector_count = target_clone.sector_count();
         let (bgworker_tx, bgworker_rx) = channel();
@@ -199,10 +193,13 @@ impl BackendEnv {
         })
     }
 
-    fn create_source_devices(options: &Options) -> Result<SourceDevices> {
-        let source: Box<dyn BlockDevice> = if let Some(ref address) = options.remote_image_address {
-            let remote_tls = build_remote_tls(options)?;
-            block_device::RemoteBlockDevice::new(address.clone(), remote_tls)?
+    fn create_source_devices(
+        options: &Options,
+        kek: &KeyEncryptionCipher,
+    ) -> Result<SourceDevices> {
+        let source: Box<dyn BlockDevice> = if let Some(remote) = options.remote_image.as_ref() {
+            let remote_tls = build_remote_tls(remote, kek)?;
+            block_device::RemoteBlockDevice::new(remote.address.clone(), remote_tls)?
         } else if let Some(ref path) = options.image_path {
             let readonly = true;
             create_io_engine_device(

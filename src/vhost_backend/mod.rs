@@ -4,7 +4,7 @@ mod io_tracking;
 mod options;
 mod request;
 mod rpc;
-pub use backend_loop::{block_backend_loop, init_metadata};
+pub use backend_loop::{block_backend_loop, build_block_device, init_metadata};
 pub use options::{CipherMethod, IoEngine, KeyEncryptionCipher, Options};
 mod backend_thread;
 

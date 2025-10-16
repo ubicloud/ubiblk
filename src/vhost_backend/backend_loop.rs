@@ -437,7 +437,7 @@ fn create_io_engine_device(
     }
 }
 
-fn build_block_device(
+pub fn build_block_device(
     path: &str,
     options: &Options,
     kek: KeyEncryptionCipher,

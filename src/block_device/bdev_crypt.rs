@@ -3,19 +3,12 @@ use super::*;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::vhost_backend::{CipherMethod, KeyEncryptionCipher, SECTOR_SIZE};
 use crate::{Result, VhostUserBlockError};
-#[cfg(not(feature = "disable-isal-crypto"))]
 use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
-#[cfg(feature = "disable-isal-crypto")]
-use aes::cipher::KeyInit;
-#[cfg(feature = "disable-isal-crypto")]
-use aes::Aes256;
 use aes_gcm::{
     aead::{Aead, AeadCore, Payload},
     Aes256Gcm, Nonce,
 };
 use log::error;
-#[cfg(feature = "disable-isal-crypto")]
-use xts_mode::{get_tweak_default, Xts128};
 
 struct Request {
     sector_offset: u64,
@@ -25,39 +18,23 @@ struct Request {
 
 struct CryptIoChannel {
     base: Box<dyn IoChannel>,
-    #[cfg_attr(feature = "disable-isal-crypto", allow(dead_code))]
     key1: [u8; 32],
-    #[cfg_attr(feature = "disable-isal-crypto", allow(dead_code))]
     key2: [u8; 32],
-    #[cfg(feature = "disable-isal-crypto")]
-    xts: Xts128<Aes256>,
     read_requests: Vec<Option<Request>>,
 }
 
 impl CryptIoChannel {
     pub fn new(base: Box<dyn IoChannel>, key1: [u8; 32], key2: [u8; 32]) -> Self {
-        #[cfg(feature = "disable-isal-crypto")]
-        let xts = {
-            let cipher1 =
-                Aes256::new_from_slice(&key1).expect("XTS primary key must be exactly 32 bytes");
-            let cipher2 =
-                Aes256::new_from_slice(&key2).expect("XTS secondary key must be exactly 32 bytes");
-            Xts128::new(cipher1, cipher2)
-        };
-
         CryptIoChannel {
             base,
             key1,
             key2,
-            #[cfg(feature = "disable-isal-crypto")]
-            xts,
             read_requests: Vec::new(),
         }
     }
 }
 
 impl CryptIoChannel {
-    #[cfg_attr(feature = "disable-isal-crypto", allow(dead_code))]
     fn get_initial_tweak(&self, sector: u64) -> [u8; 16] {
         /*
          * Based on SPDK's _sw_accel_crypto_operation() in spdk/lib/accel/accel_sw.c:
@@ -83,7 +60,6 @@ impl CryptIoChannel {
      * are not required to be aligned to 16 bytes, any alignment works.
      */
 
-    #[cfg(not(feature = "disable-isal-crypto"))]
     fn decrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
         for i in 0..sector_count as usize {
             let sector = sector_start + i as u64;
@@ -102,17 +78,6 @@ impl CryptIoChannel {
         }
     }
 
-    #[cfg(feature = "disable-isal-crypto")]
-    fn decrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
-        for i in 0..sector_count as usize {
-            let sector = sector_start + i as u64;
-            let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
-            self.xts
-                .decrypt_sector(sector_data, get_tweak_default(sector as u128));
-        }
-    }
-
-    #[cfg(not(feature = "disable-isal-crypto"))]
     fn encrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
         for i in 0..sector_count as usize {
             let sector = sector_start + i as u64;
@@ -128,16 +93,6 @@ impl CryptIoChannel {
                     sector_data.as_mut_ptr(),
                 );
             }
-        }
-    }
-
-    #[cfg(feature = "disable-isal-crypto")]
-    fn encrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
-        for i in 0..sector_count as usize {
-            let sector = sector_start + i as u64;
-            let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
-            self.xts
-                .encrypt_sector(sector_data, get_tweak_default(sector as u128));
         }
     }
 }

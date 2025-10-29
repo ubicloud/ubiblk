@@ -10,8 +10,7 @@ This repo contains Rust code. Before submitting changes:
    ```bash
    cargo clippy --all-targets --all-features -- -D warnings
    ```
-3. Run the test suite with and without the optional `isa-l_crypto` dependency:
+3. Run the test suite:
    ```bash
    cargo test
-   cargo test --features disable-isal-crypto
    ```

@@ -57,9 +57,6 @@ jobs:
       - name: Run tests with coverage
         run: cargo llvm-cov --fail-under-lines 60 --ignore-filename-regex src/bin/
 
-      - name: Run tests without isa-l_crypto
-        run: cargo test --features disable-isal-crypto
-
       - name: Build project
         run: cargo build
 

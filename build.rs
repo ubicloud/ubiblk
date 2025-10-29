@@ -2,10 +2,6 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    if env::var_os("CARGO_FEATURE_DISABLE_ISAL_CRYPTO").is_some() {
-        return;
-    }
-
     // Link to the static version of isa-l_crypto
     println!("cargo:rustc-link-lib=static=isal_crypto");
     println!("cargo:rustc-link-search=native=/usr/lib");

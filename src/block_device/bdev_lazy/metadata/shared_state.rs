@@ -82,4 +82,8 @@ impl SharedMetadataState {
     pub fn no_source_stripes(&self) -> u64 {
         self.no_source_stripes.load(Ordering::Acquire)
     }
+
+    pub fn stripe_count(&self) -> usize {
+        self.stripe_headers.len()
+    }
 }

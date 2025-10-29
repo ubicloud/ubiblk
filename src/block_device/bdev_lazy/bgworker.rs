@@ -20,8 +20,28 @@ struct StripesRecord {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct StatusReport {
+pub struct StatusReport {
     stripes: StripesRecord,
+}
+
+impl StatusReport {
+    pub fn new(total: u64, no_source: u64, fetched: u64) -> Self {
+        StatusReport {
+            stripes: StripesRecord {
+                total,
+                no_source,
+                fetched,
+            },
+        }
+    }
+
+    pub fn from_shared_state(shared_state: &SharedMetadataState) -> Self {
+        StatusReport::new(
+            shared_state.stripe_count() as u64,
+            shared_state.no_source_stripes(),
+            shared_state.fetched_stripes(),
+        )
+    }
 }
 
 pub enum BgWorkerRequest {
@@ -135,13 +155,11 @@ impl BgWorker {
         let Some(path) = &self.status_path else {
             return;
         };
-        let status = StatusReport {
-            stripes: StripesRecord {
-                total: self.stripe_fetcher.target_stripe_count(),
-                no_source: self.metadata_state.no_source_stripes(),
-                fetched: self.metadata_state.fetched_stripes(),
-            },
-        };
+        let status = StatusReport::new(
+            self.stripe_fetcher.target_stripe_count(),
+            self.metadata_state.no_source_stripes(),
+            self.metadata_state.fetched_stripes(),
+        );
         if self.written_status == Some(status) {
             return;
         }

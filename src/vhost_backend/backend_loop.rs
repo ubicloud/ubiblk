@@ -12,7 +12,7 @@ use nix::sys::statfs::statfs;
 use vhost_user_backend::VhostUserDaemon;
 use vm_memory::GuestMemoryAtomic;
 
-use super::{backend::UbiBlkBackend, KeyEncryptionCipher, Options};
+use super::{backend::UbiBlkBackend, rpc, KeyEncryptionCipher, Options};
 use crate::{
     block_device::{
         self, init_metadata as init_metadata_file, load_metadata, BgWorker, BgWorkerRequest,
@@ -43,6 +43,7 @@ struct BackendEnv {
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
     options: Options,
+    bgworker_state: Option<SharedMetadataState>,
 }
 
 impl BackendEnv {
@@ -56,6 +57,7 @@ impl BackendEnv {
             block_device,
             config,
             channel,
+            shared_state,
         } = Self::build_devices(base_device, options, kek, alignment)?;
 
         Ok(BackendEnv {
@@ -65,6 +67,7 @@ impl BackendEnv {
             bgworker_thread: None,
             alignment,
             options: options.clone(),
+            bgworker_state: shared_state,
         })
     }
 
@@ -99,6 +102,7 @@ impl BackendEnv {
                 block_device: base_device,
                 config: None,
                 channel: None,
+                shared_state: None,
             })
         }
     }
@@ -135,7 +139,7 @@ impl BackendEnv {
             alignment,
             status_path: options.status_path.as_ref().map(PathBuf::from),
             autofetch: options.autofetch,
-            shared_state,
+            shared_state: shared_state.clone(),
             receiver: bgworker_rx,
         };
 
@@ -143,6 +147,7 @@ impl BackendEnv {
             block_device,
             config: Some(config),
             channel: Some(bgworker_tx),
+            shared_state: Some(shared_state),
         })
     }
 
@@ -228,6 +233,10 @@ impl BackendEnv {
         }
     }
 
+    fn bgworker_shared_state(&self) -> Option<SharedMetadataState> {
+        self.bgworker_state.clone()
+    }
+
     fn serve(&self) -> Result<()> {
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
@@ -281,6 +290,7 @@ struct BgWorkerSetup {
     block_device: Box<dyn BlockDevice>,
     config: Option<BgWorkerConfig>,
     channel: Option<Sender<BgWorkerRequest>>,
+    shared_state: Option<SharedMetadataState>,
 }
 
 pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<()> {
@@ -289,6 +299,12 @@ pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<
 
     let mut backend_env = BackendEnv::build(config, kek.clone())?;
     backend_env.run_bgworker_thread()?;
+
+    if let Some(path) = config.rpc_socket_path.as_ref() {
+        let shared_state = backend_env.bgworker_shared_state();
+        let _join_handle = rpc::start_rpc_server(path, shared_state)?;
+        // TODO: store the join handle and use it to stop the RPC server on shutdown
+    }
 
     loop {
         backend_env.serve()?;

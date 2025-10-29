@@ -45,6 +45,7 @@ mod tests {
             metadata_path: None,
             io_debug_path: None,
             status_path: None,
+            rpc_socket_path: None,
             socket: "sock".to_string(),
             cpus: None,
             num_queues: 1,

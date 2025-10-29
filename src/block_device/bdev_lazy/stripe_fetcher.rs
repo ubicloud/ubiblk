@@ -122,10 +122,6 @@ impl StripeFetcher {
         self.source_sector_count.div_ceil(self.stripe_sector_count)
     }
 
-    pub fn target_stripe_count(&self) -> u64 {
-        self.target_sector_count.div_ceil(self.stripe_sector_count)
-    }
-
     pub fn take_finished_fetches(&mut self) -> Vec<(usize, bool)> {
         std::mem::take(&mut self.finished_fetches)
     }

@@ -5,12 +5,7 @@ use crate::block_device::BlockDevice;
 use crate::Result;
 use log::{error, info};
 use serde::{Deserialize, Serialize};
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-    sync::mpsc::{Receiver, TryRecvError},
-};
-use tempfile::NamedTempFile;
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct StripesRecord {
@@ -55,8 +50,6 @@ pub struct BgWorker {
     metadata_flusher: MetadataFlusher,
     req_receiver: Receiver<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
-    written_status: Option<StatusReport>,
-    status_path: Option<PathBuf>,
     done: bool,
 }
 
@@ -67,7 +60,6 @@ impl BgWorker {
         target_dev: &dyn BlockDevice,
         metadata_dev: &dyn BlockDevice,
         alignment: usize,
-        status_path: Option<PathBuf>,
         autofetch: bool,
         metadata_state: SharedMetadataState,
         req_receiver: Receiver<BgWorkerRequest>,
@@ -89,8 +81,6 @@ impl BgWorker {
             req_receiver,
             done: false,
             metadata_state,
-            written_status: None,
-            status_path,
         })
     }
 
@@ -148,40 +138,9 @@ impl BgWorker {
             }
         }
         self.metadata_flusher.update();
-        self.write_status_if_needed();
-    }
-
-    fn write_status_if_needed(&mut self) {
-        let Some(path) = &self.status_path else {
-            return;
-        };
-        let status = StatusReport::new(
-            self.stripe_fetcher.target_stripe_count(),
-            self.metadata_state.no_source_stripes(),
-            self.metadata_state.fetched_stripes(),
-        );
-        if self.written_status == Some(status) {
-            return;
-        }
-        if let Err(e) = Self::write_status(path, &status) {
-            error!("Failed to write status file {path:?}: {e}");
-        } else {
-            self.written_status = Some(status);
-        }
-    }
-
-    fn write_status(path: &Path, status: &StatusReport) -> std::io::Result<()> {
-        let mut tmp = NamedTempFile::new()?;
-        let content = serde_json::to_vec_pretty(status)?;
-        tmp.write_all(&content)?;
-        tmp.flush()?;
-        tmp.persist(path).map_err(|e| e.error)?;
-        Ok(())
     }
 
     pub fn run(&mut self) {
-        self.write_status_if_needed();
-
         while !self.done {
             let busy = self.stripe_fetcher.busy() || self.metadata_flusher.busy();
             let block = !busy;
@@ -224,7 +183,6 @@ mod tests {
                 &target_dev,
                 &metadata_dev,
                 4096,
-                None,
                 false,
                 metadata_state,
                 rx,
@@ -265,7 +223,6 @@ mod tests {
             &target_dev,
             &metadata_dev,
             4096,
-            None,
             false,
             metadata_state,
             rx,

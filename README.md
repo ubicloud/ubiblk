@@ -58,7 +58,6 @@ The configuration YAML must define:
 - `path`: Base disk image path.
 - `image_path`: (Optional) Image path for lazy stripe fetch.
 - `metadata_path`: (Optional) Metadata file path used for lazy fetch. Required when `image_path` is set.
-- `status_path`: (Optional) Path where stripe statistics are written in JSON format.
 - `rpc_socket_path`: (Optional) Path to a Unix domain socket for runtime RPC commands.
 - `socket`: vhost-user socket path.
 - `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
@@ -94,7 +93,6 @@ The backend configuration YAML must match the `Options` struct fields:
 path: "/path/to/block-device.raw"        # String: base disk image path
 image_path: "/path/to/ubi-image.raw"     # Optional String: UBI image for lazy fetch
 metadata_path: "/path/to/metadata"       # Optional: metadata path for lazy fetch
-status_path: "/tmp/ubiblk-status.json"   # Optional: JSON stripe statistics output path
 rpc_socket_path: "/tmp/ubiblk-rpc.sock"  # Optional: RPC Unix socket path
 socket: "/tmp/vhost.sock"                # String: vhost‐user socket path
 num_queues: 4                            # Integer: number of virtqueues

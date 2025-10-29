@@ -59,6 +59,7 @@ The configuration YAML must define:
 - `image_path`: (Optional) Image path for lazy stripe fetch.
 - `metadata_path`: (Optional) Metadata file path used for lazy fetch. Required when `image_path` is set.
 - `status_path`: (Optional) Path where stripe statistics are written in JSON format.
+- `rpc_socket_path`: (Optional) Path to a Unix domain socket for runtime RPC commands.
 - `socket`: vhost-user socket path.
 - `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
 - `skip_sync`: (Optional) Skip flush handling for faster operation.
@@ -77,6 +78,14 @@ The configuration YAML must define:
 vhost-backend --config config.yaml
 ```
 
+When `rpc_socket_path` is provided, the backend listens for newline-delimited
+JSON commands on the specified Unix socket. The following commands are
+supported:
+
+- `{"command": "version"}` – returns the backend version string.
+- `{"command": "status"}` – returns the background worker status report or
+  `null` when no background worker is active.
+
 ## Configuration File Format
 
 The backend configuration YAML must match the `Options` struct fields:
@@ -86,6 +95,7 @@ path: "/path/to/block-device.raw"        # String: base disk image path
 image_path: "/path/to/ubi-image.raw"     # Optional String: UBI image for lazy fetch
 metadata_path: "/path/to/metadata"       # Optional: metadata path for lazy fetch
 status_path: "/tmp/ubiblk-status.json"   # Optional: JSON stripe statistics output path
+rpc_socket_path: "/tmp/ubiblk-rpc.sock"  # Optional: RPC Unix socket path
 socket: "/tmp/vhost.sock"                # String: vhost‐user socket path
 num_queues: 4                            # Integer: number of virtqueues
 cpus: [0, 1, 2, 3]                       # Optional: CPU list matching num_queues

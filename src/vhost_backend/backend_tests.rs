@@ -4,7 +4,7 @@ mod tests {
     use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
     use crate::utils::block::VirtioBlockConfig;
     use crate::vhost_backend::{
-        init_metadata, KeyEncryptionCipher, Options, UbiBlkBackend, SECTOR_SIZE,
+        init_metadata, BlockBackend, KeyEncryptionCipher, Options, UbiBlkBackend, SECTOR_SIZE,
     };
     use crate::VhostUserBlockError;
     use vhost::vhost_user::message::VhostUserProtocolFeatures;
@@ -24,6 +24,7 @@ mod tests {
             cpus: None,
             num_queues: 1,
             queue_size: 32,
+            backend: BlockBackend::Uring,
             seg_size_max: 65536,
             seg_count_max: 4,
             poll_queue_timeout_us: 1000,

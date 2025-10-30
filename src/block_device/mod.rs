@@ -30,6 +30,7 @@ impl Clone for Box<dyn BlockDevice> {
     }
 }
 
+mod bdev_aio;
 mod bdev_crypt;
 mod bdev_lazy;
 mod bdev_null;
@@ -39,6 +40,7 @@ mod bdev_uring;
 #[cfg(test)]
 pub(crate) mod bdev_test;
 
+pub use bdev_aio::AioBlockDevice;
 pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_lazy::init_metadata;
 pub use bdev_lazy::load_metadata;

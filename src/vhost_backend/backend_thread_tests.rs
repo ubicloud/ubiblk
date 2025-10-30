@@ -5,7 +5,7 @@ mod tests {
     use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
     use crate::vhost_backend::backend_thread::UbiBlkBackendThread;
     use crate::vhost_backend::request::{Request, RequestType};
-    use crate::vhost_backend::{Options, SECTOR_SIZE};
+    use crate::vhost_backend::{BlockBackend, Options, SECTOR_SIZE};
     use smallvec::smallvec;
     use vhost_user_backend::bitmap::BitmapMmapRegion;
     use virtio_bindings::bindings::virtio_ring::VRING_DESC_F_WRITE;
@@ -49,6 +49,7 @@ mod tests {
             cpus: None,
             num_queues: 1,
             queue_size: 2,
+            backend: BlockBackend::Uring,
             seg_size_max: 512,
             seg_count_max: 1,
             poll_queue_timeout_us: 1000,

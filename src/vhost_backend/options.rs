@@ -53,6 +53,10 @@ fn default_queue_size() -> usize {
     64
 }
 
+fn default_backend() -> BlockBackend {
+    BlockBackend::Uring
+}
+
 fn default_seg_size_max() -> u32 {
     65536
 }
@@ -98,6 +102,14 @@ where
     Ok(s)
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum BlockBackend {
+    Uring,
+    Sync,
+    Aio,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Options {
     pub path: String,
@@ -115,6 +127,9 @@ pub struct Options {
 
     #[serde(default = "default_queue_size")]
     pub queue_size: usize,
+
+    #[serde(default = "default_backend")]
+    pub backend: BlockBackend,
 
     #[serde(default = "default_seg_size_max")]
     pub seg_size_max: u32,
@@ -240,6 +255,18 @@ mod tests {
         assert_eq!(options.device_id, "ubiblk".to_string());
         assert!(options.rpc_socket_path.is_none());
         assert!(!options.autofetch);
+        assert_eq!(options.backend, BlockBackend::Uring);
+    }
+
+    #[test]
+    fn test_backend_parsing() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        backend: sync
+        "#;
+        let options: Options = from_str(yaml).unwrap();
+        assert_eq!(options.backend, BlockBackend::Sync);
     }
 
     #[test]

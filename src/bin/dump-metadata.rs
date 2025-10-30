@@ -2,7 +2,7 @@ use clap::Parser;
 use log::error;
 use std::{fs::File, path::PathBuf, process};
 use ubiblk::block_device::{self, load_metadata, BlockDevice};
-use ubiblk::vhost_backend::{KeyEncryptionCipher, Options, SECTOR_SIZE};
+use ubiblk::vhost_backend::{BlockBackend, KeyEncryptionCipher, Options, SECTOR_SIZE};
 use ubiblk::Result;
 
 #[derive(Parser)]
@@ -28,13 +28,20 @@ fn build_block_device(
     readonly: bool,
     kek: KeyEncryptionCipher,
 ) -> Result<Box<dyn BlockDevice>> {
-    let mut device: Box<dyn BlockDevice> = block_device::UringBlockDevice::new(
-        PathBuf::from(path),
-        options.queue_size,
-        readonly,
-        true,
-        options.write_through,
-    )?;
+    let mut device: Box<dyn BlockDevice> = match options.backend {
+        BlockBackend::Uring => block_device::UringBlockDevice::new(
+            PathBuf::from(path),
+            options.queue_size,
+            readonly,
+            true,
+            options.write_through,
+        )
+        .map(|b| b as Box<dyn BlockDevice>)?,
+        BlockBackend::Sync => block_device::SyncBlockDevice::new(PathBuf::from(path), readonly)
+            .map(|b| b as Box<dyn BlockDevice>)?,
+        BlockBackend::Aio => block_device::AioBlockDevice::new(PathBuf::from(path), readonly)
+            .map(|b| b as Box<dyn BlockDevice>)?,
+    };
 
     if let Some((key1, key2)) = &options.encryption_key {
         device = block_device::CryptBlockDevice::new(device, key1.clone(), key2.clone(), kek)?;
@@ -129,13 +136,23 @@ fn main() {
 
     // image device if provided
     let (image_path_display, image_size) = if let Some(ref image_path) = options.image_path {
-        match block_device::UringBlockDevice::new(
-            PathBuf::from(image_path),
-            options.queue_size,
-            true,
-            true,
-            options.write_through,
-        ) {
+        let result: Result<Box<dyn BlockDevice>> = match options.backend {
+            BlockBackend::Uring => block_device::UringBlockDevice::new(
+                PathBuf::from(image_path),
+                options.queue_size,
+                true,
+                true,
+                options.write_through,
+            )
+            .map(|b| b as Box<dyn BlockDevice>),
+            BlockBackend::Sync => {
+                block_device::SyncBlockDevice::new(PathBuf::from(image_path), true)
+                    .map(|b| b as Box<dyn BlockDevice>)
+            }
+            BlockBackend::Aio => block_device::AioBlockDevice::new(PathBuf::from(image_path), true)
+                .map(|b| b as Box<dyn BlockDevice>),
+        };
+        match result {
             Ok(dev) => (image_path.clone(), dev.sector_count() * SECTOR_SIZE as u64),
             Err(e) => {
                 error!("Failed to open image file {image_path}: {e}");

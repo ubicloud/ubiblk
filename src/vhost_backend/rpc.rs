@@ -12,13 +12,13 @@ use log::{error, info, warn};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::block_device::{SharedMetadataState, StatusReport};
+use crate::block_device::StatusReporter;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone)]
 struct RpcState {
-    shared_state: Option<SharedMetadataState>,
+    status_reporter: Option<StatusReporter>,
 }
 
 #[derive(Deserialize)]
@@ -28,7 +28,7 @@ struct RpcRequest {
 
 pub fn start_rpc_server<P: AsRef<Path>>(
     path: P,
-    shared_state: Option<SharedMetadataState>,
+    status_reporter: Option<StatusReporter>,
 ) -> Result<JoinHandle<()>> {
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
@@ -42,7 +42,7 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     let listener = UnixListener::bind(&path).map_err(|e| VhostUserBlockError::Other {
         description: format!("failed to bind RPC socket {:?}: {e}", path),
     })?;
-    let state = Arc::new(RpcState { shared_state });
+    let state = Arc::new(RpcState { status_reporter });
 
     info!("RPC server listening on {:?}", path);
 
@@ -121,10 +121,7 @@ fn process_request(request: RpcRequest, state: &RpcState) -> Value {
     match request.command.as_str() {
         "version" => json!({ "version": VERSION }),
         "status" => {
-            let status = state
-                .shared_state
-                .as_ref()
-                .map(StatusReport::from_shared_state);
+            let status = state.status_reporter.as_ref().map(StatusReporter::report);
             json!({ "status": status })
         }
         other => json!({

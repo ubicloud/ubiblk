@@ -4,40 +4,7 @@ use super::{
 use crate::block_device::BlockDevice;
 use crate::Result;
 use log::{error, info};
-use serde::{Deserialize, Serialize};
 use std::sync::mpsc::{Receiver, TryRecvError};
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-struct StripesRecord {
-    total: u64,
-    no_source: u64,
-    fetched: u64,
-}
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatusReport {
-    stripes: StripesRecord,
-}
-
-impl StatusReport {
-    pub fn new(total: u64, no_source: u64, fetched: u64) -> Self {
-        StatusReport {
-            stripes: StripesRecord {
-                total,
-                no_source,
-                fetched,
-            },
-        }
-    }
-
-    pub fn from_shared_state(shared_state: &SharedMetadataState) -> Self {
-        StatusReport::new(
-            shared_state.stripe_count() as u64,
-            shared_state.no_source_stripes(),
-            shared_state.fetched_stripes(),
-        )
-    }
-}
 
 pub enum BgWorkerRequest {
     Fetch { stripe_id: usize },

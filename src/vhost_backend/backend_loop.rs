@@ -16,7 +16,7 @@ use super::{backend::UbiBlkBackend, rpc, KeyEncryptionCipher, Options};
 use crate::{
     block_device::{
         self, init_metadata as init_metadata_file, load_metadata, BgWorker, BgWorkerRequest,
-        BlockDevice, SharedMetadataState, UbiMetadata, UringBlockDevice,
+        BlockDevice, SharedMetadataState, StatusReporter, UbiMetadata, UringBlockDevice,
     },
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     Result, VhostUserBlockError,
@@ -42,7 +42,7 @@ struct BackendEnv {
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
     options: Options,
-    bgworker_state: Option<SharedMetadataState>,
+    status_reporter: Option<StatusReporter>,
 }
 
 impl BackendEnv {
@@ -56,7 +56,7 @@ impl BackendEnv {
             block_device,
             config,
             channel,
-            shared_state,
+            status_reporter,
         } = Self::build_devices(base_device, options, kek, alignment)?;
 
         Ok(BackendEnv {
@@ -66,7 +66,7 @@ impl BackendEnv {
             bgworker_thread: None,
             alignment,
             options: options.clone(),
-            bgworker_state: shared_state,
+            status_reporter,
         })
     }
 
@@ -101,7 +101,7 @@ impl BackendEnv {
                 block_device: base_device,
                 config: None,
                 channel: None,
-                shared_state: None,
+                status_reporter: None,
             })
         }
     }
@@ -121,6 +121,7 @@ impl BackendEnv {
 
         let (source_clone, maybe_image_bdev) = Self::create_source_devices(options)?;
         let target_clone = base_device.clone();
+        let target_sector_count = target_clone.sector_count();
         let (bgworker_tx, bgworker_rx) = channel();
 
         let block_device = block_device::LazyBlockDevice::new(
@@ -141,11 +142,13 @@ impl BackendEnv {
             receiver: bgworker_rx,
         };
 
+        let status_reporter = StatusReporter::new(shared_state.clone(), target_sector_count);
+
         Ok(BgWorkerSetup {
             block_device,
             config: Some(config),
             channel: Some(bgworker_tx),
-            shared_state: Some(shared_state),
+            status_reporter: Some(status_reporter),
         })
     }
 
@@ -229,8 +232,8 @@ impl BackendEnv {
         }
     }
 
-    fn bgworker_shared_state(&self) -> Option<SharedMetadataState> {
-        self.bgworker_state.clone()
+    fn status_reporter(&self) -> Option<StatusReporter> {
+        self.status_reporter.clone()
     }
 
     fn serve(&self) -> Result<()> {
@@ -286,7 +289,7 @@ struct BgWorkerSetup {
     block_device: Box<dyn BlockDevice>,
     config: Option<BgWorkerConfig>,
     channel: Option<Sender<BgWorkerRequest>>,
-    shared_state: Option<SharedMetadataState>,
+    status_reporter: Option<StatusReporter>,
 }
 
 pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<()> {
@@ -297,8 +300,8 @@ pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<
     backend_env.run_bgworker_thread()?;
 
     if let Some(path) = config.rpc_socket_path.as_ref() {
-        let shared_state = backend_env.bgworker_shared_state();
-        let _join_handle = rpc::start_rpc_server(path, shared_state)?;
+        let status_reporter = backend_env.status_reporter();
+        let _join_handle = rpc::start_rpc_server(path, status_reporter)?;
         // TODO: store the join handle and use it to stop the RPC server on shutdown
     }
 

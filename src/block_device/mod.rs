@@ -44,7 +44,7 @@ pub use bdev_lazy::init_metadata;
 pub use bdev_lazy::load_metadata;
 pub use bdev_lazy::LazyBlockDevice;
 pub use bdev_lazy::UbiMetadata;
-pub use bdev_lazy::{BgWorker, BgWorkerRequest, SharedMetadataState, StatusReport};
+pub use bdev_lazy::{BgWorker, BgWorkerRequest, SharedMetadataState, StatusReport, StatusReporter};
 pub use bdev_null::NullBlockDevice;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;

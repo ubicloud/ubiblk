@@ -3,7 +3,7 @@ use std::{ops::Deref, sync::Mutex, time::Instant};
 use crate::{
     block_device::BlockDevice,
     utils::block::{features_to_str, VirtioBlockConfig},
-    vhost_backend::SECTOR_SIZE,
+    vhost_backend::{io_tracking::IoTracker, SECTOR_SIZE},
     Result, VhostUserBlockError,
 };
 
@@ -61,6 +61,7 @@ impl UbiBlkBackend {
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         block_device: Box<dyn BlockDevice>,
         alignment: usize,
+        io_trackers: Vec<IoTracker>,
     ) -> Result<Self> {
         Self::validate_options(options)?;
 
@@ -82,9 +83,13 @@ impl UbiBlkBackend {
         info!("virtio_config: {virtio_config:?}");
 
         let threads = (0..options.num_queues)
-            .map(|_| {
+            .map(|idx| {
                 let io_channel = block_device.create_channel()?;
-                UbiBlkBackendThread::new(mem.clone(), io_channel, options, alignment)
+                let io_tracker = io_trackers
+                    .get(idx)
+                    .cloned()
+                    .unwrap_or_else(|| IoTracker::new(options.queue_size));
+                UbiBlkBackendThread::new(mem.clone(), io_channel, options, alignment, io_tracker)
                     .map(Mutex::new)
             })
             .collect::<Result<Vec<_>>>()?;

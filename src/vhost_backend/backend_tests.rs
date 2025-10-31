@@ -44,7 +44,7 @@ mod tests {
         opts.queue_size = 30;
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let result = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT);
+        let result = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]);
         assert!(matches!(
             result,
             Err(VhostUserBlockError::InvalidParameter { .. })
@@ -57,7 +57,8 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
         assert_eq!(backend.num_queues(), 1);
         assert_eq!(backend.max_queue_size(), 32);
 
@@ -73,7 +74,8 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
         backend.set_event_idx(true);
         for thread in backend.threads().iter() {
             assert!(thread.lock().unwrap().event_idx);
@@ -86,7 +88,8 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
         let err = backend.handle_event(0, EventSet::OUT, &[], 0).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
@@ -97,7 +100,8 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
         let err = backend.handle_event(1, EventSet::IN, &[], 0).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Other);
     }
@@ -116,7 +120,8 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
 
         let features = backend.features();
         use virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
@@ -131,7 +136,8 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
 
         backend.acked_features(1 << VIRTIO_BLK_F_FLUSH);
     }
@@ -142,7 +148,8 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
         backend.set_event_idx(true);
         backend.set_event_idx(false);
         for thread in backend.threads().iter() {
@@ -156,7 +163,8 @@ mod tests {
         let opts = default_options("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
 
         let bytes = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
         assert_eq!(bytes.len(), std::mem::size_of::<VirtioBlockConfig>());
@@ -177,7 +185,8 @@ mod tests {
         opts.cpus = None;
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
 
         assert_eq!(backend.queues_per_thread(), vec![1, 2, 4]);
     }
@@ -189,7 +198,7 @@ mod tests {
         opts.cpus = Some(vec![0]);
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let res = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT);
+        let res = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]);
         assert!(res.is_err());
     }
 
@@ -200,7 +209,8 @@ mod tests {
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let mem2 = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let backend = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT).unwrap();
+        let backend =
+            UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
 
         assert!(backend.update_memory(mem2).is_ok());
     }

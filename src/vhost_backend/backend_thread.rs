@@ -9,6 +9,7 @@ use super::{request::*, SECTOR_SIZE};
 use crate::block_device::IoChannel;
 use crate::block_device::SharedBuffer;
 use crate::utils::aligned_buffer::AlignedBuf;
+use crate::vhost_backend::io_tracking::IoTracker;
 use crate::{Result, VhostUserBlockError};
 
 use libc::EFD_NONBLOCK;
@@ -54,6 +55,7 @@ pub struct UbiBlkBackendThread {
     alignment: usize,
     pinned: bool,
     ios_pending_signal: bool,
+    io_tracker: IoTracker,
 }
 
 impl UbiBlkBackendThread {
@@ -71,6 +73,7 @@ impl UbiBlkBackendThread {
         io_channel: Box<dyn IoChannel>,
         options: &Options,
         alignment: usize,
+        io_tracker: IoTracker,
     ) -> Result<Self> {
         let buf_size = options.seg_count_max * options.seg_size_max;
         let request_slots: Vec<RequestSlot> = (0..options.queue_size)
@@ -123,6 +126,7 @@ impl UbiBlkBackendThread {
             alignment,
             pinned: false,
             ios_pending_signal: false,
+            io_tracker,
         })
     }
 
@@ -164,6 +168,7 @@ impl UbiBlkBackendThread {
 
     pub(crate) fn put_request_slot(&mut self, idx: usize) {
         self.request_slots[idx].used = false;
+        self.io_tracker.clear(idx);
     }
 
     pub(crate) fn pin_to_cpu(&mut self, cpu: usize) {
@@ -302,6 +307,8 @@ impl UbiBlkBackendThread {
             self.request_slots[id].buffer.clone(),
             id,
         );
+        self.io_tracker
+            .add_read(id, request.sector, sector_count as u64);
     }
 
     fn process_write(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
@@ -369,6 +376,8 @@ impl UbiBlkBackendThread {
             self.request_slots[id].buffer.clone(),
             id,
         );
+        self.io_tracker
+            .add_write(id, request.sector, sector_count as u64);
     }
 
     fn process_flush(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
@@ -383,6 +392,7 @@ impl UbiBlkBackendThread {
         }
         let id = self.get_request_slot(0, request, desc_chain);
         self.io_channel.add_flush(id);
+        self.io_tracker.add_flush(id);
     }
 
     fn process_get_device_id(

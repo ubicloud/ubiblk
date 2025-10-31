@@ -19,6 +19,7 @@ use crate::{
         BlockDevice, SharedMetadataState, StatusReporter, UbiMetadata, UringBlockDevice,
     },
     utils::aligned_buffer::BUFFER_ALIGNMENT,
+    vhost_backend::io_tracking::IoTracker,
     Result, VhostUserBlockError,
 };
 
@@ -43,6 +44,7 @@ struct BackendEnv {
     alignment: usize,
     options: Options,
     status_reporter: Option<StatusReporter>,
+    io_trackers: Vec<IoTracker>,
 }
 
 impl BackendEnv {
@@ -59,6 +61,10 @@ impl BackendEnv {
             status_reporter,
         } = Self::build_devices(base_device, options, kek, alignment)?;
 
+        let io_trackers = (0..options.num_queues)
+            .map(|_| IoTracker::new(options.queue_size))
+            .collect();
+
         Ok(BackendEnv {
             bdev: block_device,
             bgworker_config: config,
@@ -67,6 +73,7 @@ impl BackendEnv {
             alignment,
             options: options.clone(),
             status_reporter,
+            io_trackers,
         })
     }
 
@@ -246,6 +253,7 @@ impl BackendEnv {
             mem.clone(),
             self.bdev.clone(),
             self.alignment,
+            self.io_trackers.clone(),
         )?);
 
         info!("Backend is created!");
@@ -301,7 +309,8 @@ pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<
 
     if let Some(path) = config.rpc_socket_path.as_ref() {
         let status_reporter = backend_env.status_reporter();
-        let _join_handle = rpc::start_rpc_server(path, status_reporter)?;
+        let io_trackers = backend_env.io_trackers.clone();
+        let _join_handle = rpc::start_rpc_server(path, status_reporter, io_trackers)?;
         // TODO: store the join handle and use it to stop the RPC server on shutdown
     }
 

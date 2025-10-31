@@ -4,6 +4,7 @@ mod tests {
     use crate::block_device::BlockDevice;
     use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
     use crate::vhost_backend::backend_thread::UbiBlkBackendThread;
+    use crate::vhost_backend::io_tracking::IoTracker;
     use crate::vhost_backend::request::{Request, RequestType};
     use crate::vhost_backend::{Options, SECTOR_SIZE};
     use smallvec::smallvec;
@@ -67,7 +68,9 @@ mod tests {
         let opts = default_options("img");
         let device = TestBlockDevice::new(SECTOR_SIZE as u64 * 8);
         let io_channel = device.create_channel().unwrap();
-        let thread = UbiBlkBackendThread::new(gm, io_channel, &opts, BUFFER_ALIGNMENT).unwrap();
+        let thread =
+            UbiBlkBackendThread::new(gm, io_channel, &opts, BUFFER_ALIGNMENT, IoTracker::new(64))
+                .unwrap();
         (thread, mem)
     }
 

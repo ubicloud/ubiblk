@@ -7,7 +7,10 @@ use std::{
     thread::JoinHandle,
 };
 
-use crate::{Result, VhostUserBlockError};
+use crate::{
+    vhost_backend::io_tracking::{IoKind, IoTracker},
+    Result, VhostUserBlockError,
+};
 use log::{error, info, warn};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,6 +22,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Clone)]
 struct RpcState {
     status_reporter: Option<StatusReporter>,
+    io_trackers: Vec<IoTracker>,
 }
 
 #[derive(Deserialize)]
@@ -29,6 +33,7 @@ struct RpcRequest {
 pub fn start_rpc_server<P: AsRef<Path>>(
     path: P,
     status_reporter: Option<StatusReporter>,
+    io_trackers: Vec<IoTracker>,
 ) -> Result<JoinHandle<()>> {
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
@@ -42,7 +47,10 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     let listener = UnixListener::bind(&path).map_err(|e| VhostUserBlockError::Other {
         description: format!("failed to bind RPC socket {:?}: {e}", path),
     })?;
-    let state = Arc::new(RpcState { status_reporter });
+    let state = Arc::new(RpcState {
+        status_reporter,
+        io_trackers,
+    });
 
     info!("RPC server listening on {:?}", path);
 
@@ -117,12 +125,35 @@ fn handle_client(stream: UnixStream, state: Arc<RpcState>) {
     }
 }
 
+fn queue_snapshots(state: &RpcState) -> Vec<Value> {
+    state
+        .io_trackers
+        .iter()
+        .map(|tracker| {
+            let ios: Vec<Value> = tracker
+                .snapshot()
+                .into_iter()
+                .map(|(kind, offset, length)| match kind {
+                    IoKind::Read => json!(["read", offset, length]),
+                    IoKind::Write => json!(["write", offset, length]),
+                    IoKind::Flush => json!(["flush"]),
+                })
+                .collect();
+            json!(ios)
+        })
+        .collect()
+}
+
 fn process_request(request: RpcRequest, state: &RpcState) -> Value {
     match request.command.as_str() {
         "version" => json!({ "version": VERSION }),
         "status" => {
             let status = state.status_reporter.as_ref().map(StatusReporter::report);
             json!({ "status": status })
+        }
+        "queues" => {
+            let queue_snapshots = queue_snapshots(state);
+            json!({ "queues": queue_snapshots })
         }
         other => json!({
             "error": format!("unknown command: {other}"),

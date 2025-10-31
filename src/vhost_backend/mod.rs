@@ -1,5 +1,6 @@
 mod backend;
 mod backend_loop;
+mod io_tracking;
 mod options;
 mod request;
 mod rpc;

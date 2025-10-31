@@ -76,9 +76,10 @@ pub struct TestBlockDevice {
 
 impl TestBlockDevice {
     pub fn new(size: u64) -> Self {
-        if !size.is_multiple_of(SECTOR_SIZE as u64) {
-            panic!("Size must be a multiple of SECTOR_SIZE");
-        }
+        assert!(
+            size.is_multiple_of(SECTOR_SIZE as u64),
+            "Size must be a multiple of SECTOR_SIZE"
+        );
         let sector_count = size / SECTOR_SIZE as u64;
         let mem = Arc::new(RwLock::new(vec![0u8; size as usize]));
         TestBlockDevice {

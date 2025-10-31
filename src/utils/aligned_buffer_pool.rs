@@ -12,20 +12,18 @@ pub struct AlignedBufferPool {
 
 impl AlignedBufferPool {
     pub fn new(alignment: usize, count: usize, size: usize) -> Self {
-        let mut buffers = Vec::with_capacity(count);
-        let mut available_buffers = VecDeque::with_capacity(count);
-        let mut in_use = Vec::with_capacity(count);
-        for _ in 0..count {
-            buffers.push(Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
-                size, alignment,
-            ))));
-            available_buffers.push_back(buffers.len() - 1);
-            in_use.push(false);
-        }
+        let buffers = (0..count)
+            .map(|_| {
+                Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+                    size, alignment,
+                )))
+            })
+            .collect();
+
         Self {
             buffers,
-            available_buffers,
-            in_use,
+            available_buffers: (0..count).collect(),
+            in_use: vec![false; count],
         }
     }
 
@@ -44,9 +42,10 @@ impl AlignedBufferPool {
             self.buffers.len() - 1
         );
 
-        if !self.in_use[index] {
-            panic!("Buffer index {index} was returned to the pool but is not currently in use");
-        }
+        assert!(
+            self.in_use[index],
+            "Buffer index {index} was returned to the pool but is not currently in use"
+        );
 
         self.in_use[index] = false;
         self.available_buffers.push_back(index);

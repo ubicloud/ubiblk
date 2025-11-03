@@ -5,7 +5,7 @@ mod metadata_flusher;
 mod status_report;
 mod stripe_fetcher;
 
-pub use bgworker::{BgWorker, BgWorkerRequest};
+pub use bgworker::{BgWorker, BgWorkerDebugInfo, BgWorkerRequest};
 pub use device::LazyBlockDevice;
 pub use metadata::init_metadata;
 pub use metadata::load_metadata;

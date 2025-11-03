@@ -82,4 +82,23 @@ impl SharedMetadataState {
     pub fn no_source_stripes(&self) -> u64 {
         self.no_source_stripes.load(Ordering::Acquire)
     }
+
+    pub fn stripe_count(&self) -> usize {
+        self.stripe_headers.len()
+    }
+
+    pub fn stripe_headers_range(&self, start: usize, end: usize) -> Option<Vec<u8>> {
+        if start > end {
+            return None;
+        }
+        if end >= self.stripe_headers.len() {
+            return None;
+        }
+
+        Some(
+            (start..=end)
+                .map(|idx| self.stripe_headers[idx].load(Ordering::Acquire))
+                .collect(),
+        )
+    }
 }

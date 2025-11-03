@@ -45,6 +45,7 @@ struct BackendEnv {
     options: Options,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
+    shared_metadata_state: Option<SharedMetadataState>,
 }
 
 impl BackendEnv {
@@ -59,6 +60,7 @@ impl BackendEnv {
             config,
             channel,
             status_reporter,
+            shared_metadata_state,
         } = Self::build_devices(base_device, options, kek, alignment)?;
 
         let io_trackers = (0..options.num_queues)
@@ -74,6 +76,7 @@ impl BackendEnv {
             options: options.clone(),
             status_reporter,
             io_trackers,
+            shared_metadata_state,
         })
     }
 
@@ -109,6 +112,7 @@ impl BackendEnv {
                 config: None,
                 channel: None,
                 status_reporter: None,
+                shared_metadata_state: None,
             })
         }
     }
@@ -156,6 +160,7 @@ impl BackendEnv {
             config: Some(config),
             channel: Some(bgworker_tx),
             status_reporter: Some(status_reporter),
+            shared_metadata_state: Some(shared_state.clone()),
         })
     }
 
@@ -243,6 +248,10 @@ impl BackendEnv {
         self.status_reporter.clone()
     }
 
+    fn shared_metadata_state(&self) -> Option<SharedMetadataState> {
+        self.shared_metadata_state.clone()
+    }
+
     fn serve(&self) -> Result<()> {
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
 
@@ -298,6 +307,7 @@ struct BgWorkerSetup {
     config: Option<BgWorkerConfig>,
     channel: Option<Sender<BgWorkerRequest>>,
     status_reporter: Option<StatusReporter>,
+    shared_metadata_state: Option<SharedMetadataState>,
 }
 
 pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<()> {
@@ -310,7 +320,15 @@ pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<
     if let Some(path) = config.rpc_socket_path.as_ref() {
         let status_reporter = backend_env.status_reporter();
         let io_trackers = backend_env.io_trackers.clone();
-        let _join_handle = rpc::start_rpc_server(path, status_reporter, io_trackers)?;
+        let bgworker_ch = backend_env.bgworker_ch.clone();
+        let shared_metadata_state = backend_env.shared_metadata_state();
+        let _join_handle = rpc::start_rpc_server(
+            path,
+            status_reporter,
+            io_trackers,
+            bgworker_ch,
+            shared_metadata_state,
+        )?;
         // TODO: store the join handle and use it to stop the RPC server on shutdown
     }
 

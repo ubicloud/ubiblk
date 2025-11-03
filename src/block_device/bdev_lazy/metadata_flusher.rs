@@ -8,34 +8,59 @@ use crate::{
     Result, VhostUserBlockError,
 };
 use log::{debug, error};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
 
 const MAX_CONCURRENT_CHANGES: usize = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 enum MetadataFlusherRequestKind {
     SetFetched,
     SetWritten,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct MetadataFlusherRequest {
     stripe_id: usize,
     kind: MetadataFlusherRequestKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 enum RequestStage {
     Writing,
     Flushing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 struct HeaderUpdateStatus {
     buffer_index: usize,
     stage: RequestStage,
     stripe_id: usize,
     header: u8,
     sector: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MetadataFlusherDebugInfo {
+    pub sectors_being_updated: Vec<u64>,
+    pub header_updates: Vec<MetadataHeaderUpdateDebug>,
+    pub queued_requests: Vec<MetadataQueuedRequestDebug>,
+    pub channel_busy: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MetadataHeaderUpdateDebug {
+    pub stripe_id: usize,
+    pub header: u8,
+    pub stage: String,
+    pub sector: u64,
+    pub buffer_index: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MetadataQueuedRequestDebug {
+    pub stripe_id: usize,
+    pub kind: String,
 }
 
 pub struct MetadataFlusher {
@@ -101,6 +126,32 @@ impl MetadataFlusher {
     pub fn update(&mut self) {
         self.start_writes();
         self.poll_channel();
+    }
+
+    pub fn debug_state(&self) -> MetadataFlusherDebugInfo {
+        MetadataFlusherDebugInfo {
+            sectors_being_updated: self.sectors_being_updated.iter().copied().collect(),
+            header_updates: self
+                .header_updates
+                .values()
+                .map(|status| MetadataHeaderUpdateDebug {
+                    stripe_id: status.stripe_id,
+                    header: status.header,
+                    stage: format!("{:?}", status.stage),
+                    sector: status.sector,
+                    buffer_index: status.buffer_index,
+                })
+                .collect(),
+            queued_requests: self
+                .queued_requests
+                .iter()
+                .map(|request| MetadataQueuedRequestDebug {
+                    stripe_id: request.stripe_id,
+                    kind: format!("{:?}", request.kind),
+                })
+                .collect(),
+            channel_busy: self.channel.busy(),
+        }
     }
 
     fn poll_channel(&mut self) {

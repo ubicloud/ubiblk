@@ -1,14 +1,24 @@
 use super::{
-    metadata::SharedMetadataState, metadata_flusher::MetadataFlusher, stripe_fetcher::StripeFetcher,
+    metadata::SharedMetadataState,
+    metadata_flusher::{MetadataFlusher, MetadataFlusherDebugInfo},
+    stripe_fetcher::{StripeFetcher, StripeFetcherDebugInfo},
 };
 use crate::block_device::BlockDevice;
 use crate::Result;
 use log::{error, info};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use serde::Serialize;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 pub enum BgWorkerRequest {
-    Fetch { stripe_id: usize },
-    SetWritten { stripe_id: usize },
+    Fetch {
+        stripe_id: usize,
+    },
+    SetWritten {
+        stripe_id: usize,
+    },
+    Debug {
+        responder: Sender<BgWorkerDebugInfo>,
+    },
     Shutdown,
 }
 
@@ -18,6 +28,12 @@ pub struct BgWorker {
     req_receiver: Receiver<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     done: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BgWorkerDebugInfo {
+    pub stripe_fetcher: StripeFetcherDebugInfo,
+    pub metadata_flusher: MetadataFlusherDebugInfo,
 }
 
 impl BgWorker {
@@ -62,6 +78,12 @@ impl BgWorker {
             }
             BgWorkerRequest::SetWritten { stripe_id } => {
                 self.metadata_flusher.set_stripe_written(stripe_id)
+            }
+            BgWorkerRequest::Debug { responder } => {
+                let info = self.debug_state();
+                if responder.send(info).is_err() {
+                    error!("Failed to send bgworker debug response");
+                }
             }
             BgWorkerRequest::Shutdown => {
                 info!("Received shutdown request, stopping worker");
@@ -113,6 +135,13 @@ impl BgWorker {
             let block = !busy;
             self.receive_requests(block);
             self.update();
+        }
+    }
+
+    fn debug_state(&self) -> BgWorkerDebugInfo {
+        BgWorkerDebugInfo {
+            stripe_fetcher: self.stripe_fetcher.debug_state(),
+            metadata_flusher: self.metadata_flusher.debug_state(),
         }
     }
 }

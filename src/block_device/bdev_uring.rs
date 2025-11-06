@@ -3,7 +3,7 @@ use super::{BlockDevice, IoChannel, SharedBuffer};
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use io_uring::IoUring;
-use log::error;
+use log::{error, info};
 use nix::errno::Errno;
 use std::{
     fs::{File, OpenOptions},
@@ -20,6 +20,7 @@ struct UringIoChannel {
     completions: u64,
     finished_requests: Vec<(usize, bool)>,
     sync_io: bool,
+    iopoll: bool,
 }
 
 impl UringIoChannel {
@@ -52,10 +53,25 @@ impl UringIoChannel {
                 description: "Invalid io_uring queue size".to_string(),
             }
         })?;
-        let ring = IoUring::new(io_uring_entries).map_err(|e| {
-            error!("Failed to create io_uring: {e}");
-            VhostUserBlockError::IoError { source: e }
-        })?;
+
+        let (ring, iopoll) = if direct_io {
+            let r = IoUring::builder()
+                .setup_iopoll() // IORING_SETUP_IOPOLL
+                .build(io_uring_entries)
+                .map_err(|e| {
+                    error!("Failed to create io_uring with IOPOLL: {e}");
+                    VhostUserBlockError::IoError { source: e }
+                })?;
+            info!("Created io_uring with IOPOLL for direct I/O");
+            (r, true)
+        } else {
+            let r = IoUring::builder().build(io_uring_entries).map_err(|e| {
+                error!("Failed to create io_uring: {e}");
+                VhostUserBlockError::IoError { source: e }
+            })?;
+            (r, false)
+        };
+
         Ok(UringIoChannel {
             file,
             ring,
@@ -64,6 +80,7 @@ impl UringIoChannel {
             completions: 0,
             finished_requests: Vec::new(),
             sync_io,
+            iopoll,
         })
     }
 }
@@ -106,16 +123,12 @@ impl IoChannel for UringIoChannel {
             self.finished_requests.push((id, true));
             return;
         }
+
+        // IOPOLL rings do not support fsync via io_uring, so we perform
+        // the fsync synchronously here.
         let fd = self.file.as_raw_fd();
-        let flush_e = io_uring::opcode::Fsync::new(io_uring::types::Fd(fd))
-            .build()
-            .user_data(id as u64);
-        let push_result = unsafe { self.ring.submission().push(&flush_e) };
-        if push_result.is_err() {
-            self.finished_requests.push((id, false));
-            return;
-        }
-        self.pending += 1;
+        let ok = unsafe { libc::fsync(fd) } == 0;
+        self.finished_requests.push((id, ok));
     }
 
     fn submit(&mut self) -> Result<()> {
@@ -132,6 +145,18 @@ impl IoChannel for UringIoChannel {
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
+        if self.iopoll && self.submissions > self.completions {
+            // For IOPOLL rings, we need to explicitly call submit_and_wait
+            // to ensure completions are processed.
+            match self.ring.submit_and_wait(0) {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("Failed to poll IO completions: {}", e);
+                    return vec![];
+                }
+            }
+        }
+
         let mut finished_requests = std::mem::take(&mut self.finished_requests);
         loop {
             let maybe_entry = { self.ring.completion().next() };

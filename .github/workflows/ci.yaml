@@ -15,6 +15,16 @@ jobs:
         include:
           - runner: ubicloud-standard-2
           - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
+          - runner: ubicloud-standard-2-arm
           - runner: ubicloud-standard-2
           - runner: ubicloud-standard-2-arm
           - runner: ubicloud-standard-2

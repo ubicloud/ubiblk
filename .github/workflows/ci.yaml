@@ -38,6 +38,30 @@ jobs:
           - runner: ubicloud-standard-2
           - runner: ubicloud-standard-2-arm
           - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
+          - runner: ubicloud-standard-2
           - runner: ubicloud-standard-2-arm
           - runner: ubicloud-standard-4
           - runner: ubicloud-standard-4-arm

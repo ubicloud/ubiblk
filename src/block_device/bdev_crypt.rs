@@ -193,12 +193,24 @@ impl CryptBlockDevice {
     }
 }
 
+pub fn decrypt_with_kek(data: &[u8], kek: &KeyEncryptionCipher) -> Result<Vec<u8>> {
+    let method = kek.method.clone();
+    match method {
+        CipherMethod::None => Ok(data.to_vec()),
+        CipherMethod::Aes256Gcm => {
+            let (cipher, nonce, auth_data) = build_kek_cipher(kek)?;
+            decrypt_payload(&cipher, &nonce, auth_data, data)
+        }
+    }
+}
+
 fn decrypt_keys(
     key1: Vec<u8>,
     key2: Vec<u8>,
     kek: KeyEncryptionCipher,
 ) -> Result<([u8; 32], [u8; 32])> {
-    match kek.method {
+    let method = kek.method.clone();
+    match method {
         CipherMethod::None => {
             if key1.len() != 32 || key2.len() != 32 {
                 error!("Key length must be 32 bytes");
@@ -222,45 +234,58 @@ fn decrypt_keys(
         }
 
         CipherMethod::Aes256Gcm => {
-            use aes_gcm::KeyInit;
-            let kek_key = kek.key.ok_or(VhostUserBlockError::InvalidParameter {
-                description: "Key is required".to_string(),
-            })?;
-            let kek_iv = kek
-                .init_vector
-                .ok_or(VhostUserBlockError::InvalidParameter {
-                    description: "Initialization vector is required".to_string(),
-                })?;
-            let kek_auth_data = kek.auth_data.ok_or(VhostUserBlockError::InvalidParameter {
-                description: "Authentication data is required".to_string(),
-            })?;
-
-            let cipher = Aes256Gcm::new_from_slice(&kek_key).map_err(|e| {
-                error!("Failed to initialize cipher: {e}");
-                VhostUserBlockError::InvalidParameter {
-                    description: format!("Failed to initialize cipher: {e}"),
-                }
-            })?;
-
-            if kek_iv.len() != 12 {
-                error!("Initial vector must be exactly 12 bytes");
-                return Err(VhostUserBlockError::InvalidParameter {
-                    description: "Initial vector must be exactly 12 bytes".to_string(),
-                });
-            }
-            let nonce_bytes: [u8; 12] = kek_iv.as_slice().try_into().map_err(|_| {
-                error!("Initial vector must be exactly 12 bytes");
-                VhostUserBlockError::InvalidParameter {
-                    description: "Initial vector must be exactly 12 bytes".to_string(),
-                }
-            })?;
-            let nonce = KekNonce::from(nonce_bytes);
-
-            let clear1 = decrypt_block(&cipher, &nonce, &kek_auth_data, &key1)?;
-            let clear2 = decrypt_block(&cipher, &nonce, &kek_auth_data, &key2)?;
+            let (cipher, nonce, auth_data) = build_kek_cipher(&kek)?;
+            let clear1 = decrypt_block(&cipher, &nonce, auth_data, &key1)?;
+            let clear2 = decrypt_block(&cipher, &nonce, auth_data, &key2)?;
             Ok((clear1, clear2))
         }
     }
+}
+
+fn build_kek_cipher(kek: &KeyEncryptionCipher) -> Result<(Aes256Gcm, KekNonce, &[u8])> {
+    use aes_gcm::KeyInit;
+
+    let kek_key = kek
+        .key
+        .as_ref()
+        .ok_or(VhostUserBlockError::InvalidParameter {
+            description: "Key is required".to_string(),
+        })?;
+    let kek_iv = kek
+        .init_vector
+        .as_ref()
+        .ok_or(VhostUserBlockError::InvalidParameter {
+            description: "Initialization vector is required".to_string(),
+        })?;
+    let kek_auth_data = kek
+        .auth_data
+        .as_ref()
+        .ok_or(VhostUserBlockError::InvalidParameter {
+            description: "Authentication data is required".to_string(),
+        })?;
+
+    let cipher = Aes256Gcm::new_from_slice(kek_key).map_err(|e| {
+        error!("Failed to initialize cipher: {e}");
+        VhostUserBlockError::InvalidParameter {
+            description: format!("Failed to initialize cipher: {e}"),
+        }
+    })?;
+
+    if kek_iv.len() != 12 {
+        error!("Initial vector must be exactly 12 bytes");
+        return Err(VhostUserBlockError::InvalidParameter {
+            description: "Initial vector must be exactly 12 bytes".to_string(),
+        });
+    }
+    let nonce_bytes: [u8; 12] = kek_iv.as_slice().try_into().map_err(|_| {
+        error!("Initial vector must be exactly 12 bytes");
+        VhostUserBlockError::InvalidParameter {
+            description: "Initial vector must be exactly 12 bytes".to_string(),
+        }
+    })?;
+    let nonce = KekNonce::from(nonce_bytes);
+
+    Ok((cipher, nonce, kek_auth_data.as_slice()))
 }
 
 type KekNonce = Nonce<<Aes256Gcm as AeadCore>::NonceSize>;
@@ -271,7 +296,26 @@ fn decrypt_block(
     auth_data: &[u8],
     enc: &[u8],
 ) -> Result<[u8; 32]> {
-    let plain = cipher
+    let plain = decrypt_payload(cipher, nonce, auth_data, enc)?;
+
+    if plain.len() != 32 {
+        error!("Decrypted key must be exactly 32 bytes");
+        return Err(VhostUserBlockError::InvalidParameter {
+            description: "Decrypted key must be exactly 32 bytes".to_string(),
+        });
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&plain);
+    Ok(out)
+}
+
+fn decrypt_payload(
+    cipher: &Aes256Gcm,
+    nonce: &KekNonce,
+    auth_data: &[u8],
+    enc: &[u8],
+) -> Result<Vec<u8>> {
+    cipher
         .decrypt(
             nonce,
             Payload {
@@ -284,17 +328,7 @@ fn decrypt_block(
             VhostUserBlockError::InvalidParameter {
                 description: format!("Failed to decrypt key: {e}"),
             }
-        })?;
-
-    if plain.len() != 32 {
-        error!("Decrypted key must be exactly 32 bytes");
-        return Err(VhostUserBlockError::InvalidParameter {
-            description: "Decrypted key must be exactly 32 bytes".to_string(),
-        });
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&plain);
-    Ok(out)
+        })
 }
 
 #[cfg(test)]

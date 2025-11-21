@@ -1,18 +1,22 @@
 # Remote Block Device Protocol
 
-When a client connects, the server sends the image metadata. Then the client
-can request stripes. For each stripe request, the server responds with a
-status byte followed by the stripe data if the request was successful. If
-TLS/PSK is enabled the handshake is completed before the metadata preamble is
-transmitted.
+When a client connects, it first requests the image metadata using an explicit
+command. After receiving the metadata, the client can request stripes. For each
+stripe request, the server responds with a status byte followed by the stripe
+data if the request was successful. If TLS/PSK is enabled the handshake is
+completed before any commands are exchanged.
 
 ## Metadata exchange
 
 Immediately after the transport is ready (plain TCP or a successful TLS
-handshake) the server sends the image metadata:
+handshake) the client must request the image metadata:
 
 ```
-struct MetadataPreamble {
+struct MetadataRequest {
+    opcode: u8 = 0x00,
+}
+
+struct MetadataResponse {
     metadata_len: u32,              // little-endian
     metadata_bytes: [u8; metadata_len]
 }
@@ -57,7 +61,7 @@ The client treats any non-zero status as an I/O error.
 
 ## Typical exchange
 
-1. Client connects and receives metadata (`MetadataPreamble`).
+1. Client connects and sends `MetadataRequest`, then receives `MetadataResponse`.
 2. Client validates the metadata and caches it.
 3. For each read aligned to a stripe boundary:
    1. Check the metadata.  If the stripe is not marked as written, return a

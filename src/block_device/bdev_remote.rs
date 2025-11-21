@@ -16,6 +16,7 @@ impl<T: Read + Write> ReadWrite for T {}
 
 type RemoteStream = dyn ReadWrite + Send;
 
+const METADATA_CMD: u8 = 0x00;
 const READ_STRIPE_CMD: u8 = 0x01;
 const STATUS_OK: u8 = 0x00;
 const STATUS_INVALID_STRIPE: u8 = 0x01;
@@ -80,6 +81,11 @@ fn read_metadata_bytes(stream: &mut dyn Read) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+fn fetch_metadata(stream: &mut dyn ReadWrite) -> io::Result<Vec<u8>> {
+    stream.write_all(&[METADATA_CMD])?;
+    read_metadata_bytes(stream)
+}
+
 fn parse_metadata(bytes: &[u8]) -> Result<Box<UbiMetadata>> {
     debug!("Parsing metadata");
     if bytes.len() < UbiMetadata::HEADER_SIZE {
@@ -122,7 +128,7 @@ impl RemoteBlockDevice {
 
         let mut stream = open_stream(socket_addr, tls.as_ref())
             .map_err(|e| VhostUserBlockError::IoError { source: e })?;
-        let metadata_bytes = read_metadata_bytes(stream.as_mut())
+        let metadata_bytes = fetch_metadata(stream.as_mut())
             .map_err(|e| VhostUserBlockError::IoError { source: e })?;
         let metadata = parse_metadata(&metadata_bytes)?;
 
@@ -193,7 +199,7 @@ impl RemoteIoChannel {
     ) -> Result<Self> {
         let mut stream = open_stream(server_addr, tls.as_ref())
             .map_err(|e| VhostUserBlockError::IoChannelCreation { source: e })?;
-        let metadata_bytes = read_metadata_bytes(stream.as_mut())
+        let metadata_bytes = fetch_metadata(stream.as_mut())
             .map_err(|e| VhostUserBlockError::IoChannelCreation { source: e })?;
         let remote_metadata = parse_metadata(&metadata_bytes)?;
 

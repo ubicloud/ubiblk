@@ -39,6 +39,7 @@ impl TlsServerConfig {
     }
 }
 
+const METADATA_CMD: u8 = 0x00;
 const READ_STRIPE_CMD: u8 = 0x01;
 const STATUS_OK: u8 = 0x00;
 const STATUS_INVALID_STRIPE: u8 = 0x01;
@@ -154,19 +155,14 @@ fn handle_client(
     peer: SocketAddr,
     state: Arc<ServerState>,
 ) -> Result<(), Box<dyn Error>> {
-    info!("sending metadata to client {peer} ...");
-    stream.write_all(&(state.metadata_bytes.len() as u32).to_le_bytes())?;
-    stream.write_all(state.metadata_bytes.as_slice())?;
-    info!("sent metadata to client {peer}");
-
     let mut stripe_channel = state
         .stripe_device
         .create_channel()
         .map_err(into_boxed_error)?;
 
     loop {
-        let mut request = [0u8; 9];
-        match stream.read_exact(&mut request) {
+        let mut opcode = [0u8; 1];
+        match stream.read_exact(&mut opcode) {
             Ok(()) => {}
             Err(err) => match err.kind() {
                 ErrorKind::Interrupted => continue,
@@ -175,10 +171,25 @@ fn handle_client(
             },
         }
 
-        match request[0] {
+        match opcode[0] {
+            METADATA_CMD => {
+                info!("client {peer} requested metadata");
+                stream.write_all(&(state.metadata_bytes.len() as u32).to_le_bytes())?;
+                stream.write_all(state.metadata_bytes.as_slice())?;
+                info!("sent metadata to client {peer}");
+            }
             READ_STRIPE_CMD => {
                 let mut stripe_bytes = [0u8; 8];
-                stripe_bytes.copy_from_slice(&request[1..]);
+                loop {
+                    match stream.read_exact(&mut stripe_bytes) {
+                        Ok(()) => break,
+                        Err(err) => match err.kind() {
+                            ErrorKind::Interrupted => continue,
+                            ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset => return Ok(()),
+                            _ => return Err(err.into()),
+                        },
+                    }
+                }
                 let stripe_id = u64::from_le_bytes(stripe_bytes);
                 info!("client {peer} requests stripe {stripe_id}");
                 if stripe_id > usize::MAX as u64 {

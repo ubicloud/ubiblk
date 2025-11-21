@@ -17,6 +17,7 @@ impl<T: Read + Write> ReadWrite for T {}
 
 type DynStream = dyn ReadWrite;
 
+const METADATA_CMD: u8 = 0x00;
 const READ_STRIPE_CMD: u8 = 0x01;
 const STATUS_OK: u8 = 0x00;
 const STATUS_INVALID_STRIPE: u8 = 0x01;
@@ -259,7 +260,8 @@ fn parse_u64(input: Option<&str>) -> Result<u64, String> {
         })
 }
 
-fn read_metadata(stream: &mut dyn Read) -> io::Result<Vec<u8>> {
+fn read_metadata(stream: &mut dyn ReadWrite) -> io::Result<Vec<u8>> {
+    stream.write_all(&[METADATA_CMD])?;
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf)?;
     let metadata_len = u32::from_le_bytes(len_buf) as usize;

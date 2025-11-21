@@ -34,6 +34,7 @@ mod tests {
             autofetch: false,
             encryption_key: None,
             device_id: "ubiblk".to_string(),
+            io_engine: crate::vhost_backend::IoEngine::IoUring,
         }
     }
 

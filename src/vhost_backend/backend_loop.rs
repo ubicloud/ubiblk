@@ -12,7 +12,7 @@ use nix::sys::statfs::statfs;
 use vhost_user_backend::VhostUserDaemon;
 use vm_memory::GuestMemoryAtomic;
 
-use super::{backend::UbiBlkBackend, rpc, KeyEncryptionCipher, Options};
+use super::{backend::UbiBlkBackend, rpc, IoEngine, KeyEncryptionCipher, Options};
 use crate::{
     block_device::{
         self, init_metadata as init_metadata_file, load_metadata, BgWorker, BgWorkerRequest,
@@ -162,13 +162,21 @@ impl BackendEnv {
     fn create_source_devices(options: &Options) -> Result<SourceDevices> {
         let source: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
             let readonly = true;
-            UringBlockDevice::new(
-                PathBuf::from(path),
-                64,
-                readonly,
-                true,
-                options.write_through,
-            )?
+            match options.io_engine {
+                IoEngine::IoUring => UringBlockDevice::new(
+                    PathBuf::from(path),
+                    64,
+                    readonly,
+                    true,
+                    options.write_through,
+                )?,
+                IoEngine::Sync => block_device::SyncBlockDevice::new(
+                    PathBuf::from(path),
+                    readonly,
+                    true,
+                    options.write_through,
+                )?,
+            }
         } else {
             block_device::NullBlockDevice::new()
         };
@@ -338,13 +346,21 @@ pub fn init_metadata(
 
     let image_stripe_count = if let Some(ref image_path) = config.image_path {
         let readonly = true;
-        let image_bdev = UringBlockDevice::new(
-            PathBuf::from(image_path),
-            64,
-            readonly,
-            true,
-            config.write_through,
-        )?;
+        let image_bdev: Box<dyn BlockDevice> = match config.io_engine {
+            IoEngine::IoUring => UringBlockDevice::new(
+                PathBuf::from(image_path),
+                64,
+                readonly,
+                true,
+                config.write_through,
+            )?,
+            IoEngine::Sync => block_device::SyncBlockDevice::new(
+                PathBuf::from(image_path),
+                readonly,
+                true,
+                config.write_through,
+            )?,
+        };
         image_bdev.sector_count().div_ceil(stripe_sector_count) as usize
     } else {
         0
@@ -366,17 +382,29 @@ fn build_block_device(
     options: &Options,
     kek: KeyEncryptionCipher,
 ) -> Result<Box<dyn BlockDevice>> {
-    let mut block_device: Box<dyn BlockDevice> = block_device::UringBlockDevice::new(
-        PathBuf::from(path),
-        options.queue_size,
-        false,
-        true,
-        options.write_through,
-    )
-    .map_err(|e| {
-        error!("Failed to create block device at {path}: {e:?}");
-        e
-    })?;
+    let mut block_device: Box<dyn BlockDevice> = match options.io_engine {
+        IoEngine::IoUring => block_device::UringBlockDevice::new(
+            PathBuf::from(path),
+            options.queue_size,
+            false,
+            true,
+            options.write_through,
+        )
+        .map_err(|e| {
+            error!("Failed to create block device at {path}: {e:?}");
+            e
+        })?,
+        IoEngine::Sync => block_device::SyncBlockDevice::new(
+            PathBuf::from(path),
+            false,
+            true,
+            options.write_through,
+        )
+        .map_err(|e| {
+            error!("Failed to create block device at {path}: {e:?}");
+            e
+        })?,
+    };
 
     if let Some((key1, key2)) = &options.encryption_key {
         block_device =

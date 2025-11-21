@@ -90,7 +90,7 @@ fn wait_for_completion(channel: &mut dyn block_device::IoChannel, request_id: us
 
 fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
     let base_device: Box<dyn BlockDevice> =
-        match block_device::SyncBlockDevice::new(PathBuf::from(&args.input), true) {
+        match block_device::SyncBlockDevice::new(PathBuf::from(&args.input), true, false, false) {
             Ok(dev) => dev,
             Err(e) => {
                 error!("Failed to open input file {}: {e}", args.input);
@@ -257,7 +257,7 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
     }
 
     let base_device: Box<dyn BlockDevice> =
-        match block_device::SyncBlockDevice::new(PathBuf::from(&args.output), false) {
+        match block_device::SyncBlockDevice::new(PathBuf::from(&args.output), false, false, false) {
             Ok(dev) => dev,
             Err(e) => {
                 error!("Failed to open output file {}: {e}", args.output);

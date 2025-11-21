@@ -6,6 +6,7 @@ use crate::{Result, VhostUserBlockError};
 use log::error;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -18,15 +19,25 @@ struct SyncIoChannel {
 }
 
 impl SyncIoChannel {
-    fn new(path: &Path, readonly: bool) -> Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(!readonly)
-            .open(path)
-            .map_err(|e| {
-                error!("Failed to open file {}: {}", path.display(), e);
-                VhostUserBlockError::IoError { source: e }
-            })?;
+    fn new(path: &Path, readonly: bool, direct_io: bool, sync: bool) -> Result<Self> {
+        let mut opts = OpenOptions::new();
+        opts.read(true).write(!readonly);
+
+        let mut flags = 0;
+        if direct_io {
+            flags |= libc::O_DIRECT;
+        }
+        if sync {
+            flags |= libc::O_SYNC;
+        }
+        if flags != 0 {
+            opts.custom_flags(flags);
+        }
+
+        let file = opts.open(path).map_err(|e| {
+            error!("Failed to open file {}: {}", path.display(), e);
+            VhostUserBlockError::IoError { source: e }
+        })?;
         Ok(SyncIoChannel {
             file: Arc::new(Mutex::new(file)),
             finished_requests: Vec::new(),
@@ -123,11 +134,13 @@ pub struct SyncBlockDevice {
     path: PathBuf,
     sector_count: u64,
     readonly: bool,
+    direct_io: bool,
+    sync: bool,
 }
 
 impl BlockDevice for SyncBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
-        let channel = SyncIoChannel::new(&self.path, self.readonly)?;
+        let channel = SyncIoChannel::new(&self.path, self.readonly, self.direct_io, self.sync)?;
         Ok(Box::new(channel))
     }
 
@@ -140,12 +153,14 @@ impl BlockDevice for SyncBlockDevice {
             path: self.path.clone(),
             sector_count: self.sector_count,
             readonly: self.readonly,
+            direct_io: self.direct_io,
+            sync: self.sync,
         })
     }
 }
 
 impl SyncBlockDevice {
-    pub fn new(path: PathBuf, readonly: bool) -> Result<Box<Self>> {
+    pub fn new(path: PathBuf, readonly: bool, direct_io: bool, sync: bool) -> Result<Box<Self>> {
         match std::fs::metadata(&path) {
             Ok(metadata) => {
                 let size = metadata.len();
@@ -163,6 +178,8 @@ impl SyncBlockDevice {
                     path,
                     sector_count,
                     readonly,
+                    direct_io,
+                    sync,
                 }))
             }
             Err(e) => {
@@ -190,7 +207,7 @@ mod tests {
         })?;
 
         let path = tmpfile.path().to_path_buf();
-        let device = SyncBlockDevice::new(path.clone(), false)?;
+        let device = SyncBlockDevice::new(path.clone(), false, false, false)?;
 
         let mut chan = device.create_channel()?;
 
@@ -226,7 +243,7 @@ mod tests {
         })?;
 
         let path = tmpfile.path().to_path_buf();
-        let device = SyncBlockDevice::new(path.clone(), true)?;
+        let device = SyncBlockDevice::new(path.clone(), true, false, false)?;
 
         let mut chan = device.create_channel()?;
 
@@ -249,7 +266,7 @@ mod tests {
     // Opening a non-existent file for a channel should fail.
     fn sync_io_channel_new_fail() {
         let path = Path::new("/this/does/not/exist");
-        assert!(SyncIoChannel::new(path, false).is_err());
+        assert!(SyncIoChannel::new(path, false, false, false).is_err());
     }
 
     #[test]
@@ -259,7 +276,7 @@ mod tests {
         tmpfile.as_file().write_all(&[0u8; 1]).unwrap();
         let path = tmpfile.path().to_path_buf();
         assert!(matches!(
-            SyncBlockDevice::new(path, false),
+            SyncBlockDevice::new(path, false, false, false),
             Err(VhostUserBlockError::InvalidParameter { .. })
         ));
     }
@@ -274,14 +291,14 @@ mod tests {
         tmpfile.as_file().set_len(SECTOR_SIZE as u64).unwrap();
 
         let path = tmpfile.path();
-        let mut chan = SyncIoChannel::new(path, false)?;
+        let mut chan = SyncIoChannel::new(path, false, false, false)?;
 
         let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         chan.add_read(1, 1, read_buf.clone(), 1);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(1, false)]);
 
-        let mut ro_chan = SyncIoChannel::new(path, true)?;
+        let mut ro_chan = SyncIoChannel::new(path, true, false, false)?;
         let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
         ro_chan.add_write(0, 1, write_buf.clone(), 2);
         ro_chan.submit()?;
@@ -324,13 +341,13 @@ mod tests {
             VhostUserBlockError::IoError { source: e }
         })?;
         let path = tmpfile.path();
-        let mut chan = SyncIoChannel::new(path, false)?;
+        let mut chan = SyncIoChannel::new(path, false, false, false)?;
         assert!(!chan.busy());
         chan.add_flush(1);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(1, true)]);
 
-        if let Ok(mut err_chan) = SyncIoChannel::new(Path::new("/dev/full"), false) {
+        if let Ok(mut err_chan) = SyncIoChannel::new(Path::new("/dev/full"), false, false, false) {
             err_chan.add_flush(2);
             err_chan.submit()?;
             assert_eq!(err_chan.poll(), vec![(2, false)]);
@@ -343,13 +360,66 @@ mod tests {
     fn block_device_error_and_sector_count() {
         let path = PathBuf::from("/no/such/file");
         assert!(matches!(
-            SyncBlockDevice::new(path, false),
+            SyncBlockDevice::new(path, false, false, false),
             Err(VhostUserBlockError::IoError { .. })
         ));
 
         let tmpfile = NamedTempFile::new().unwrap();
         tmpfile.as_file().set_len((SECTOR_SIZE * 2) as u64).unwrap();
-        let device = SyncBlockDevice::new(tmpfile.path().to_path_buf(), false).unwrap();
+        let device =
+            SyncBlockDevice::new(tmpfile.path().to_path_buf(), false, false, false).unwrap();
         assert_eq!(device.sector_count(), 2);
+    }
+    #[test]
+    // Verify that direct I/O works for basic read and write operations.
+    fn direct_io_basic_io() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {e}");
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let path = tmpfile.path().to_owned();
+        let device = SyncBlockDevice::new(path.clone(), false, true, false)?;
+        let mut chan = device.create_channel()?;
+
+        let pattern = vec![0xACu8; SECTOR_SIZE];
+        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf
+            .borrow_mut()
+            .as_mut_slice()
+            .copy_from_slice(&pattern);
+        chan.add_write(0, 1, write_buf.clone(), 1);
+        chan.submit()?;
+        let result = chan.poll();
+        assert_eq!(result, vec![(1, true)]);
+
+        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        chan.add_read(0, 1, read_buf.clone(), 2);
+        chan.submit()?;
+        let result = chan.poll();
+        assert_eq!(result, vec![(2, true)]);
+        assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
+
+        Ok(())
+    }
+
+    #[test]
+    // When opened with O_SYNC, flush requests should complete without issuing
+    // an fsync operation (or rather, the write itself was sync, so flush is fine).
+    // For SyncIoChannel, flush calls file.sync_all() anyway, but we want to ensure
+    // the flag is accepted and doesn't cause errors.
+    fn sync_flush_noop() -> Result<()> {
+        let tmpfile = NamedTempFile::new().map_err(|e| {
+            error!("Failed to create temporary file: {e}");
+            VhostUserBlockError::IoError { source: e }
+        })?;
+        let path = tmpfile.path().to_owned();
+        let device = SyncBlockDevice::new(path.clone(), false, false, true)?;
+        let mut chan = device.create_channel()?;
+
+        chan.add_flush(1);
+        chan.submit()?;
+        let result = chan.poll();
+        assert_eq!(result, vec![(1, true)]);
+        Ok(())
     }
 }

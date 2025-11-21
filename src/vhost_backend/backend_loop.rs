@@ -12,7 +12,7 @@ use nix::sys::statfs::statfs;
 use vhost_user_backend::VhostUserDaemon;
 use vm_memory::GuestMemoryAtomic;
 
-use super::{backend::UbiBlkBackend, rpc, KeyEncryptionCipher, Options};
+use super::{backend::UbiBlkBackend, rpc, IoEngine, KeyEncryptionCipher, Options};
 use crate::{
     block_device::{
         self, init_metadata as init_metadata_file, load_metadata, BgWorker, BgWorkerRequest,
@@ -162,7 +162,8 @@ impl BackendEnv {
     fn create_source_devices(options: &Options) -> Result<SourceDevices> {
         let source: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
             let readonly = true;
-            UringBlockDevice::new(
+            create_io_engine_device(
+                options.io_engine.clone(),
                 PathBuf::from(path),
                 64,
                 readonly,
@@ -338,7 +339,8 @@ pub fn init_metadata(
 
     let image_stripe_count = if let Some(ref image_path) = config.image_path {
         let readonly = true;
-        let image_bdev = UringBlockDevice::new(
+        let image_bdev: Box<dyn BlockDevice> = create_io_engine_device(
+            config.io_engine.clone(),
             PathBuf::from(image_path),
             64,
             readonly,
@@ -361,12 +363,44 @@ pub fn init_metadata(
     Ok(())
 }
 
+fn create_io_engine_device(
+    engine: IoEngine,
+    path: PathBuf,
+    queue_size: usize,
+    readonly: bool,
+    direct_io: bool,
+    write_through: bool,
+) -> Result<Box<dyn BlockDevice>> {
+    match engine {
+        IoEngine::IoUring => {
+            let dev = UringBlockDevice::new(
+                path.to_path_buf(),
+                queue_size,
+                readonly,
+                direct_io,
+                write_through,
+            )?;
+            Ok(dev as Box<dyn BlockDevice>)
+        }
+        IoEngine::Sync => {
+            let dev = block_device::SyncBlockDevice::new(
+                path.to_path_buf(),
+                readonly,
+                direct_io,
+                write_through,
+            )?;
+            Ok(dev as Box<dyn BlockDevice>)
+        }
+    }
+}
+
 fn build_block_device(
     path: &str,
     options: &Options,
     kek: KeyEncryptionCipher,
 ) -> Result<Box<dyn BlockDevice>> {
-    let mut block_device: Box<dyn BlockDevice> = block_device::UringBlockDevice::new(
+    let mut block_device: Box<dyn BlockDevice> = create_io_engine_device(
+        options.io_engine.clone(),
         PathBuf::from(path),
         options.queue_size,
         false,

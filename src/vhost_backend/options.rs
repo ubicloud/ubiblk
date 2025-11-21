@@ -148,6 +148,17 @@ pub struct Options {
         deserialize_with = "deserialize_device_id"
     )]
     pub device_id: String,
+
+    #[serde(default)]
+    pub io_engine: IoEngine,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum IoEngine {
+    #[default]
+    IoUring,
+    Sync,
 }
 
 #[cfg(test)]
@@ -240,6 +251,7 @@ mod tests {
         assert_eq!(options.device_id, "ubiblk".to_string());
         assert!(options.rpc_socket_path.is_none());
         assert!(!options.autofetch);
+        assert_eq!(options.io_engine, IoEngine::IoUring);
     }
 
     #[test]
@@ -283,5 +295,24 @@ mod tests {
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert_eq!(options.cpus, Some(vec![1, 2]));
+    }
+
+    #[test]
+    fn test_io_engine_parsing() {
+        let yaml_uring = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        io_engine: io_uring
+        "#;
+        let options_uring: Options = from_str(yaml_uring).unwrap();
+        assert_eq!(options_uring.io_engine, IoEngine::IoUring);
+
+        let yaml_sync = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        io_engine: sync
+        "#;
+        let options_sync: Options = from_str(yaml_sync).unwrap();
+        assert_eq!(options_sync.io_engine, IoEngine::Sync);
     }
 }

@@ -61,6 +61,7 @@ The configuration YAML must define:
 - `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
 - `io_debug_path`: (Optional) Path for I/O debug log.
 - `device_id`: (Optional) Identifier returned to the guest for GET_ID.
+- `io_engine`: (Optional) I/O engine to use for file operations. Allowed values: `io_uring` (default), `sync`.
 - `cpus`: (Optional) List of CPU indices to pin backend threads to. When
   provided, the length must match `num_queues`.
 
@@ -100,6 +101,7 @@ track_written: false                     # Optional: track written stripes
 write_through: false                     # Optional: enable write-through mode
 autofetch: false                         # Optional: fetch stripes automatically
 device_id: "ubiblk"                      # Optional: device identifier
+io_engine: "io_uring"                    # Optional: io_uring (default) or sync
 encryption_key:                          # Optional: AES‐XTS keys (base64 encoded)
   - "x74Yhe/ovgxY4BrBaM6Wm/9firf9k/N+ayvGsskBo+hjQtrL+nslCDC5oR/HpSDL"
   - "TJn65Jb//AYqu/a8zlpb0IlXC4vwFQ5DtbQkMTeliEAwafr0DEH+5hNro8FuVzQ+"

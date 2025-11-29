@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -I/usr/local/include
-LDFLAGS = -L/usr/local/lib/x86_64-linux-gnu -lblkio
+LDFLAGS = -L/usr/local/lib/x86_64-linux-gnu -Wl,-rpath,/usr/local/lib/x86_64-linux-gnu -lblkio
 
 TESTS_DIR = tests/blkio
 TARGET_TESTS_DIR = target/tests/blkio

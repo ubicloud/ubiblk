@@ -5,16 +5,15 @@ use crate::vhost_backend::SECTOR_SIZE;
 use crate::{Result, VhostUserBlockError};
 use log::error;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::Write;
+use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 #[cfg(test)]
 use nix::unistd::pipe;
 
 struct SyncIoChannel {
-    file: Arc<Mutex<File>>,
+    file: File,
     finished_requests: Vec<(usize, bool)>,
 }
 
@@ -39,7 +38,7 @@ impl SyncIoChannel {
             VhostUserBlockError::IoError { source: e }
         })?;
         Ok(SyncIoChannel {
-            file: Arc::new(Mutex::new(file)),
+            file,
             finished_requests: Vec::new(),
         })
     }
@@ -48,21 +47,13 @@ impl SyncIoChannel {
 impl IoChannel for SyncIoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let mut buf = buf.borrow_mut();
-        let mut file = match self.file.lock() {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Failed to lock file mutex: {e}");
-                self.finished_requests.push((id, false));
-                return;
-            }
-        };
         let len = sector_count as usize * SECTOR_SIZE;
-        if let Err(e) = file.seek(SeekFrom::Start(sector_offset * SECTOR_SIZE as u64)) {
-            error!("Error seeking to sector {sector_offset}: {e}");
-            self.finished_requests.push((id, false));
-            return;
-        }
-        if let Err(e) = file.read_exact(&mut buf.as_mut_slice()[..len]) {
+        let offset = sector_offset * SECTOR_SIZE as u64;
+
+        if let Err(e) = self
+            .file
+            .read_exact_at(&mut buf.as_mut_slice()[..len], offset)
+        {
             error!("Error reading from sector {sector_offset}: {e}");
             self.finished_requests.push((id, false));
             return;
@@ -73,22 +64,10 @@ impl IoChannel for SyncIoChannel {
 
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let buf = buf.borrow();
-        let mut file = match self.file.lock() {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Failed to lock file mutex: {e}");
-                self.finished_requests.push((id, false));
-                return;
-            }
-        };
         let len = sector_count as usize * SECTOR_SIZE;
+        let offset = sector_offset * SECTOR_SIZE as u64;
 
-        if let Err(e) = file.seek(SeekFrom::Start(sector_offset * SECTOR_SIZE as u64)) {
-            error!("Error seeking to sector {sector_offset}: {e}");
-            self.finished_requests.push((id, false));
-            return;
-        }
-        if let Err(e) = file.write_all(&buf.as_slice()[..len]) {
+        if let Err(e) = self.file.write_all_at(&buf.as_slice()[..len], offset) {
             error!("Error writing to sector {sector_offset}: {e}");
             self.finished_requests.push((id, false));
             return;
@@ -98,19 +77,11 @@ impl IoChannel for SyncIoChannel {
     }
 
     fn add_flush(&mut self, id: usize) {
-        let mut file = match self.file.lock() {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Failed to lock file mutex: {e}");
-                self.finished_requests.push((id, false));
-                return;
-            }
-        };
-        if file.flush().is_err() {
+        if self.file.flush().is_err() {
             self.finished_requests.push((id, false));
             return;
         }
-        if file.sync_all().is_err() {
+        if self.file.sync_all().is_err() {
             self.finished_requests.push((id, false));
             return;
         }
@@ -192,6 +163,7 @@ impl SyncBlockDevice {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::{cell::RefCell, rc::Rc};
 
     use tempfile::NamedTempFile;
@@ -319,7 +291,7 @@ mod tests {
         let file = File::from(write_fd);
         let _r = File::from(read_fd);
         let mut chan = SyncIoChannel {
-            file: Arc::new(Mutex::new(file)),
+            file,
             finished_requests: Vec::new(),
         };
         let buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));

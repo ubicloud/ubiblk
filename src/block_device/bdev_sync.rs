@@ -126,7 +126,7 @@ impl IoChannel for SyncIoChannel {
     }
 
     fn busy(&self) -> bool {
-        false
+        !self.finished_requests.is_empty()
     }
 }
 

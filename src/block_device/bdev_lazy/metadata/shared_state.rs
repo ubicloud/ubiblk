@@ -8,8 +8,8 @@ use std::sync::{
 pub struct SharedMetadataState {
     stripe_headers: Arc<Vec<AtomicU8>>,
     stripe_sector_count_shift: u8,
-    fetched_stripes: Arc<AtomicU64>,
-    no_source_stripes: Arc<AtomicU64>,
+    fetched_stripes_count: Arc<AtomicU64>,
+    no_source_stripes_count: Arc<AtomicU64>,
 }
 
 const STRIPE_FETCHED_BIT: u8 = 0;
@@ -26,21 +26,21 @@ impl SharedMetadataState {
                 .collect::<Vec<_>>(),
         );
 
-        let (mut fetched_stripes, mut no_source_stripes) = (0, 0);
+        let (mut fetched_stripes_count, mut no_source_stripes_count) = (0, 0);
         for header in metadata.stripe_headers.iter() {
             if header & (1 << STRIPE_FETCHED_BIT) != 0 {
-                fetched_stripes += 1;
+                fetched_stripes_count += 1;
             }
             if header & (1 << STRIPE_NO_SOURCE_DATA_BIT) != 0 {
-                no_source_stripes += 1;
+                no_source_stripes_count += 1;
             }
         }
 
         Self {
             stripe_headers,
             stripe_sector_count_shift: metadata.stripe_sector_count_shift,
-            fetched_stripes: Arc::new(AtomicU64::new(fetched_stripes)),
-            no_source_stripes: Arc::new(AtomicU64::new(no_source_stripes)),
+            fetched_stripes_count: Arc::new(AtomicU64::new(fetched_stripes_count)),
+            no_source_stripes_count: Arc::new(AtomicU64::new(no_source_stripes_count)),
         }
     }
 
@@ -71,15 +71,15 @@ impl SharedMetadataState {
     pub fn set_stripe_header(&self, stripe_id: usize, header: u8) {
         let prev = self.stripe_headers[stripe_id].swap(header, Ordering::AcqRel);
         if prev & (1 << STRIPE_FETCHED_BIT) == 0 && header & (1 << STRIPE_FETCHED_BIT) != 0 {
-            self.fetched_stripes.fetch_add(1, Ordering::AcqRel);
+            self.fetched_stripes_count.fetch_add(1, Ordering::AcqRel);
         }
     }
 
     pub fn fetched_stripes(&self) -> u64 {
-        self.fetched_stripes.load(Ordering::Acquire)
+        self.fetched_stripes_count.load(Ordering::Acquire)
     }
 
     pub fn no_source_stripes(&self) -> u64 {
-        self.no_source_stripes.load(Ordering::Acquire)
+        self.no_source_stripes_count.load(Ordering::Acquire)
     }
 }

@@ -83,7 +83,16 @@ supported:
 Example using socat to query the status and pretty-print the response:
 
 ```bash
-echo '{"command": "status"}' | socat - UNIX-CONNECT:/tmp/ubiblk-rpc.sock | jq .
+$ echo '{"command": "status"}' | socat - UNIX-CONNECT:/tmp/ubiblk-rpc.sock | jq .
+{
+  "status": {
+    "stripes": {
+      "fetched": 428,
+      "no_source": 4608,
+      "total": 8192
+    }
+  }
+}
 ```
 
 ## Configuration File Format

@@ -49,6 +49,7 @@ vhost-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek]
 The configuration YAML must define:
 - `path`: Base disk image path.
 - `image_path`: (Optional) Image path for lazy stripe fetch.
+- `remote_image`: (Optional) Remote stripe source served by `remote-bdev-server`.
 - `metadata_path`: (Optional) Metadata file path used for lazy fetch. Required when `image_path` is set.
 - `rpc_socket_path`: (Optional) Path to a Unix domain socket for runtime RPC commands.
 - `socket`: vhost-user socket path.
@@ -102,6 +103,10 @@ The backend configuration YAML must match the `Options` struct fields:
 ```yaml
 path: "/path/to/block-device.raw"        # String: base disk image path
 image_path: "/path/to/ubi-image.raw"     # Optional String: UBI image for lazy fetch
+remote_image:                             # Optional: remote server providing stripes
+  address: "203.0.113.42:4555"           # Required when remote_image is set
+  tls_psk_identity: "ubiblk-prod"        # Optional: PSK identity for TLS
+  tls_psk_key: "AQIDBAUGBwgJCgsMDQ4PEA==" # Optional: base64 encoded PSK bytes
 metadata_path: "/path/to/metadata"       # Optional: metadata path for lazy fetch
 rpc_socket_path: "/tmp/ubiblk-rpc.sock"  # Optional: RPC Unix socket path
 socket: "/tmp/vhost.sock"                # String: vhost‐user socket path
@@ -123,6 +128,12 @@ encryption_key:                          # Optional: AES‐XTS keys (base64 enco
   - "x74Yhe/ovgxY4BrBaM6Wm/9firf9k/N+ayvGsskBo+hjQtrL+nslCDC5oR/HpSDL"
   - "TJn65Jb//AYqu/a8zlpb0IlXC4vwFQ5DtbQkMTeliEAwafr0DEH+5hNro8FuVzQ+"
 ```
+
+When `remote_image` is provided the backend fetches stripes from a
+`remote-bdev-server` instance instead of a local `image_path`. The optional TLS
+fields must either both be present or both omitted. The `tls_psk_key` field
+expects base64-encoded bytes; to reuse a hexadecimal key file generated for the
+server, convert it with `xxd -r -p tls-psk.hex | base64`.
 
 ## Lazy Stripe Fetching
 
@@ -177,6 +188,37 @@ init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \
 - `-k, --kek <KEK_FILE>`: (Optional) KEK file for encrypted keys.
 - `-u, --unlink-kek`: (Optional) Delete the KEK file after use.
 - `-s, --stripe-sector-count-shift`: (Optional) Stripe size as a power of two
+
+## remote-bdev-server
+
+`remote-bdev-server` exposes stripe data from an on-disk image over TCP. Use it
+as the `remote_image` source for lazy stripe fetching when the image is not
+locally available.
+
+```bash
+remote-bdev-server --config /path/to/ubiblk.yaml [--bind 0.0.0.0:4555] \
+                   [--tls-psk-identity <IDENTITY> --tls-psk-key /path/to/tls-psk.hex]
+```
+
+- The configuration file must reference the block device (`path`) and its
+  metadata (`metadata_path`) and must not set `image_path`.
+- Specify `--bind` to control the listening address. The default is
+  `127.0.0.1:4555`.
+- TLS is optional. When enabled, the identity must match the one provided by
+  clients and the key file must contain hexadecimal bytes of the shared PSK.
+
+## remote-shell
+
+`remote-shell` is a troubleshooting utility that connects to a
+`remote-bdev-server`, downloads metadata and stripes on demand, and prints the
+results.
+
+```bash
+remote-shell 203.0.113.42:4555 \
+    [--tls-psk-identity <IDENTITY> --tls-psk-key /path/to/tls-psk.hex]
+```
+
+The TLS options behave the same way as in `remote-bdev-server`.
   sectors (default: `11`).
 
 

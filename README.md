@@ -77,6 +77,14 @@ supported:
 - `{"command": "version"}` – returns the backend version string.
 - `{"command": "status"}` – returns the background worker status report or
   `null` when no background worker is active.
+- `{"command": "queues"}` – returns an array of I/O activity snapshots for
+  each queue.
+
+Example using socat to query the status and pretty-print the response:
+
+```bash
+echo '{"command": "status"}' | socat - UNIX-CONNECT:/tmp/ubiblk-rpc.sock | jq .
+```
 
 ## Configuration File Format
 

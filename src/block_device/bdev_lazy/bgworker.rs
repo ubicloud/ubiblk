@@ -133,6 +133,7 @@ mod tests {
         init_metadata(
             &UbiMetadata::new(11, 16, 16),
             &mut metadata_dev.create_channel().unwrap(),
+            metadata_dev.sector_count(),
         )
         .expect("Failed to initialize metadata");
 
@@ -174,6 +175,7 @@ mod tests {
         init_metadata(
             &UbiMetadata::new(11, 16, 0),
             &mut metadata_dev.create_channel().unwrap(),
+            metadata_dev.sector_count(),
         )
         .expect("Failed to initialize metadata");
 

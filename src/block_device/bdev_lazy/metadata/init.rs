@@ -48,14 +48,39 @@ fn wait_for_completion(ch: &mut Box<dyn IoChannel>, id: usize) -> Result<()> {
     })
 }
 
-pub fn init_metadata(metadata: &UbiMetadata, ch: &mut Box<dyn IoChannel>) -> Result<()> {
+pub fn init_metadata(
+    metadata: &UbiMetadata,
+    ch: &mut Box<dyn IoChannel>,
+    metadata_sector_count: u64,
+) -> Result<()> {
     let metadata_size = metadata.metadata_size();
-    let sectors = metadata_size.div_ceil(SECTOR_SIZE);
-    let buf = Rc::new(RefCell::new(AlignedBuf::new(sectors * SECTOR_SIZE)));
+    let total_size = metadata_sector_count
+        .checked_mul(SECTOR_SIZE as u64)
+        .and_then(|size| usize::try_from(size).ok())
+        .ok_or(VhostUserBlockError::InvalidParameter {
+            description: "Metadata device too large".to_string(),
+        })?;
 
-    metadata.write_to_buf(buf.borrow_mut().as_mut_slice());
+    if metadata_size > total_size {
+        return Err(VhostUserBlockError::InvalidParameter {
+            description: format!(
+                "Metadata size {metadata_size} exceeds device capacity {total_size}"
+            ),
+        });
+    }
 
-    ch.add_write(0, sectors as u32, buf.clone(), METADATA_WRITE_ID);
+    let sectors: u32 =
+        metadata_sector_count
+            .try_into()
+            .map_err(|_| VhostUserBlockError::InvalidParameter {
+                description: "Metadata sector count exceeds u32".to_string(),
+            })?;
+
+    let buf = Rc::new(RefCell::new(AlignedBuf::new(total_size)));
+
+    metadata.write_to_buf(&mut buf.borrow_mut().as_mut_slice()[..metadata_size]);
+
+    ch.add_write(0, sectors, buf.clone(), METADATA_WRITE_ID);
     ch.submit()?;
     wait_for_completion(ch, METADATA_WRITE_ID)?;
 

@@ -38,7 +38,7 @@ mod tests {
         let metadata_dev = TestBlockDevice::new(METADATA_SIZE);
         let mut ch = metadata_dev.create_channel().unwrap();
         let metadata = UbiMetadata::new(STRIPE_SHIFT, STRIPE_COUNT, STRIPE_COUNT);
-        init_metadata(&metadata, &mut ch).unwrap();
+        init_metadata(&metadata, &mut ch, metadata_dev.sector_count()).unwrap();
 
         let metadata_state = {
             let mut load_ch = metadata_dev.create_channel().unwrap();

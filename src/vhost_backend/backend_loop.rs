@@ -359,7 +359,7 @@ pub fn init_metadata(
         base_stripe_count,
         image_stripe_count,
     );
-    init_metadata_file(&metadata, &mut ch)?;
+    init_metadata_file(&metadata, &mut ch, metadata_bdev.sector_count())?;
     Ok(())
 }
 

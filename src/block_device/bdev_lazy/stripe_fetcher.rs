@@ -5,15 +5,26 @@ use super::metadata::SharedMetadataState;
 use crate::utils::aligned_buffer_pool::AlignedBufferPool;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error};
+use serde::Serialize;
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 enum FetchState {
     Queued,
     Fetching,
     Flushing,
     Fetched,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StripeFetcherDebugInfo {
+    pub fetch_queue: Vec<usize>,
+    pub autofetch_queue: Vec<usize>,
+    pub stripe_states: Vec<(usize, String)>,
+    pub finished_fetches: Vec<(usize, bool)>,
+    pub fetch_source_channel_busy: bool,
+    pub fetch_target_channel_busy: bool,
 }
 
 pub struct StripeFetcher {
@@ -124,6 +135,21 @@ impl StripeFetcher {
 
     pub fn take_finished_fetches(&mut self) -> Vec<(usize, bool)> {
         std::mem::take(&mut self.finished_fetches)
+    }
+
+    pub fn debug_state(&self) -> StripeFetcherDebugInfo {
+        StripeFetcherDebugInfo {
+            fetch_queue: self.fetch_queue.iter().copied().collect(),
+            autofetch_queue: self.autofetch_queue.iter().copied().collect(),
+            stripe_states: self
+                .stripe_states
+                .iter()
+                .map(|(stripe_id, state)| (*stripe_id, format!("{state:?}")))
+                .collect(),
+            finished_fetches: self.finished_fetches.clone(),
+            fetch_source_channel_busy: self.fetch_source_channel.busy(),
+            fetch_target_channel_busy: self.fetch_target_channel.busy(),
+        }
     }
 
     pub fn update_autofetch(&mut self) {

@@ -5,6 +5,6 @@ mod types;
 
 pub use init::init_metadata;
 pub use load::load_metadata;
-pub use shared_state::SharedMetadataState;
+pub use shared_state::{Failed, Fetched, NoSource, NotFetched, SharedMetadataState};
 pub use types::UbiMetadata;
 pub use types::UBI_MAGIC;

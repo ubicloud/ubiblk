@@ -258,6 +258,7 @@ impl StripeFetcher {
         if success {
             self.stripe_states.insert(stripe_id, FetchState::Fetched);
         } else {
+            self.shared_metadata_state.set_stripe_failed(stripe_id);
             self.stripe_states.remove(&stripe_id);
         }
 

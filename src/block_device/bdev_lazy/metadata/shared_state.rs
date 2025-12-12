@@ -99,6 +99,11 @@ impl SharedMetadataState {
         self.stripe_fetch_states[stripe_id].store(Failed, Ordering::Release)
     }
 
+    #[cfg(test)]
+    pub fn is_stripe_failed(&self, stripe_id: usize) -> bool {
+        self.stripe_fetch_states[stripe_id].load(Ordering::Acquire) == Failed
+    }
+
     pub fn fetched_stripes(&self) -> u64 {
         self.fetched_stripes_count.load(Ordering::Acquire)
     }

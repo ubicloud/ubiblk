@@ -335,4 +335,28 @@ mod tests {
         let results = drive(&env.bgworker, &mut chan);
         assert_eq!(results, vec![(flush_id, true)]);
     }
+
+    #[test]
+    fn test_failed_stripe_access() {
+        let env = setup_env(true, false, b"image_read");
+        let mut chan = env.lazy.create_channel().unwrap();
+
+        env.metadata_state.set_stripe_failed(0);
+
+        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        chan.add_read(0, 1, read_buf.clone(), 1);
+        chan.submit().unwrap();
+        let results = drive(&env.bgworker, &mut chan);
+
+        assert_eq!(results, vec![(1, false)]);
+
+        let write_data = b"write_to_failed_stripe";
+        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
+        chan.add_write(0, 1, write_buf.clone(), 2);
+        chan.submit().unwrap();
+        let results = drive(&env.bgworker, &mut chan);
+
+        assert_eq!(results, vec![(2, false)]);
+    }
 }

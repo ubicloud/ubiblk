@@ -6,6 +6,7 @@ use std::{
 use super::super::*;
 use super::bgworker::BgWorkerRequest;
 use super::metadata::SharedMetadataState;
+use super::metadata::{Failed, Fetched, NoSource, NotFetched};
 use crate::{block_device::SharedBuffer, Result, VhostUserBlockError};
 use log::error;
 
@@ -13,6 +14,13 @@ use log::error;
 enum RequestType {
     In,
     Out,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StripesFetchStatus {
+    Pending,
+    Complete,
+    Failed { stripe_id: usize },
 }
 
 struct RWRequest {
@@ -58,13 +66,23 @@ impl LazyIoChannel {
 }
 
 impl LazyIoChannel {
-    fn request_stripes_fetched(&self, request: &RWRequest) -> bool {
+    fn request_stripes_fetch_status(&self, request: &RWRequest) -> StripesFetchStatus {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if !self.metadata_state.stripe_fetched_if_needed(stripe_id) {
-                return false;
+            let state = self.metadata_state.stripe_fetch_state(stripe_id);
+            match state {
+                Fetched | NoSource => {
+                    continue;
+                }
+                NotFetched => {
+                    return StripesFetchStatus::Pending;
+                }
+                Failed => {
+                    return StripesFetchStatus::Failed { stripe_id };
+                }
+                _ => {}
             }
         }
-        true
+        StripesFetchStatus::Complete
     }
 
     fn request_stripes_written(&self, request: &RWRequest) -> bool {
@@ -111,8 +129,15 @@ impl LazyIoChannel {
         let mut added_requests = Vec::new();
 
         while let Some(front) = self.queued_rw_requests.front() {
-            if !self.request_stripes_fetched(front) {
-                break;
+            match self.request_stripes_fetch_status(front) {
+                StripesFetchStatus::Complete => {}
+                StripesFetchStatus::Pending => break,
+                StripesFetchStatus::Failed { stripe_id } => {
+                    let front = self.queued_rw_requests.pop_front().expect("front exists");
+                    self.finished_requests.push((front.id, false));
+                    error!("Failed to fetch stripe: {stripe_id}");
+                    continue;
+                }
             }
 
             if self.track_written
@@ -179,10 +204,17 @@ impl IoChannel for LazyIoChannel {
                 .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
         };
 
-        let fetched = self.request_stripes_fetched(&request);
-        if fetched {
-            self.base.add_read(sector_offset, sector_count, buf, id);
-            return;
+        match self.request_stripes_fetch_status(&request) {
+            StripesFetchStatus::Complete => {
+                self.base.add_read(sector_offset, sector_count, buf, id);
+                return;
+            }
+            StripesFetchStatus::Pending => {}
+            StripesFetchStatus::Failed { stripe_id } => {
+                error!("Received a read request for a failed stripe: {stripe_id}");
+                self.finished_requests.push((id, false));
+                return;
+            }
         }
 
         if request.stripe_id_first == request.stripe_id_last {
@@ -216,13 +248,21 @@ impl IoChannel for LazyIoChannel {
                 .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
         };
 
-        let can_start = self.request_stripes_fetched(&request)
-            && (!self.track_written || self.request_stripes_written(&request));
-
-        if can_start {
-            self.base
-                .add_write(sector_offset, sector_count, buf.clone(), id);
-            return;
+        match self.request_stripes_fetch_status(&request) {
+            StripesFetchStatus::Complete => {
+                let can_start = !self.track_written || self.request_stripes_written(&request);
+                if can_start {
+                    self.base
+                        .add_write(sector_offset, sector_count, buf.clone(), id);
+                    return;
+                }
+            }
+            StripesFetchStatus::Pending => {}
+            StripesFetchStatus::Failed { stripe_id } => {
+                error!("Received a write request for a failed stripe: {stripe_id}");
+                self.finished_requests.push((id, false));
+                return;
+            }
         }
 
         if let Err(e) = self.start_stripe_fetches(&request) {

@@ -4,9 +4,10 @@ use super::super::*;
 use super::metadata::SharedMetadataState;
 use crate::utils::aligned_buffer_pool::AlignedBufferPool;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
-use log::{debug, error};
+use log::{debug, error, warn};
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
+const MAX_FETCH_RETRIES: u8 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FetchState {
@@ -27,6 +28,7 @@ pub struct StripeFetcher {
     buffer_pool: AlignedBufferPool,
     shared_metadata_state: SharedMetadataState,
     stripe_states: HashMap<usize, FetchState>,
+    stripe_fetch_retries: HashMap<usize, u8>,
     allocated_buffers: HashMap<usize, (SharedBuffer, usize)>,
     finished_fetches: Vec<(usize, bool)>,
     autofetch: bool,
@@ -77,6 +79,7 @@ impl StripeFetcher {
             buffer_pool,
             shared_metadata_state,
             stripe_states: HashMap::new(),
+            stripe_fetch_retries: HashMap::new(),
             allocated_buffers: HashMap::new(),
             finished_fetches: Vec::new(),
             autofetch,
@@ -255,20 +258,32 @@ impl StripeFetcher {
     fn fetch_completed(&mut self, stripe_id: usize, success: bool) {
         debug!("Fetch completed for stripe {stripe_id}, success={success}");
 
-        if success {
-            self.stripe_states.insert(stripe_id, FetchState::Fetched);
-        } else {
-            self.shared_metadata_state.set_stripe_failed(stripe_id);
-            self.stripe_states.remove(&stripe_id);
-        }
-
         if let Some((_, buffer_idx)) = self.allocated_buffers.remove(&stripe_id) {
             self.buffer_pool.return_buffer(buffer_idx);
         } else {
             error!("No buffer allocated for stripe {stripe_id} on completion");
         }
 
-        self.finished_fetches.push((stripe_id, success));
+        if success {
+            self.stripe_states.insert(stripe_id, FetchState::Fetched);
+            self.stripe_fetch_retries.remove(&stripe_id);
+            self.finished_fetches.push((stripe_id, true));
+            return;
+        }
+
+        let retries = self.stripe_fetch_retries.entry(stripe_id).or_insert(0);
+        if *retries < MAX_FETCH_RETRIES {
+            *retries += 1;
+            warn!("Retrying stripe {stripe_id}, attempt {retries}");
+            self.fetch_queue.push_back(stripe_id);
+            self.stripe_states.insert(stripe_id, FetchState::Queued);
+        } else {
+            error!("Stripe {stripe_id} failed after {MAX_FETCH_RETRIES} retries");
+            self.shared_metadata_state.set_stripe_failed(stripe_id);
+            self.stripe_states.remove(&stripe_id);
+            self.stripe_fetch_retries.remove(&stripe_id);
+            self.finished_fetches.push((stripe_id, false));
+        }
     }
 }
 
@@ -438,5 +453,49 @@ mod tests {
             assert!(*stripe_id == idx);
             assert!(success);
         }
+    }
+
+    #[test]
+    fn test_retry_logic() {
+        let mut state = prep(false);
+        let (buf, idx) = state.fetcher.buffer_pool.get_buffer().unwrap();
+        state.fetcher.allocated_buffers.insert(0, (buf, idx));
+
+        state.fetcher.fetch_completed(0, false);
+        assert!(!state.fetcher.fetch_queue.is_empty());
+        state.fetcher.fetch_queue.pop_front();
+        assert_eq!(
+            state.fetcher.stripe_states.get(&0),
+            Some(&FetchState::Queued)
+        );
+        assert_eq!(state.fetcher.stripe_fetch_retries.get(&0), Some(&1));
+
+        let (buf, idx) = state.fetcher.buffer_pool.get_buffer().unwrap();
+        state.fetcher.allocated_buffers.insert(0, (buf, idx));
+
+        assert!(!state.fetcher.shared_metadata_state.is_stripe_failed(0));
+
+        state.fetcher.fetch_completed(0, false);
+        assert!(!state.fetcher.fetch_queue.is_empty());
+        state.fetcher.fetch_queue.pop_front();
+        assert_eq!(state.fetcher.stripe_fetch_retries.get(&0), Some(&2));
+
+        let (buf, idx) = state.fetcher.buffer_pool.get_buffer().unwrap();
+        state.fetcher.allocated_buffers.insert(0, (buf, idx));
+
+        assert!(!state.fetcher.shared_metadata_state.is_stripe_failed(0));
+
+        state.fetcher.fetch_completed(0, false);
+        assert!(!state.fetcher.fetch_queue.is_empty());
+        state.fetcher.fetch_queue.pop_front();
+        assert_eq!(state.fetcher.stripe_fetch_retries.get(&0), Some(&3));
+
+        let (buf, idx) = state.fetcher.buffer_pool.get_buffer().unwrap();
+        state.fetcher.allocated_buffers.insert(0, (buf, idx));
+
+        state.fetcher.fetch_completed(0, false);
+        assert!(state.fetcher.fetch_queue.is_empty());
+        assert_eq!(state.fetcher.stripe_states.get(&0), None);
+        assert!(state.fetcher.shared_metadata_state.is_stripe_failed(0));
     }
 }

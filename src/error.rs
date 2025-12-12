@@ -25,6 +25,8 @@ pub enum VhostUserBlockError {
     InvalidParameter { description: String },
     #[error("Metadata error: {description}")]
     MetadataError { description: String },
+    #[error("Stripe fetch error: {stripe_id}")]
+    StripeFetchError { stripe_id: usize },
     #[error("Other error: {description}")]
     Other { description: String },
 }

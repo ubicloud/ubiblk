@@ -10,7 +10,8 @@ use std::thread;
 use std::time::Duration;
 use ubiblk::block_device::{self, BlockDevice};
 use ubiblk::utils::aligned_buffer::AlignedBuf;
-use ubiblk::vhost_backend::{KeyEncryptionCipher, Options, SECTOR_SIZE};
+use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
+use ubiblk::KeyEncryptionCipher;
 
 const MAX_CHUNK_SECTORS: u32 = 1024;
 

@@ -2,7 +2,8 @@ use clap::Parser;
 use log::error;
 use std::{fs::File, path::PathBuf, process};
 use ubiblk::block_device::{self, load_metadata, BlockDevice};
-use ubiblk::vhost_backend::{KeyEncryptionCipher, Options, SECTOR_SIZE};
+use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
+use ubiblk::KeyEncryptionCipher;
 use ubiblk::Result;
 
 #[derive(Parser)]

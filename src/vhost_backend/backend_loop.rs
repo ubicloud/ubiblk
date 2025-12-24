@@ -12,12 +12,13 @@ use nix::sys::statfs::statfs;
 use vhost_user_backend::VhostUserDaemon;
 use vm_memory::GuestMemoryAtomic;
 
-use super::{backend::UbiBlkBackend, rpc, IoEngine, KeyEncryptionCipher, Options};
+use super::{backend::UbiBlkBackend, rpc, IoEngine, Options};
 use crate::{
     block_device::{
         self, init_metadata as init_metadata_file, load_metadata, BgWorker, BgWorkerRequest,
         BlockDevice, SharedMetadataState, StatusReporter, UbiMetadata, UringBlockDevice,
     },
+    key_encryption::KeyEncryptionCipher,
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     vhost_backend::io_tracking::IoTracker,
     Result, VhostUserBlockError,

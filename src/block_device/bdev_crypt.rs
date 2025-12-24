@@ -1,14 +1,10 @@
 use super::*;
-#[cfg(test)]
-use crate::utils::aligned_buffer::AlignedBuf;
-use crate::vhost_backend::{CipherMethod, KeyEncryptionCipher, SECTOR_SIZE};
-use crate::{Result, VhostUserBlockError};
-use crate::{XTS_AES_256_dec, XTS_AES_256_enc};
-use aes_gcm::{
-    aead::{Aead, AeadCore, Payload},
-    Aes256Gcm, Nonce,
+
+use crate::{
+    key_encryption::{decrypt_keys, KeyEncryptionCipher},
+    vhost_backend::SECTOR_SIZE,
+    Result, XTS_AES_256_dec, XTS_AES_256_enc,
 };
-use log::error;
 
 struct Request {
     sector_offset: u64,
@@ -193,116 +189,16 @@ impl CryptBlockDevice {
     }
 }
 
-fn decrypt_keys(
-    key1: Vec<u8>,
-    key2: Vec<u8>,
-    kek: KeyEncryptionCipher,
-) -> Result<([u8; 32], [u8; 32])> {
-    match kek.method {
-        CipherMethod::None => {
-            if key1.len() != 32 || key2.len() != 32 {
-                error!("Key length must be 32 bytes");
-                return Err(VhostUserBlockError::InvalidParameter {
-                    description: "Key length must be 32 bytes".to_string(),
-                });
-            }
-            let key1 = key1.try_into().map_err(|_| {
-                error!("Failed to convert key1 to array");
-                VhostUserBlockError::InvalidParameter {
-                    description: "Failed to convert key1 to array".to_string(),
-                }
-            })?;
-            let key2 = key2.try_into().map_err(|_| {
-                error!("Failed to convert key2 to array");
-                VhostUserBlockError::InvalidParameter {
-                    description: "Failed to convert key2 to array".to_string(),
-                }
-            })?;
-            Ok((key1, key2))
-        }
-
-        CipherMethod::Aes256Gcm => {
-            use aes_gcm::KeyInit;
-            let kek_key = kek.key.ok_or(VhostUserBlockError::InvalidParameter {
-                description: "Key is required".to_string(),
-            })?;
-            let kek_iv = kek
-                .init_vector
-                .ok_or(VhostUserBlockError::InvalidParameter {
-                    description: "Initialization vector is required".to_string(),
-                })?;
-            let kek_auth_data = kek.auth_data.ok_or(VhostUserBlockError::InvalidParameter {
-                description: "Authentication data is required".to_string(),
-            })?;
-
-            let cipher = Aes256Gcm::new_from_slice(&kek_key).map_err(|e| {
-                error!("Failed to initialize cipher: {e}");
-                VhostUserBlockError::InvalidParameter {
-                    description: format!("Failed to initialize cipher: {e}"),
-                }
-            })?;
-
-            if kek_iv.len() != 12 {
-                error!("Initial vector must be exactly 12 bytes");
-                return Err(VhostUserBlockError::InvalidParameter {
-                    description: "Initial vector must be exactly 12 bytes".to_string(),
-                });
-            }
-            let nonce_bytes: [u8; 12] = kek_iv.as_slice().try_into().map_err(|_| {
-                error!("Initial vector must be exactly 12 bytes");
-                VhostUserBlockError::InvalidParameter {
-                    description: "Initial vector must be exactly 12 bytes".to_string(),
-                }
-            })?;
-            let nonce = KekNonce::from(nonce_bytes);
-
-            let clear1 = decrypt_block(&cipher, &nonce, &kek_auth_data, &key1)?;
-            let clear2 = decrypt_block(&cipher, &nonce, &kek_auth_data, &key2)?;
-            Ok((clear1, clear2))
-        }
-    }
-}
-
-type KekNonce = Nonce<<Aes256Gcm as AeadCore>::NonceSize>;
-
-fn decrypt_block(
-    cipher: &Aes256Gcm,
-    nonce: &KekNonce,
-    auth_data: &[u8],
-    enc: &[u8],
-) -> Result<[u8; 32]> {
-    let plain = cipher
-        .decrypt(
-            nonce,
-            Payload {
-                msg: enc,
-                aad: auth_data,
-            },
-        )
-        .map_err(|e| {
-            error!("Failed to decrypt key: {e}");
-            VhostUserBlockError::InvalidParameter {
-                description: format!("Failed to decrypt key: {e}"),
-            }
-        })?;
-
-    if plain.len() != 32 {
-        error!("Decrypted key must be exactly 32 bytes");
-        return Err(VhostUserBlockError::InvalidParameter {
-            description: "Decrypted key must be exactly 32 bytes".to_string(),
-        });
-    }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&plain);
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::aligned_buffer::AlignedBuf;
+    use crate::VhostUserBlockError;
+
     use crate::{
         block_device::bdev_test::TestBlockDevice,
-        vhost_backend::{CipherMethod, SECTOR_SIZE},
+        key_encryption::{CipherMethod, KeyEncryptionCipher},
+        vhost_backend::SECTOR_SIZE,
     };
 
     #[test]
@@ -408,6 +304,52 @@ mod tests {
     }
 
     #[test]
+    fn test_get_initial_tweak() {
+        let base = TestBlockDevice::new(1024 * 1024);
+        let base_chan = base.create_channel().unwrap();
+        let chan = CryptIoChannel::new(base_chan, [1u8; 32], [2u8; 32]);
+
+        let sector = 0x1122_3344_5566_7788u64;
+        let tweak = chan.get_initial_tweak(sector);
+
+        assert_eq!(&tweak[0..8], &[0u8; 8]);
+        assert_eq!(&tweak[8..16], &sector.to_le_bytes());
+    }
+
+    #[test]
+    fn test_sector_count() {
+        let base = TestBlockDevice::new(1024 * 1024);
+        let bdev = CryptBlockDevice::new(
+            Box::new(base),
+            vec![0u8; 32],
+            vec![0u8; 32],
+            KeyEncryptionCipher::default(),
+        )
+        .unwrap();
+
+        assert_eq!(bdev.sector_count(), 2048);
+    }
+
+    #[test]
+    fn test_invalid_iv_length() {
+        let kek = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(vec![0u8; 32]),
+            init_vector: Some(vec![0u8; 8]),
+            auth_data: Some(vec![]),
+        };
+        let base = TestBlockDevice::new(1024 * 1024);
+        let key1 = vec![0u8; 48];
+        let key2 = vec![0u8; 48];
+
+        let result = CryptBlockDevice::new(Box::new(base), key1, key2, kek);
+        assert!(matches!(
+            result,
+            Err(VhostUserBlockError::InvalidParameter { .. })
+        ));
+    }
+
+    #[test]
     fn test_encrypted_key_decryption() {
         let kek = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
@@ -489,67 +431,6 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_iv_length() {
-        let kek = KeyEncryptionCipher {
-            method: CipherMethod::Aes256Gcm,
-            key: Some(vec![0u8; 32]),
-            init_vector: Some(vec![0u8; 8]),
-            auth_data: Some(vec![]),
-        };
-        let base = TestBlockDevice::new(1024 * 1024);
-        let key1 = vec![0u8; 48];
-        let key2 = vec![0u8; 48];
-
-        let result = CryptBlockDevice::new(Box::new(base), key1, key2, kek);
-        assert!(matches!(
-            result,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
-    }
-
-    #[test]
-    fn test_get_initial_tweak() {
-        let base = TestBlockDevice::new(1024 * 1024);
-        let base_chan = base.create_channel().unwrap();
-        let chan = CryptIoChannel::new(base_chan, [1u8; 32], [2u8; 32]);
-
-        let sector = 0x1122_3344_5566_7788u64;
-        let tweak = chan.get_initial_tweak(sector);
-
-        assert_eq!(&tweak[0..8], &[0u8; 8]);
-        assert_eq!(&tweak[8..16], &sector.to_le_bytes());
-    }
-
-    #[test]
-    fn test_decrypt_block_failure() {
-        use aes_gcm::{Aes256Gcm, KeyInit};
-
-        let cipher = Aes256Gcm::new_from_slice(&[0u8; 32]).unwrap();
-        let nonce = KekNonce::from([0u8; 12]);
-        let enc = vec![0u8; 48];
-
-        let res = decrypt_block(&cipher, &nonce, &[], &enc);
-        assert!(matches!(
-            res,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
-    }
-
-    #[test]
-    fn test_sector_count() {
-        let base = TestBlockDevice::new(1024 * 1024);
-        let bdev = CryptBlockDevice::new(
-            Box::new(base),
-            vec![0u8; 32],
-            vec![0u8; 32],
-            KeyEncryptionCipher::default(),
-        )
-        .unwrap();
-
-        assert_eq!(bdev.sector_count(), 2048);
-    }
-
-    #[test]
     fn test_invalid_kek_key_length() {
         let kek = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
@@ -559,29 +440,6 @@ mod tests {
         };
         let base = TestBlockDevice::new(1024 * 1024);
         let res = CryptBlockDevice::new(Box::new(base), vec![0u8; 32], vec![0u8; 32], kek);
-        assert!(matches!(
-            res,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
-    }
-
-    #[test]
-    fn test_decrypt_block_bad_plain_length() {
-        use aes_gcm::{aead::KeyInit as AeadKeyInit, Aes256Gcm};
-        let cipher = Aes256Gcm::new_from_slice(&[0u8; 32]).unwrap();
-        let nonce = KekNonce::from([0u8; 12]);
-        let data = [1u8; 8];
-        let enc = cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: &data,
-                    aad: b"",
-                },
-            )
-            .unwrap();
-
-        let res = decrypt_block(&cipher, &nonce, b"", &enc);
         assert!(matches!(
             res,
             Err(VhostUserBlockError::InvalidParameter { .. })

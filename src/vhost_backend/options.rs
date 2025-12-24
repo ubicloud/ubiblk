@@ -1,6 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_with::{base64::Base64, serde_as};
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 
 type OptKeyPair = Option<(Vec<u8>, Vec<u8>)>;
@@ -16,29 +15,6 @@ where
             Ok((decoded1, decoded2))
         })
         .transpose()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "kebab-case")]
-pub enum CipherMethod {
-    #[default]
-    None,
-    Aes256Gcm,
-}
-
-#[serde_as]
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct KeyEncryptionCipher {
-    pub method: CipherMethod,
-
-    #[serde_as(as = "Option<Base64>")]
-    pub key: Option<Vec<u8>>,
-
-    #[serde_as(as = "Option<Base64>")]
-    pub init_vector: Option<Vec<u8>>,
-
-    #[serde_as(as = "Option<Base64>")]
-    pub auth_data: Option<Vec<u8>>,
 }
 
 fn default_poll_queue_timeout_us() -> u128 {
@@ -164,6 +140,7 @@ pub enum IoEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::key_encryption::{CipherMethod, KeyEncryptionCipher};
     use serde_yaml::from_str;
 
     #[test]

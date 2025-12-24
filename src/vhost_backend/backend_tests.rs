@@ -1,12 +1,13 @@
 #[cfg(test)]
 mod tests {
-    use crate::block_device::bdev_test::TestBlockDevice;
-    use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
-    use crate::utils::block::VirtioBlockConfig;
-    use crate::vhost_backend::{
-        init_metadata, KeyEncryptionCipher, Options, UbiBlkBackend, SECTOR_SIZE,
+    use crate::{
+        block_device::bdev_test::TestBlockDevice,
+        key_encryption::KeyEncryptionCipher,
+        utils::{aligned_buffer::BUFFER_ALIGNMENT, block::VirtioBlockConfig},
+        vhost_backend::{init_metadata, Options, UbiBlkBackend, SECTOR_SIZE},
+        VhostUserBlockError,
     };
-    use crate::VhostUserBlockError;
+
     use vhost::vhost_user::message::VhostUserProtocolFeatures;
     use vhost_user_backend::VhostUserBackend;
     use virtio_bindings::virtio_blk::VIRTIO_BLK_F_FLUSH;

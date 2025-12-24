@@ -3,6 +3,7 @@ use log::error;
 use std::fs::File;
 use std::process;
 use ubiblk::vhost_backend::*;
+use ubiblk::KeyEncryptionCipher;
 
 const STRIPE_SECTOR_COUNT_SHIFT_MIN: u8 = 6;
 const STRIPE_SECTOR_COUNT_SHIFT_MAX: u8 = 16;

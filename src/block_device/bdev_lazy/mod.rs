@@ -11,6 +11,7 @@ pub use metadata::init_metadata;
 pub use metadata::load_metadata;
 pub use metadata::SharedMetadataState;
 pub use metadata::UbiMetadata;
+pub use metadata::STRIPE_WRITTEN_MASK;
 pub use status_report::{StatusReport, StatusReporter};
 
 #[cfg(test)]

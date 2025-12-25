@@ -16,7 +16,7 @@ pub enum VhostUserBlockError {
     },
     #[error("I/O error: {source}")]
     IoError {
-        #[source]
+        #[from]
         source: std::io::Error,
     },
     #[error("Channel error")]

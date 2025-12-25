@@ -1,17 +1,22 @@
+use std::{
+    cell::RefCell,
+    fs::{File, OpenOptions},
+    io::{BufWriter, Read, Seek, SeekFrom, Write},
+    path::PathBuf,
+    process,
+    rc::Rc,
+    time::Duration,
+};
+
 use clap::{Parser, ValueEnum};
 use log::error;
-use std::cell::RefCell;
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
-use std::process;
-use std::rc::Rc;
-use std::thread;
-use std::time::Duration;
-use ubiblk::block_device::{self, BlockDevice};
-use ubiblk::utils::aligned_buffer::AlignedBuf;
-use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
-use ubiblk::KeyEncryptionCipher;
+
+use ubiblk::{
+    block_device::{self, wait_for_completion, BlockDevice},
+    utils::aligned_buffer::AlignedBuf,
+    vhost_backend::{Options, SECTOR_SIZE},
+    KeyEncryptionCipher,
+};
 
 const MAX_CHUNK_SECTORS: u32 = 1024;
 
@@ -70,21 +75,6 @@ fn load_kek(path: &str) -> Option<KeyEncryptionCipher> {
         Err(e) => {
             error!("Error parsing KEK file {path}: {e}");
             None
-        }
-    }
-}
-
-fn wait_for_completion(channel: &mut dyn block_device::IoChannel, request_id: usize) -> bool {
-    loop {
-        let events = channel.poll();
-        for (id, result) in events {
-            if id == request_id {
-                return result;
-            }
-        }
-
-        if !channel.busy() {
-            thread::sleep(Duration::from_millis(10));
         }
     }
 }
@@ -164,8 +154,8 @@ fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
             process::exit(1);
         }
 
-        if !wait_for_completion(channel.as_mut(), request_id) {
-            error!("Read request failed at sector {current_sector}");
+        if let Err(e) = wait_for_completion(channel.as_mut(), request_id, Duration::from_secs(30)) {
+            error!("Read request failed at sector {current_sector}: {e}");
             process::exit(1);
         }
 
@@ -306,8 +296,8 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
             process::exit(1);
         }
 
-        if !wait_for_completion(channel.as_mut(), request_id) {
-            error!("Write request failed at sector {current_sector}");
+        if let Err(e) = wait_for_completion(channel.as_mut(), request_id, Duration::from_secs(30)) {
+            error!("Write request failed at sector {current_sector}: {e}");
             process::exit(1);
         }
 

@@ -3,6 +3,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 
 type OptKeyPair = Option<(Vec<u8>, Vec<u8>)>;
+type OptKey = Option<Vec<u8>>;
 
 fn decode_encryption_keys<'de, D>(deserializer: D) -> Result<OptKeyPair, D::Error>
 where
@@ -14,6 +15,15 @@ where
             let decoded2 = STANDARD.decode(k2).map_err(serde::de::Error::custom)?;
             Ok((decoded1, decoded2))
         })
+        .transpose()
+}
+
+fn decode_key<'de, D>(deserializer: D) -> Result<OptKey, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)?
+        .map(|key| STANDARD.decode(key).map_err(serde::de::Error::custom))
         .transpose()
 }
 
@@ -74,7 +84,7 @@ where
     Ok(s)
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
@@ -118,6 +128,12 @@ pub struct Options {
 
     #[serde(default, deserialize_with = "decode_encryption_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
+
+    #[serde(default)]
+    pub psk_identity: Option<String>,
+
+    #[serde(default, deserialize_with = "decode_key")]
+    pub psk_secret: Option<Vec<u8>>,
 
     #[serde(
         default = "default_device_id",
@@ -213,6 +229,24 @@ mod tests {
         "#;
         let options: Options = from_str(yaml).unwrap();
         assert!(options.encryption_key.is_none());
+    }
+
+    #[test]
+    fn test_psk_fields() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        psk_identity: client1
+        psk_secret: "MDEyMzQ1Njc4OUFCQ0RFRg=="
+        "#;
+
+        let options: Options = from_str(yaml).unwrap();
+
+        assert_eq!(options.psk_identity.as_deref(), Some("client1"));
+        assert_eq!(
+            options.psk_secret.as_deref(),
+            Some(b"0123456789ABCDEF".as_ref())
+        );
     }
 
     #[test]

@@ -34,6 +34,8 @@ mod tests {
             write_through: true,
             autofetch: false,
             encryption_key: None,
+            psk_identity: None,
+            psk_secret: None,
             device_id: "ubiblk".to_string(),
             io_engine: crate::vhost_backend::IoEngine::IoUring,
         }

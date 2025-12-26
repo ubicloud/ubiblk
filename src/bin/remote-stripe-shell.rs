@@ -1,7 +1,9 @@
 use std::{
     collections::HashMap,
+    fs::File,
     io::{self, ErrorKind},
     net::{SocketAddr, TcpStream},
+    path::PathBuf,
 };
 
 use clap::Parser;
@@ -9,8 +11,9 @@ use rustyline::{error::ReadlineError, DefaultEditor};
 
 use ubiblk::{
     block_device::STRIPE_WRITTEN_MASK,
-    stripe_server::{DynStream, StripeServerClient},
-    vhost_backend::SECTOR_SIZE,
+    stripe_server::{wrap_psk_client_stream, DynStream, PskCredentials, StripeServerClient},
+    utils::load_kek,
+    vhost_backend::{Options, SECTOR_SIZE},
     Result, VhostUserBlockError,
 };
 
@@ -23,10 +26,27 @@ struct Args {
     /// Address of the remote-stripe-server, e.g. 127.0.0.1:4555
     #[arg(value_name = "IP:PORT")]
     server: String,
+
+    /// Path to the configuration YAML file used to describe the block device.
+    #[arg(short = 'f', long = "config")]
+    config: Option<PathBuf>,
+
+    /// Path to the key encryption key file.
+    #[arg(short = 'k', long = "kek")]
+    kek: Option<PathBuf>,
+
+    /// Unlink the key encryption key file after use.
+    #[arg(short = 'u', long = "unlink-kek", default_value_t = false)]
+    unlink_kek: bool,
 }
 
 fn main() -> Result<()> {
-    let Args { server } = Args::parse();
+    let Args {
+        server,
+        config,
+        kek,
+        unlink_kek,
+    } = Args::parse();
 
     let server_addr: SocketAddr = server.parse().map_err(|err| {
         io::Error::new(
@@ -35,7 +55,21 @@ fn main() -> Result<()> {
         )
     })?;
 
+    let kek = load_kek(kek.as_ref(), unlink_kek)?;
+    let psk = match config {
+        Some(config) => {
+            let options = load_options(&config)?;
+            PskCredentials::from_options(&options, &kek)?
+        }
+        None => None,
+    };
+
     let stream: DynStream = Box::new(TcpStream::connect(server_addr)?);
+    let stream = if let Some(ref creds) = psk {
+        wrap_psk_client_stream(stream, creds)?
+    } else {
+        stream
+    };
 
     let mut client: StripeServerClient = StripeServerClient::new(stream);
 
@@ -201,4 +235,14 @@ fn parse<T: std::str::FromStr>(input: Option<&str>) -> Result<T> {
                 description: format!("INVALID_NUMBER: {value}"),
             })
         })
+}
+
+fn load_options(config: &PathBuf) -> Result<Options> {
+    let file = File::open(config).map_err(|err| VhostUserBlockError::Other {
+        description: format!("failed to open config file {}: {err}", config.display()),
+    })?;
+
+    serde_yaml::from_reader(file).map_err(|err| VhostUserBlockError::Other {
+        description: format!("failed to parse config file {}: {err}", config.display()),
+    })
 }

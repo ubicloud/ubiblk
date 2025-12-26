@@ -119,6 +119,7 @@ mod tests {
     fn run_client_with_server<F, T>(
         metadata: Arc<UbiMetadata>,
         stripe_device: Arc<TestBlockDevice>,
+        psk: Option<PskCredentials>,
         f: F,
     ) -> T
     where
@@ -128,16 +129,30 @@ mod tests {
         let server_device: Arc<dyn BlockDevice> = stripe_device.clone();
         let server = StripeServer::new(server_device, metadata);
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
-        let mut session = server
-            .start_session(Box::new(server_stream))
-            .expect("session creation should succeed");
-
         let (sender, receiver) = std::sync::mpsc::channel();
+        let server_stream: DynStream = Box::new(server_stream);
+        let client_stream: DynStream = Box::new(client_stream);
+        let client_psk = psk.clone();
         thread::spawn(move || {
-            let mut client = StripeServerClient::new(Box::new(client_stream));
+            let client_stream = if let Some(ref creds) = client_psk {
+                wrap_psk_client_stream(client_stream, creds).expect("TLS setup should succeed")
+            } else {
+                client_stream
+            };
+
+            let mut client = StripeServerClient::new(client_stream);
             let result = f(&mut client);
             sender.send(result).unwrap();
         });
+
+        let server_stream = if let Some(ref creds) = psk {
+            wrap_psk_server_stream(server_stream, creds).expect("TLS setup should succeed")
+        } else {
+            server_stream
+        };
+        let mut session = server
+            .start_session(server_stream)
+            .expect("session creation should succeed");
 
         session.handle_requests();
         receiver.recv().expect("client thread should send a result")
@@ -157,12 +172,13 @@ mod tests {
             (stripe_count as u64) * SECTOR_SIZE as u64,
         ));
 
-        let metadata_result = run_client_with_server(metadata.clone(), stripe_device, |client| {
-            client
-                .fetch_metadata()
-                .expect("metadata fetch should succeed");
-            client.metadata.clone()
-        });
+        let metadata_result =
+            run_client_with_server(metadata.clone(), stripe_device, None, |client| {
+                client
+                    .fetch_metadata()
+                    .expect("metadata fetch should succeed");
+                client.metadata.clone()
+            });
 
         let fetched_metadata = metadata_result
             .as_ref()
@@ -185,7 +201,7 @@ mod tests {
             .collect::<Vec<_>>();
         stripe_device.write(0, &pattern, pattern.len());
 
-        let stripe_data = run_client_with_server(metadata, stripe_device, |client| {
+        let stripe_data = run_client_with_server(metadata, stripe_device, None, |client| {
             client
                 .fetch_metadata()
                 .expect("metadata fetch should succeed");
@@ -204,7 +220,7 @@ mod tests {
             (stripe_count as u64) * SECTOR_SIZE as u64,
         ));
 
-        let err = run_client_with_server(metadata, stripe_device, |client| {
+        let err = run_client_with_server(metadata, stripe_device, None, |client| {
             client
                 .fetch_metadata()
                 .expect("metadata fetch should succeed");
@@ -218,5 +234,31 @@ mod tests {
                 description
             } if description.contains("Stripe 1 is unwritten")
         ));
+    }
+
+    #[test]
+    fn fetches_metadata_over_psk() {
+        let stripe_count = 1;
+        let metadata = written_unwritten_metadata(stripe_count);
+        let stripe_device = Arc::new(TestBlockDevice::new(
+            (stripe_count as u64) * SECTOR_SIZE as u64,
+        ));
+
+        let psk = PskCredentials::new(
+            "client1".to_string(),
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        )
+        .expect("PSK credentials should be valid");
+
+        let metadata_result =
+            run_client_with_server(metadata.clone(), stripe_device, Some(psk), |client| {
+                client
+                    .fetch_metadata()
+                    .expect("metadata fetch should succeed");
+                client.metadata.clone()
+            });
+
+        let fetched_metadata = metadata_result.expect("metadata should be returned");
+        assert_eq!(fetched_metadata.stripe_headers.len(), stripe_count);
     }
 }

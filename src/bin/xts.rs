@@ -13,7 +13,7 @@ use log::error;
 
 use ubiblk::{
     block_device::{self, wait_for_completion, BlockDevice},
-    utils::aligned_buffer::AlignedBuf,
+    utils::{aligned_buffer::AlignedBuf, load_kek},
     vhost_backend::{Options, SECTOR_SIZE},
     KeyEncryptionCipher,
 };
@@ -59,24 +59,6 @@ struct Args {
 
     /// Output file
     output: String,
-}
-
-fn load_kek(path: &str) -> Option<KeyEncryptionCipher> {
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            error!("Error opening KEK file {path}: {e}");
-            return None;
-        }
-    };
-
-    match serde_yaml::from_reader(file) {
-        Ok(kek) => Some(kek),
-        Err(e) => {
-            error!("Error parsing KEK file {path}: {e}");
-            None
-        }
-    }
 }
 
 fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
@@ -335,13 +317,15 @@ fn main() {
         }
     };
 
-    let mut kek = KeyEncryptionCipher::default();
-    if let Some(kek_path) = &args.kek {
-        kek = match load_kek(kek_path) {
-            Some(k) => k,
-            None => process::exit(1),
-        };
-    }
+    let kek_path = args.kek.as_ref().map(PathBuf::from);
+    let kek = load_kek(kek_path.as_ref(), false).unwrap_or_else(|e| {
+        if let Some(path) = kek_path.as_ref() {
+            error!("Error loading KEK file {}: {e}", path.display());
+        } else {
+            error!("Error loading KEK: {e}");
+        }
+        process::exit(1);
+    });
 
     match args.action {
         Action::Decode => decode(&args, key1, key2, kek),

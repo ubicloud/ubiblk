@@ -2,9 +2,9 @@ use clap::Parser;
 use log::error;
 use std::{fs::File, path::PathBuf, process};
 use ubiblk::block_device::{self, load_metadata, BlockDevice};
+use ubiblk::utils::load_kek;
 use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
-use ubiblk::KeyEncryptionCipher;
-use ubiblk::Result;
+use ubiblk::{KeyEncryptionCipher, Result};
 
 #[derive(Parser)]
 #[command(
@@ -100,23 +100,15 @@ fn main() {
         }
     };
 
-    let mut kek = KeyEncryptionCipher::default();
-    if let Some(kek_path) = &args.kek {
-        let file = match File::open(kek_path) {
-            Ok(f) => f,
-            Err(e) => {
-                error!("Error opening KEK file {kek_path}: {e}");
-                process::exit(1);
-            }
-        };
-        kek = match serde_yaml::from_reader(file) {
-            Ok(k) => k,
-            Err(e) => {
-                error!("Error parsing KEK file {kek_path}: {e}");
-                process::exit(1);
-            }
-        };
-    }
+    let kek_path = args.kek.as_ref().map(PathBuf::from);
+    let kek = load_kek(kek_path.as_ref(), false).unwrap_or_else(|e| {
+        if let Some(path) = kek_path.as_ref() {
+            error!("Error loading KEK file {}: {e}", path.display());
+        } else {
+            error!("Error loading KEK: {e}");
+        }
+        process::exit(1);
+    });
 
     // base data device
     let base_dev = match build_block_device(&options.path, &options, true, kek.clone()) {

@@ -1,9 +1,8 @@
 use clap::Parser;
 use log::error;
-use std::fs::File;
-use std::process;
+use std::{fs::File, path::PathBuf, process};
+use ubiblk::utils::load_kek;
 use ubiblk::vhost_backend::*;
-use ubiblk::KeyEncryptionCipher;
 
 const STRIPE_SECTOR_COUNT_SHIFT_MIN: u8 = 6;
 const STRIPE_SECTOR_COUNT_SHIFT_MAX: u8 = 16;
@@ -55,8 +54,6 @@ fn main() {
         }
     };
 
-    let mut kek = KeyEncryptionCipher::default();
-
     let stripe_sector_count_shift = args.stripe_sector_count_shift;
 
     if !(STRIPE_SECTOR_COUNT_SHIFT_MIN..=STRIPE_SECTOR_COUNT_SHIFT_MAX)
@@ -68,30 +65,15 @@ fn main() {
         process::exit(1);
     }
 
-    if let Some(kek_path) = &args.kek {
-        let file = match File::open(kek_path) {
-            Ok(file) => file,
-            Err(e) => {
-                error!("Error opening KEK file {kek_path}: {e}");
-                process::exit(1);
-            }
-        };
-
-        kek = match serde_yaml::from_reader(file) {
-            Ok(kek) => kek,
-            Err(e) => {
-                error!("Error parsing KEK file {kek_path}: {e}");
-                process::exit(1);
-            }
-        };
-
-        if args.unlink_kek {
-            if let Err(e) = std::fs::remove_file(kek_path) {
-                error!("Error unlinking KEK file {kek_path}: {e}");
-                process::exit(1);
-            }
+    let kek_path = args.kek.as_ref().map(PathBuf::from);
+    let kek = load_kek(kek_path.as_ref(), args.unlink_kek).unwrap_or_else(|e| {
+        if let Some(path) = kek_path.as_ref() {
+            error!("Error loading KEK file {}: {e}", path.display());
+        } else {
+            error!("Error loading KEK: {e}");
         }
-    }
+        process::exit(1);
+    });
 
     if let Err(e) = init_metadata(&options, kek, stripe_sector_count_shift) {
         error!("Error initializing metadata: {e}");

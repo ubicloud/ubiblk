@@ -57,6 +57,8 @@ impl StripeServer {
 
 mod client;
 mod prepare;
+mod psk;
 mod session;
 
 pub use prepare::prepare_stripe_server;
+pub use psk::{wrap_psk_client_stream, wrap_psk_server_stream, PskCredentials};

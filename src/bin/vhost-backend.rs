@@ -1,9 +1,8 @@
 use clap::Parser;
 use log::error;
-use std::fs::File;
-use std::process;
+use std::{fs::File, path::PathBuf, process};
+use ubiblk::utils::load_kek;
 use ubiblk::vhost_backend::*;
-use ubiblk::KeyEncryptionCipher;
 
 #[derive(Parser)]
 #[command(
@@ -48,26 +47,15 @@ fn main() {
         process::exit(1);
     }
 
-    let mut kek = KeyEncryptionCipher::default();
-
-    if let Some(kek_path) = &args.kek {
-        let file = File::open(kek_path).unwrap_or_else(|e| {
-            error!("Error opening KEK file {kek_path}: {e}");
-            process::exit(1);
-        });
-
-        kek = serde_yaml::from_reader(file).unwrap_or_else(|e| {
-            error!("Error parsing KEK file {kek_path}: {e}");
-            process::exit(1);
-        });
-
-        if args.unlink_kek {
-            if let Err(e) = std::fs::remove_file(kek_path) {
-                error!("Error unlinking KEK file {kek_path}: {e}");
-                process::exit(1);
-            }
+    let kek_path = args.kek.as_ref().map(PathBuf::from);
+    let kek = load_kek(kek_path.as_ref(), args.unlink_kek).unwrap_or_else(|e| {
+        if let Some(path) = kek_path.as_ref() {
+            error!("Error loading KEK file {}: {e}", path.display());
+        } else {
+            error!("Error loading KEK: {e}");
         }
-    }
+        process::exit(1);
+    });
 
     if let Err(e) = block_backend_loop(&options, kek) {
         error!("Backend exited with error: {e}");

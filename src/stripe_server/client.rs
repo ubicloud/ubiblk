@@ -1,3 +1,5 @@
+use std::net::{SocketAddr, TcpStream};
+
 use log::info;
 
 use crate::{vhost_backend::SECTOR_SIZE, UbiblkError};
@@ -12,7 +14,7 @@ impl StripeServerClient {
         }
     }
 
-    pub fn fetch_metadata(&mut self) -> Result<()> {
+    fn fetch_metadata(&mut self) -> Result<()> {
         info!("Fetching metadata from server");
 
         // Send metadata request opcode
@@ -41,8 +43,10 @@ impl StripeServerClient {
 
         Ok(())
     }
+}
 
-    pub fn fetch_stripe(&mut self, stripe_idx: u64) -> Result<Vec<u8>> {
+impl RemoteStripeProvider for StripeServerClient {
+    fn fetch_stripe(&mut self, stripe_idx: u64) -> Result<Vec<u8>> {
         info!("Fetching stripe {} from server", stripe_idx);
 
         let metadata = self
@@ -96,6 +100,34 @@ impl StripeServerClient {
             _ => Err(UbiblkError::RemoteStatus { status: status[0] }),
         }
     }
+
+    fn get_metadata(&self) -> Option<&UbiMetadata> {
+        self.metadata.as_ref()
+    }
+}
+
+pub fn connect_to_stripe_server(
+    server_addr: &str,
+    psk: Option<&PskCredentials>,
+) -> Result<StripeServerClient> {
+    let server_addr: SocketAddr =
+        server_addr
+            .parse()
+            .map_err(|err| UbiblkError::InvalidParameter {
+                description: format!("invalid server address {server_addr}: {err}"),
+            })?;
+
+    let stream: DynStream = Box::new(TcpStream::connect(server_addr)?);
+    let stream = if let Some(creds) = psk {
+        wrap_psk_client_stream(stream, creds)?
+    } else {
+        stream
+    };
+
+    let mut client = StripeServerClient::new(stream);
+    client.fetch_metadata()?;
+
+    Ok(client)
 }
 
 #[cfg(test)]

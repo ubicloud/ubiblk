@@ -90,6 +90,7 @@ where
 pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
+    pub remote_image: Option<String>,
     pub metadata_path: Option<String>,
     pub io_debug_path: Option<String>,
     pub rpc_socket_path: Option<String>,
@@ -149,6 +150,12 @@ pub struct Options {
 
 impl Options {
     fn validate(&self) -> crate::Result<()> {
+        if self.remote_image.is_some() && self.image_path.is_some() {
+            return Err(crate::UbiblkError::InvalidParameter {
+                description: "Only one of remote_image and image_path should be specified."
+                    .to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -350,5 +357,17 @@ mod tests {
         "#;
         let options_sync = Options::load_from_str(yaml_sync).unwrap();
         assert_eq!(options_sync.io_engine, IoEngine::Sync);
+    }
+
+    #[test]
+    fn test_error_on_two_stripe_sources() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        image_path: "/path/to/image_path"
+        remote_image: "1.2.3.4:4567"
+        "#;
+        let result = Options::load_from_str(yaml);
+        assert!(result.is_err());
     }
 }

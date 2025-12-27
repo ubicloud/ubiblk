@@ -1,16 +1,10 @@
-use std::{
-    collections::HashMap,
-    io::{self, ErrorKind},
-    net::{SocketAddr, TcpStream},
-    path::PathBuf,
-};
-
 use clap::Parser;
 use rustyline::{error::ReadlineError, DefaultEditor};
+use std::{collections::HashMap, io, path::PathBuf};
 
 use ubiblk::{
     block_device::STRIPE_WRITTEN_MASK,
-    stripe_server::{wrap_psk_client_stream, DynStream, PskCredentials, StripeServerClient},
+    stripe_server::{connect_to_stripe_server, PskCredentials, RemoteStripeProvider},
     utils::load_kek,
     vhost_backend::{Options, SECTOR_SIZE},
     Result, UbiblkError,
@@ -47,13 +41,6 @@ fn main() -> Result<()> {
         unlink_kek,
     } = Args::parse();
 
-    let server_addr: SocketAddr = server.parse().map_err(|err| {
-        io::Error::new(
-            ErrorKind::InvalidInput,
-            format!("invalid server address {server}: {err}"),
-        )
-    })?;
-
     let kek = load_kek(kek.as_ref(), unlink_kek)?;
     let psk = match config {
         Some(config) => {
@@ -63,16 +50,7 @@ fn main() -> Result<()> {
         None => None,
     };
 
-    let stream: DynStream = Box::new(TcpStream::connect(server_addr)?);
-    let stream = if let Some(ref creds) = psk {
-        wrap_psk_client_stream(stream, creds)?
-    } else {
-        stream
-    };
-
-    let mut client: StripeServerClient = StripeServerClient::new(stream);
-
-    client.fetch_metadata()?;
+    let mut client = connect_to_stripe_server(&server, psk.as_ref())?;
     let metadata = client
         .metadata
         .as_ref()

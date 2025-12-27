@@ -4,6 +4,10 @@ use std::{cell::RefCell, rc::Rc};
 
 pub type SharedBuffer = Rc<RefCell<AlignedBuf>>;
 
+pub fn shared_buffer(size: usize) -> SharedBuffer {
+    Rc::new(RefCell::new(AlignedBuf::new(size)))
+}
+
 pub trait IoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);

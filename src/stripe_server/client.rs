@@ -1,3 +1,5 @@
+use std::net::{SocketAddr, TcpStream};
+
 use log::info;
 
 use crate::{vhost_backend::SECTOR_SIZE, VhostUserBlockError};
@@ -102,6 +104,30 @@ impl StripeServerClient {
             }),
         }
     }
+}
+
+pub fn connect_to_stripe_server(
+    server_addr: &str,
+    psk: Option<&PskCredentials>,
+) -> Result<StripeServerClient> {
+    let server_addr: SocketAddr =
+        server_addr
+            .parse()
+            .map_err(|err| VhostUserBlockError::Other {
+                description: format!("invalid server address {server_addr}: {err}"),
+            })?;
+
+    let stream: DynStream = Box::new(TcpStream::connect(server_addr)?);
+    let stream = if let Some(creds) = psk {
+        wrap_psk_client_stream(stream, creds)?
+    } else {
+        stream
+    };
+
+    let mut client = StripeServerClient::new(stream);
+    client.fetch_metadata()?;
+
+    Ok(client)
 }
 
 #[cfg(test)]

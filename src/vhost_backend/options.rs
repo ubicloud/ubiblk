@@ -88,6 +88,7 @@ where
 pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
+    pub remote_image: Option<String>,
     pub metadata_path: Option<String>,
     pub io_debug_path: Option<String>,
     pub rpc_socket_path: Option<String>,

@@ -29,7 +29,7 @@ impl IoChannel for TestIoChannel {
             return;
         }
 
-        buf.as_mut_slice().copy_from_slice(&mem[start..end]);
+        buf.as_mut_slice()[..len].copy_from_slice(&mem[start..end]);
         self.finished_requests.push((_id, true));
         self.metrics.write().unwrap().reads += 1;
     }
@@ -45,7 +45,7 @@ impl IoChannel for TestIoChannel {
             return;
         }
 
-        mem[start..end].copy_from_slice(buf.as_slice());
+        mem[start..end].copy_from_slice(&buf.as_slice()[..len]);
         self.finished_requests.push((_id, true));
         self.metrics.write().unwrap().writes += 1;
     }

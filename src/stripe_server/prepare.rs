@@ -19,8 +19,8 @@ pub fn prepare_stripe_server(
                 description: "Missing metadata_path in config file".to_string(),
             })?;
 
-    let stripe_device = build_block_device(&options.path, options, kek.clone())?;
-    let metadata_device = build_block_device(metadata_path, options, kek)?;
+    let stripe_device = build_block_device(&options.path, options, kek.clone(), false)?;
+    let metadata_device = build_block_device(metadata_path, options, kek, false)?;
 
     let mut metadata_channel = metadata_device.create_channel()?;
     let metadata = load_metadata(&mut metadata_channel, metadata_device.sector_count())?;

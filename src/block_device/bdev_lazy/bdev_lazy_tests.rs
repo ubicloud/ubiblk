@@ -51,6 +51,13 @@ mod tests {
 
         if with_image {
             let image_dev = TestBlockDevice::new(DEV_SIZE);
+            let stripe_source = Box::new(
+                crate::stripe_source::BlockDeviceStripeSource::new(
+                    image_dev.clone(),
+                    STRIPE_SECTORS,
+                )
+                .unwrap(),
+            );
             if !data.is_empty() {
                 let mut tmp = vec![0u8; SECTOR_SIZE];
                 tmp[..data.len()].copy_from_slice(data);
@@ -58,7 +65,7 @@ mod tests {
             }
             let image_metrics = image_dev.metrics.clone();
             let bgworker = BgWorker::new(
-                &image_dev,
+                stripe_source,
                 &target_dev,
                 &metadata_dev,
                 512,
@@ -86,13 +93,20 @@ mod tests {
             }
         } else {
             let source_dev = TestBlockDevice::new(DEV_SIZE);
+            let stripe_source = Box::new(
+                crate::stripe_source::BlockDeviceStripeSource::new(
+                    source_dev.clone(),
+                    STRIPE_SECTORS,
+                )
+                .unwrap(),
+            );
             if !data.is_empty() {
                 let mut tmp = vec![0u8; SECTOR_SIZE];
                 tmp[..data.len()].copy_from_slice(data);
                 source_dev.write(0, &tmp, SECTOR_SIZE);
             }
             let bgworker = BgWorker::new(
-                &source_dev,
+                stripe_source,
                 &target_dev,
                 &metadata_dev,
                 512,

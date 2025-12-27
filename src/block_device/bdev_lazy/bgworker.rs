@@ -1,8 +1,7 @@
 use super::{
     metadata::SharedMetadataState, metadata_flusher::MetadataFlusher, stripe_fetcher::StripeFetcher,
 };
-use crate::block_device::BlockDevice;
-use crate::Result;
+use crate::{block_device::BlockDevice, stripe_source::StripeSource, Result};
 use log::{error, info};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
@@ -23,7 +22,7 @@ pub struct BgWorker {
 impl BgWorker {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        source_dev: &dyn BlockDevice,
+        stripe_source: Box<dyn StripeSource>,
         target_dev: &dyn BlockDevice,
         metadata_dev: &dyn BlockDevice,
         alignment: usize,
@@ -31,11 +30,11 @@ impl BgWorker {
         metadata_state: SharedMetadataState,
         req_receiver: Receiver<BgWorkerRequest>,
     ) -> Result<Self> {
-        let source_sector_count = source_dev.sector_count();
+        let source_sector_count = stripe_source.sector_count();
         let metadata_flusher =
             MetadataFlusher::new(metadata_dev, source_sector_count, metadata_state.clone())?;
         let stripe_fetcher = StripeFetcher::new(
-            source_dev,
+            stripe_source,
             target_dev,
             metadata_state.stripe_sector_count(),
             metadata_state.clone(),
@@ -120,18 +119,27 @@ impl BgWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::block_device::{
-        bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, init_metadata, load_metadata,
-        NullBlockDevice, UbiMetadata,
+    use crate::{
+        block_device::{
+            bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, init_metadata,
+            load_metadata, NullBlockDevice, UbiMetadata,
+        },
+        stripe_source,
     };
     use std::sync::mpsc::channel;
 
     fn build_bg_worker() -> (BgWorker, std::sync::mpsc::Sender<BgWorkerRequest>) {
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
         let source_dev = TestBlockDevice::new(1024 * 1024);
         let target_dev = TestBlockDevice::new(1024 * 1024);
         let metadata_dev = TestBlockDevice::new(1024 * 1024);
+        let stripe_source = Box::new(
+            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
+                .unwrap(),
+        );
         init_metadata(
-            &UbiMetadata::new(11, 16, 16),
+            &UbiMetadata::new(stripe_sector_count_shift, 16, 16),
             &mut metadata_dev.create_channel().unwrap(),
             metadata_dev.sector_count(),
         )
@@ -147,7 +155,7 @@ mod tests {
 
         (
             BgWorker::new(
-                &source_dev,
+                stripe_source,
                 &target_dev,
                 &metadata_dev,
                 4096,
@@ -169,11 +177,16 @@ mod tests {
 
     #[test]
     fn bg_worker_supports_null_source() {
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
         let source_dev = NullBlockDevice::new();
         let target_dev = TestBlockDevice::new(1024 * 1024);
         let metadata_dev = TestBlockDevice::new(1024 * 1024);
+        let stripe_source = Box::new(
+            stripe_source::BlockDeviceStripeSource::new(source_dev, stripe_sector_count).unwrap(),
+        );
         init_metadata(
-            &UbiMetadata::new(11, 16, 0),
+            &UbiMetadata::new(stripe_sector_count_shift, 16, 0),
             &mut metadata_dev.create_channel().unwrap(),
             metadata_dev.sector_count(),
         )
@@ -188,7 +201,7 @@ mod tests {
         let (_tx, rx) = channel();
 
         BgWorker::new(
-            &*source_dev,
+            stripe_source,
             &target_dev,
             &metadata_dev,
             4096,

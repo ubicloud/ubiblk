@@ -10,7 +10,7 @@ pub struct BlockDeviceStripeSource {
 }
 
 impl BlockDeviceStripeSource {
-    pub fn new(device: &dyn BlockDevice, stripe_sector_count: u64) -> Result<Self> {
+    pub fn new(device: Box<dyn BlockDevice>, stripe_sector_count: u64) -> Result<Self> {
         Ok(Self {
             channel: device.create_channel()?,
             stripe_sector_count,
@@ -48,5 +48,9 @@ impl StripeSource for BlockDeviceStripeSource {
 
     fn busy(&self) -> bool {
         self.channel.busy()
+    }
+
+    fn sector_count(&self) -> u64 {
+        self.source_sector_count
     }
 }

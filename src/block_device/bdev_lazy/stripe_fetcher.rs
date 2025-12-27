@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use super::super::*;
 use super::metadata::SharedMetadataState;
+use crate::stripe_source::{BlockDeviceStripeSource, StripeSource};
 use crate::utils::aligned_buffer_pool::AlignedBufferPool;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error, warn};
@@ -18,8 +19,9 @@ enum FetchState {
 }
 
 pub struct StripeFetcher {
-    fetch_source_channel: Box<dyn IoChannel>,
+    stripe_source: Box<dyn StripeSource>,
     fetch_target_channel: Box<dyn IoChannel>,
+    #[cfg_attr(not(test), allow(dead_code))]
     source_sector_count: u64,
     target_sector_count: u64,
     stripe_sector_count: u64,
@@ -43,7 +45,10 @@ impl StripeFetcher {
         alignment: usize,
         autofetch: bool,
     ) -> Result<Self> {
-        let fetch_source_channel = source_dev.create_channel()?;
+        let stripe_source = Box::new(BlockDeviceStripeSource::new(
+            source_dev,
+            stripe_sector_count,
+        )?);
         let fetch_target_channel = target_dev.create_channel()?;
 
         let stripe_size_u64 = stripe_sector_count
@@ -70,7 +75,7 @@ impl StripeFetcher {
         };
 
         Ok(StripeFetcher {
-            fetch_source_channel,
+            stripe_source,
             fetch_target_channel,
             source_sector_count,
             target_sector_count,
@@ -89,7 +94,7 @@ impl StripeFetcher {
 
     pub fn busy(&self) -> bool {
         !self.fetch_queue.is_empty()
-            || self.fetch_source_channel.busy()
+            || self.stripe_source.busy()
             || self.fetch_target_channel.busy()
             || !self.finished_fetches.is_empty()
             || !self.autofetch_queue.is_empty()
@@ -144,26 +149,8 @@ impl StripeFetcher {
             let (buf, buffer_idx) = self.buffer_pool.get_buffer().unwrap();
             self.allocated_buffers
                 .insert(stripe_id, (buf.clone(), buffer_idx));
-            let stripe_sector_offset = stripe_id as u64 * self.stripe_sector_count;
-            if stripe_sector_offset >= self.source_sector_count {
-                error!("Stripe {stripe_id} beyond end of source");
-                self.fetch_completed(stripe_id, false);
-                continue;
-            }
-
-            let stripe_sector_count = self
-                .stripe_sector_count
-                .min(self.source_sector_count - stripe_sector_offset);
-
-            self.fetch_source_channel.add_read(
-                stripe_sector_offset,
-                stripe_sector_count as u32,
-                buf.clone(),
-                stripe_id,
-            );
-
-            if let Err(e) = self.fetch_source_channel.submit() {
-                error!("Failed to submit read for stripe {stripe_id}: {e:?}");
+            if let Err(e) = self.stripe_source.request(stripe_id, buf.clone()) {
+                error!("Failed to request stripe {stripe_id} from source: {e:?}");
                 self.fetch_completed(stripe_id, false);
                 continue;
             }
@@ -181,7 +168,7 @@ impl StripeFetcher {
 
         // Handle completions from the source channel. Did any fetches from the
         // source complete? Start writing the successful ones to the target.
-        for (stripe_id, success) in self.fetch_source_channel.poll() {
+        for (stripe_id, success) in self.stripe_source.poll() {
             let buf = match self.allocated_buffers.get(&stripe_id) {
                 Some((buf, _)) => buf.clone(),
                 None => {

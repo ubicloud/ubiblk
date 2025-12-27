@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 
 use super::super::*;
 use super::metadata::SharedMetadataState;
-use crate::stripe_source::{BlockDeviceStripeSource, StripeSource};
+use crate::stripe_source::StripeSource;
 use crate::utils::aligned_buffer_pool::AlignedBufferPool;
 use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
 use log::{debug, error, warn};
@@ -38,17 +38,13 @@ pub struct StripeFetcher {
 
 impl StripeFetcher {
     pub fn new(
-        source_dev: &dyn BlockDevice,
+        stripe_source: Box<dyn StripeSource>,
         target_dev: &dyn BlockDevice,
         stripe_sector_count: u64,
         shared_metadata_state: SharedMetadataState,
         alignment: usize,
         autofetch: bool,
     ) -> Result<Self> {
-        let stripe_source = Box::new(BlockDeviceStripeSource::new(
-            source_dev,
-            stripe_sector_count,
-        )?);
         let fetch_target_channel = target_dev.create_channel()?;
 
         let stripe_size_u64 = stripe_sector_count
@@ -59,7 +55,7 @@ impl StripeFetcher {
         let stripe_size = stripe_size_u64 as usize;
 
         let buffer_pool = AlignedBufferPool::new(alignment, MAX_CONCURRENT_FETCHES, stripe_size);
-        let source_sector_count = source_dev.sector_count();
+        let source_sector_count = stripe_source.sector_count();
         let target_sector_count = target_dev.sector_count();
         if target_sector_count < source_sector_count {
             return Err(VhostUserBlockError::InvalidParameter {
@@ -277,8 +273,8 @@ impl StripeFetcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::stripe_source::BlockDeviceStripeSource;
 
     struct TestState {
         source_dev: Box<TestBlockDevice>,
@@ -297,6 +293,10 @@ mod tests {
         let source_dev = Box::new(TestBlockDevice::new(source_size));
         let target_dev = Box::new(TestBlockDevice::new(target_size));
 
+        let stripe_source = Box::new(
+            BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count).unwrap(),
+        );
+
         let metadata = UbiMetadata::new(
             stripe_sector_count_shift,
             target_stripe_count,
@@ -306,7 +306,7 @@ mod tests {
         let shared_metadata_state = SharedMetadataState::new(&metadata);
 
         let fetcher = StripeFetcher::new(
-            &*source_dev,
+            stripe_source,
             &*target_dev,
             stripe_sector_count,
             shared_metadata_state.clone(),

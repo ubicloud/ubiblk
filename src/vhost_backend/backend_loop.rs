@@ -19,6 +19,7 @@ use crate::{
         BlockDevice, SharedMetadataState, StatusReporter, UbiMetadata, UringBlockDevice,
     },
     key_encryption::KeyEncryptionCipher,
+    stripe_source::StripeSourceBuilder,
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     vhost_backend::io_tracking::IoTracker,
     Result, VhostUserBlockError,
@@ -28,8 +29,8 @@ type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::Bi
 type SourceDevices = (Box<dyn BlockDevice>, Option<Box<dyn BlockDevice>>);
 
 struct BgWorkerConfig {
-    source_dev: Box<dyn BlockDevice>,
     target_dev: Box<dyn BlockDevice>,
+    stripe_source_builder: Box<StripeSourceBuilder>,
     metadata_dev: Box<dyn BlockDevice>,
     alignment: usize,
     autofetch: bool,
@@ -52,7 +53,7 @@ impl BackendEnv {
     fn build(options: &Options, kek: KeyEncryptionCipher) -> Result<Self> {
         Self::validate_metadata_requirements(options)?;
 
-        let base_device = build_block_device(&options.path, options, kek.clone())?;
+        let base_device = build_block_device(&options.path, options, kek.clone(), false)?;
         let alignment = Self::determine_alignment(&options.path)?;
 
         let BgWorkerSetup {
@@ -122,12 +123,12 @@ impl BackendEnv {
         alignment: usize,
         metadata_path: &str,
     ) -> Result<BgWorkerSetup> {
-        let metadata_dev = build_block_device(metadata_path, options, kek.clone())?;
+        let metadata_dev = build_block_device(metadata_path, options, kek.clone(), false)?;
         let mut metadata_channel = metadata_dev.create_channel()?;
         let metadata = load_metadata(&mut metadata_channel, metadata_dev.sector_count())?;
         let shared_state = SharedMetadataState::new(&metadata);
 
-        let (source_clone, maybe_image_bdev) = Self::create_source_devices(options)?;
+        let (_, maybe_image_bdev) = Self::create_source_devices(options)?;
         let target_clone = base_device.clone();
         let target_sector_count = target_clone.sector_count();
         let (bgworker_tx, bgworker_rx) = channel();
@@ -140,9 +141,15 @@ impl BackendEnv {
             options.track_written,
         )?;
 
+        let stripe_source_builder = Box::new(StripeSourceBuilder::new(
+            options.clone(),
+            kek,
+            shared_state.stripe_sector_count(),
+        ));
+
         let config = BgWorkerConfig {
-            source_dev: source_clone,
             target_dev: target_clone,
+            stripe_source_builder,
             metadata_dev,
             alignment,
             autofetch: options.autofetch,
@@ -192,8 +199,8 @@ impl BackendEnv {
                     .name("bgworker".to_string())
                     .spawn(move || {
                         let BgWorkerConfig {
-                            source_dev,
                             target_dev,
+                            stripe_source_builder,
                             metadata_dev,
                             alignment,
                             autofetch,
@@ -201,8 +208,16 @@ impl BackendEnv {
                             receiver,
                         } = config;
 
+                        let stripe_source = match stripe_source_builder.build() {
+                            Ok(source) => source,
+                            Err(e) => {
+                                error!("Failed to build stripe source: {e}");
+                                return;
+                            }
+                        };
+
                         match BgWorker::new(
-                            &*source_dev,
+                            stripe_source,
                             &*target_dev,
                             &*metadata_dev,
                             alignment,
@@ -334,7 +349,7 @@ pub fn init_metadata(
                 description: "metadata_path is none".to_string(),
             })?;
 
-    let base_bdev = build_block_device(&config.path, config, kek.clone())?;
+    let base_bdev = build_block_device(&config.path, config, kek.clone(), false)?;
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;
     let base_stripe_count = base_bdev.sector_count().div_ceil(stripe_sector_count) as usize;
 
@@ -353,7 +368,7 @@ pub fn init_metadata(
         0
     };
 
-    let metadata_bdev = build_block_device(metadata_path, config, kek.clone())?;
+    let metadata_bdev = build_block_device(metadata_path, config, kek.clone(), false)?;
     let mut ch = metadata_bdev.create_channel()?;
     let metadata = UbiMetadata::new(
         stripe_sector_count_shift,
@@ -399,12 +414,13 @@ pub fn build_block_device(
     path: &str,
     options: &Options,
     kek: KeyEncryptionCipher,
+    readonly: bool,
 ) -> Result<Box<dyn BlockDevice>> {
     let mut block_device: Box<dyn BlockDevice> = create_io_engine_device(
         options.io_engine.clone(),
         PathBuf::from(path),
         options.queue_size,
-        false,
+        readonly,
         true,
         options.write_through,
     )

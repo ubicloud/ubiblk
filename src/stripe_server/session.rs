@@ -6,7 +6,7 @@ use crate::{
     block_device::{wait_for_completion, SharedBuffer, STRIPE_WRITTEN_MASK},
     utils::AlignedBuf,
     vhost_backend::SECTOR_SIZE,
-    VhostUserBlockError,
+    UbiblkError,
 };
 
 use super::*;
@@ -17,7 +17,7 @@ impl StripeServerSession {
         while !done {
             if let Err(e) = self.handle_single_request() {
                 match e {
-                    VhostUserBlockError::IoError { source } => {
+                    UbiblkError::IoError { source } => {
                         let kind = source.kind();
                         if kind == ErrorKind::UnexpectedEof || kind == ErrorKind::ConnectionReset {
                             info!("Connection closed by peer");
@@ -55,7 +55,7 @@ impl StripeServerSession {
                 self.handle_read_stripe_request(stripe_id)?;
             }
             _ => {
-                return Err(VhostUserBlockError::InvalidParameter {
+                return Err(UbiblkError::InvalidParameter {
                     description: format!("Unknown opcode: {}", opcode[0]),
                 });
             }

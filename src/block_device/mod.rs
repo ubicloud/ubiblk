@@ -1,5 +1,5 @@
 use crate::utils::aligned_buffer::AlignedBuf;
-use crate::{Result, VhostUserBlockError};
+use crate::{Result, UbiblkError};
 use std::{cell::RefCell, rc::Rc};
 
 pub type SharedBuffer = Rc<RefCell<AlignedBuf>>;
@@ -63,7 +63,7 @@ pub fn wait_for_completion(
                 continue;
             }
             if !success {
-                return Err(VhostUserBlockError::IoError {
+                return Err(UbiblkError::IoError {
                     source: std::io::Error::other(format!("Failed request ID: {request_id}")),
                 });
             }
@@ -73,7 +73,7 @@ pub fn wait_for_completion(
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
-    Err(VhostUserBlockError::IoError {
+    Err(UbiblkError::IoError {
         source: std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             format!("Timeout while waiting for request ID {request_id}"),

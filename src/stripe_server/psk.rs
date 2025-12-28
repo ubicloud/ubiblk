@@ -5,7 +5,7 @@ use openssl::{
 
 use crate::{
     key_encryption::decrypt_psk_secret, vhost_backend::Options, KeyEncryptionCipher, Result,
-    VhostUserBlockError,
+    UbiblkError,
 };
 
 use super::DynStream;
@@ -39,7 +39,7 @@ impl PskCredentials {
                 }))
             }
             (None, None) => Ok(None),
-            _ => Err(VhostUserBlockError::InvalidParameter {
+            _ => Err(UbiblkError::InvalidParameter {
                 description: "psk_secret and psk_identity must both be set or both be unset"
                     .to_string(),
             }),
@@ -48,7 +48,7 @@ impl PskCredentials {
 
     fn validate_identity(identity: &str) -> Result<()> {
         if identity.is_empty() {
-            return Err(VhostUserBlockError::InvalidParameter {
+            return Err(UbiblkError::InvalidParameter {
                 description: "PSK identity must not be empty".to_string(),
             });
         }
@@ -57,7 +57,7 @@ impl PskCredentials {
 
     fn validate_secret(secret: &[u8]) -> Result<()> {
         if secret.len() < 16 {
-            return Err(VhostUserBlockError::InvalidParameter {
+            return Err(UbiblkError::InvalidParameter {
                 description: "PSK secret must be at least 16 bytes long".to_string(),
             });
         }
@@ -89,10 +89,10 @@ pub fn wrap_psk_client_stream(stream: DynStream, creds: &PskCredentials) -> Resu
     });
 
     let ctx: SslContext = builder.build();
-    let ssl = Ssl::new(&ctx).map_err(to_other_error)?;
-    let mut stream = SslStream::new(ssl, stream).map_err(to_other_error)?;
+    let ssl = Ssl::new(&ctx).map_err(to_tls_error)?;
+    let mut stream = SslStream::new(ssl, stream).map_err(to_tls_error)?;
 
-    stream.connect().map_err(to_other_error)?;
+    stream.connect().map_err(to_tls_error)?;
 
     Ok(Box::new(stream))
 }
@@ -116,30 +116,30 @@ pub fn wrap_psk_server_stream(stream: DynStream, creds: &PskCredentials) -> Resu
     });
 
     let ctx: SslContext = builder.build();
-    let mut ssl = Ssl::new(&ctx).map_err(to_other_error)?;
+    let mut ssl = Ssl::new(&ctx).map_err(to_tls_error)?;
     ssl.set_accept_state();
-    let mut stream = SslStream::new(ssl, stream).map_err(to_other_error)?;
-    stream.accept().map_err(to_other_error)?;
+    let mut stream = SslStream::new(ssl, stream).map_err(to_tls_error)?;
+    stream.accept().map_err(to_tls_error)?;
 
     Ok(Box::new(stream))
 }
 
 fn build_psk_context() -> Result<SslContextBuilder> {
-    let mut builder = SslContext::builder(SslMethod::tls()).map_err(to_other_error)?;
+    let mut builder = SslContext::builder(SslMethod::tls()).map_err(to_tls_error)?;
 
     // TODO: Support TLS 1.3 PSK
     builder.set_options(SslOptions::NO_TLSV1_3);
     builder.set_options(SslOptions::NO_TICKET);
     builder
         .set_cipher_list(PSK_CIPHER_SUITE)
-        .map_err(to_other_error)?;
+        .map_err(to_tls_error)?;
     builder.set_verify(SslVerifyMode::NONE);
 
     Ok(builder)
 }
 
-fn to_other_error<E: ToString>(err: E) -> VhostUserBlockError {
-    VhostUserBlockError::Other {
+fn to_tls_error<E: ToString>(err: E) -> UbiblkError {
+    UbiblkError::TlsError {
         description: err.to_string(),
     }
 }
@@ -188,7 +188,7 @@ mod tests {
         let opts = make_options(Some("user"), None); // Identity but no secret
 
         let err = PskCredentials::from_options(&opts, &kek).unwrap_err();
-        assert!(matches!(err, VhostUserBlockError::InvalidParameter { .. }));
+        assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
     }
 
     #[test]
@@ -197,7 +197,7 @@ mod tests {
         let opts = make_options(None, Some(valid_secret())); // Secret but no identity
 
         let err = PskCredentials::from_options(&opts, &kek).unwrap_err();
-        assert!(matches!(err, VhostUserBlockError::InvalidParameter { .. }));
+        assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
     }
 
     #[test]
@@ -207,7 +207,7 @@ mod tests {
 
         let err = PskCredentials::from_options(&opts, &kek).unwrap_err();
         // Check description contains "empty"
-        if let VhostUserBlockError::InvalidParameter { description } = err {
+        if let UbiblkError::InvalidParameter { description } = err {
             assert!(description.contains("empty"));
         } else {
             panic!("Wrong error type");
@@ -221,7 +221,7 @@ mod tests {
         let opts = make_options(Some("user"), Some(short_secret));
 
         let err = PskCredentials::from_options(&opts, &kek).unwrap_err();
-        if let VhostUserBlockError::InvalidParameter { description } = err {
+        if let UbiblkError::InvalidParameter { description } = err {
             assert!(description.contains("at least 16 bytes"));
         } else {
             panic!("Wrong error type");

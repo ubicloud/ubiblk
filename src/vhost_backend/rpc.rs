@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     vhost_backend::io_tracking::{IoKind, IoTracker},
-    Result, VhostUserBlockError,
+    Result, UbiblkError,
 };
 use log::{error, info, warn};
 use serde::Deserialize;
@@ -38,13 +38,13 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
         if e.kind() != io::ErrorKind::NotFound {
-            return Err(VhostUserBlockError::Other {
+            return Err(UbiblkError::RpcError {
                 description: format!("failed to remove existing RPC socket {:?}: {e}", path),
             });
         }
     }
 
-    let listener = UnixListener::bind(&path).map_err(|e| VhostUserBlockError::Other {
+    let listener = UnixListener::bind(&path).map_err(|e| UbiblkError::RpcError {
         description: format!("failed to bind RPC socket {:?}: {e}", path),
     })?;
     let state = Arc::new(RpcState {
@@ -57,9 +57,7 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     std::thread::Builder::new()
         .name("ubiblk-rpc-listener".to_string())
         .spawn(move || run_listener(listener, state, path))
-        .map_err(|e| VhostUserBlockError::Other {
-            description: e.to_string(),
-        })
+        .map_err(|e| UbiblkError::ThreadCreation { source: e })
 }
 
 fn run_listener(listener: UnixListener, state: Arc<RpcState>, path: PathBuf) {

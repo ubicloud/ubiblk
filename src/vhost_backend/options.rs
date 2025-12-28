@@ -153,21 +153,19 @@ impl Options {
     }
 
     pub fn load_from_str(yaml_str: &str) -> crate::Result<Self> {
-        let options: Options = serde_yaml::from_str(yaml_str).map_err(|e| {
-            crate::VhostUserBlockError::InvalidParameter {
+        let options: Options =
+            serde_yaml::from_str(yaml_str).map_err(|e| crate::UbiblkError::InvalidParameter {
                 description: format!("Failed to parse options YAML: {}", e),
-            }
-        })?;
+            })?;
         options.validate()?;
         Ok(options)
     }
 
     pub fn load_from_file(path: &Path) -> crate::Result<Self> {
-        let contents = std::fs::read_to_string(path).map_err(|e| {
-            crate::VhostUserBlockError::InvalidParameter {
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| crate::UbiblkError::InvalidParameter {
                 description: format!("Failed to read options file {}: {}", path.display(), e),
-            }
-        })?;
+            })?;
         Self::load_from_str(&contents)
     }
 }

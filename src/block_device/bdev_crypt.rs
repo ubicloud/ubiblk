@@ -193,7 +193,7 @@ impl CryptBlockDevice {
 mod tests {
     use super::*;
     use crate::utils::aligned_buffer::AlignedBuf;
-    use crate::VhostUserBlockError;
+    use crate::UbiblkError;
 
     use crate::{
         block_device::bdev_test::TestBlockDevice,
@@ -343,10 +343,7 @@ mod tests {
         let key2 = vec![0u8; 48];
 
         let result = CryptBlockDevice::new(Box::new(base), key1, key2, kek);
-        assert!(matches!(
-            result,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
+        assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
     }
 
     #[test]
@@ -407,10 +404,7 @@ mod tests {
 
         let base = TestBlockDevice::new(1024 * 1024);
         let result = CryptBlockDevice::new(Box::new(base), key1.clone(), key2.clone(), kek);
-        assert!(matches!(
-            result,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
+        assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
     }
 
     #[test]
@@ -424,10 +418,7 @@ mod tests {
         let key2 = vec![0u8; 32];
 
         let result = CryptBlockDevice::new(Box::new(base), key1, key2, kek);
-        assert!(matches!(
-            result,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
+        assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
     }
 
     #[test]
@@ -440,9 +431,6 @@ mod tests {
         };
         let base = TestBlockDevice::new(1024 * 1024);
         let res = CryptBlockDevice::new(Box::new(base), vec![0u8; 32], vec![0u8; 32], kek);
-        assert!(matches!(
-            res,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
+        assert!(matches!(res, Err(UbiblkError::InvalidParameter { .. })));
     }
 }

@@ -1,10 +1,11 @@
 use clap::Parser;
-use log::{error, info};
+use log::info;
 use std::{
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Seek, Write},
+    io::{BufRead, BufReader, Lines, Read, Seek, Write},
+    iter::{Enumerate, Peekable},
 };
-use ubiblk::utils::decode_hex;
+use ubiblk::{utils::decode_hex, Error, Result};
 
 fn first_difference<T: PartialEq>(a: &[T], b: &[T]) -> Option<usize> {
     a.iter().zip(b.iter()).position(|(x, y)| x != y)
@@ -22,89 +23,58 @@ struct Args {
     disk: String,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let args = Args::parse();
 
     env_logger::init();
 
-    let log_file = match File::open(&args.log) {
-        Ok(file) => file,
-        Err(e) => {
-            error!("Error opening log file {}: {}", args.log, e);
-            std::process::exit(1);
-        }
-    };
+    let log_file = File::open(&args.log)?;
 
-    let mut disk_file = match OpenOptions::new().read(true).write(true).open(&args.disk) {
-        Ok(file) => file,
-        Err(e) => {
-            error!("Error opening disk file {}: {}", args.disk, e);
-            std::process::exit(1);
-        }
-    };
+    let mut disk_file = OpenOptions::new().read(true).write(true).open(&args.disk)?;
 
     let reader = BufReader::new(log_file);
     let mut lines = reader.lines().enumerate().peekable();
 
-    while let Some((line_num, Ok(line))) = lines.next() {
+    while let Some((line_num, line)) = lines.next() {
+        let line = line?;
         let command = line.trim();
 
-        let (_, sector) = lines.next().unwrap_or_else(|| {
-            error!(
-                "Error reading line {}: expected sector number",
-                line_num + 1
-            );
-            std::process::exit(1);
-        });
-        let sector = sector.unwrap_or_else(|_| {
-            error!(
-                "Error reading line {}: expected sector number",
-                line_num + 1
-            );
-            std::process::exit(1);
-        });
-        let sector: u64 = sector.trim().parse().unwrap_or_else(|_| {
-            error!(
-                "Error parsing sector number on line {}: {}",
-                line_num + 1,
-                sector
-            );
-            std::process::exit(1);
-        });
+        let sector_line = read_required_line(&mut lines, line_num + 2, "sector number")?;
+        let sector: u64 = sector_line
+            .trim()
+            .parse()
+            .map_err(|_| Error::InvalidParameter {
+                description: format!(
+                    "Error parsing sector number on line {}: {}",
+                    line_num + 2,
+                    sector_line
+                ),
+            })?;
 
-        let (_, len) = lines.next().unwrap_or_else(|| {
-            error!("Error reading line {}: expected length", line_num + 2);
-            std::process::exit(1);
-        });
-        let len = len.unwrap_or_else(|_| {
-            error!("Error reading line {}: expected length", line_num + 2);
-            std::process::exit(1);
-        });
-        let len: usize = len.trim().parse().unwrap_or_else(|_| {
-            error!("Error parsing length on line {}: {}", line_num + 2, len);
-            std::process::exit(1);
-        });
+        let len_line = read_required_line(&mut lines, line_num + 3, "length")?;
+        let len: usize = len_line
+            .trim()
+            .parse()
+            .map_err(|_| Error::InvalidParameter {
+                description: format!("Error parsing length on line {}: {len_line}", line_num + 3),
+            })?;
 
-        let (_, data) = lines.next().unwrap_or_else(|| {
-            error!("Error reading line {}: expected data", line_num + 3);
-            std::process::exit(1);
-        });
-        let data = data.unwrap_or_else(|_| {
-            error!("Error reading line {}: expected data", line_num + 3);
-            std::process::exit(1);
-        });
-        let data = decode_hex(data.trim()).unwrap_or_else(|_| {
-            error!("Error decoding hex data on line {}: {}", line_num + 3, data);
-            std::process::exit(1);
-        });
+        let data_line = read_required_line(&mut lines, line_num + 4, "data")?;
+        let data = decode_hex(data_line.trim()).map_err(|_| Error::InvalidParameter {
+            description: format!(
+                "Error decoding hex data on line {}: {data_line}",
+                line_num + 4
+            ),
+        })?;
         if data.len() != len {
-            error!(
-                "Error: length mismatch on line {}: expected {}, got {}",
-                line_num + 3,
-                len,
-                data.len()
-            );
-            std::process::exit(1);
+            return Err(Error::InvalidParameter {
+                description: format!(
+                    "Error: length mismatch on line {}: expected {}, got {}",
+                    line_num + 4,
+                    len,
+                    data.len()
+                ),
+            });
         }
 
         let offset = sector * 512;
@@ -117,37 +87,42 @@ fn main() {
         );
 
         if command == "WRITE" {
-            if let Err(e) = disk_file.seek(std::io::SeekFrom::Start(offset)) {
-                error!("Error seeking to offset {offset}: {e}");
-                std::process::exit(1);
-            }
-            if let Err(e) = disk_file.write_all(&data) {
-                error!("Error writing data to disk: {e}");
-                std::process::exit(1);
-            }
+            disk_file.seek(std::io::SeekFrom::Start(offset))?;
+            disk_file.write_all(&data)?;
         } else if command == "READ" {
             let mut buffer = vec![0; len];
-            if let Err(e) = disk_file.seek(std::io::SeekFrom::Start(offset)) {
-                error!("Error seeking to offset {offset}: {e}");
-                std::process::exit(1);
-            }
-            if let Err(e) = disk_file.read_exact(&mut buffer) {
-                error!("Error reading data from disk: {e}");
-                std::process::exit(1);
-            }
-            let first_diff = first_difference(&data, &buffer);
-            if let Some(index) = first_diff {
-                error!(
-                    "Data mismatch on line {}: expected {:?}..., got {:?}... at index {}",
-                    line_num + 1,
-                    &buffer[index..std::cmp::min(index + 10, buffer.len())],
-                    &data[index..std::cmp::min(index + 10, data.len())],
-                    index
-                );
+            disk_file.seek(std::io::SeekFrom::Start(offset))?;
+            disk_file.read_exact(&mut buffer)?;
+            if let Some(index) = first_difference(&data, &buffer) {
+                return Err(Error::ProtocolError {
+                    description: format!(
+                        "Data mismatch on line {}: expected {:?}..., got {:?}... at index {}",
+                        line_num + 1,
+                        &buffer[index..std::cmp::min(index + 10, buffer.len())],
+                        &data[index..std::cmp::min(index + 10, data.len())],
+                        index
+                    ),
+                });
             }
         } else {
-            error!("Unknown command on line {}: {}", line_num + 1, command);
-            std::process::exit(1);
+            return Err(Error::InvalidParameter {
+                description: format!("Unknown command on line {}: {command}", line_num + 1),
+            });
         }
     }
+
+    Ok(())
+}
+
+fn read_required_line<R: BufRead>(
+    lines: &mut Peekable<Enumerate<Lines<R>>>,
+    line_num: usize,
+    expectation: &str,
+) -> Result<String> {
+    let (_, line) = lines.next().ok_or_else(|| Error::InvalidParameter {
+        description: format!("Error reading line {line_num}: expected {expectation}"),
+    })?;
+    line.map_err(|_| Error::InvalidParameter {
+        description: format!("Error reading line {line_num}: expected {expectation}"),
+    })
 }

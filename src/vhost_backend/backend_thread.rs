@@ -10,7 +10,7 @@ use crate::block_device::IoChannel;
 use crate::block_device::SharedBuffer;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::vhost_backend::io_tracking::IoTracker;
-use crate::{Result, VhostUserBlockError};
+use crate::{Result, UbiblkError};
 
 use libc::EFD_NONBLOCK;
 use log::{error, info};
@@ -95,7 +95,7 @@ impl UbiBlkBackendThread {
 
         let kill_evt = EventFd::new(EFD_NONBLOCK).map_err(|e| {
             error!("failed to create kill eventfd: {e:?}");
-            VhostUserBlockError::ThreadCreation
+            UbiblkError::ThreadCreation { source: e }
         })?;
 
         let io_debug_file = match options.io_debug_path {
@@ -107,7 +107,7 @@ impl UbiBlkBackendThread {
                     .open(path)
                     .map_err(|e| {
                         error!("failed to open io debug file: {e:?}");
-                        VhostUserBlockError::IoError { source: e }
+                        UbiblkError::IoError { source: e }
                     })?;
                 Some(file)
             }
@@ -211,10 +211,9 @@ impl UbiBlkBackendThread {
     }
 
     fn write_to_guest(&self, req: &RequestSlot) -> Result<()> {
-        let desc_chain = req
-            .desc_chain
-            .clone()
-            .ok_or(VhostUserBlockError::ChannelError)?;
+        let desc_chain = req.desc_chain.clone().ok_or(UbiblkError::ChannelError {
+            reason: "request missing descriptor chain".to_string(),
+        })?;
         let mem = desc_chain.memory();
         let borrow = req.buffer.borrow();
         let buf = borrow.as_slice();
@@ -224,7 +223,7 @@ impl UbiBlkBackendThread {
             mem.read_exact_volatile_from(*data_addr, &mut buf_chunk, *data_len as usize)
                 .map_err(|e| {
                     error!("read_exact_volatile_from failed: {e:?}");
-                    VhostUserBlockError::GuestMemoryAccess { source: e }
+                    UbiblkError::GuestMemoryAccess { source: e }
                 })?;
             pos += *data_len as usize;
         }

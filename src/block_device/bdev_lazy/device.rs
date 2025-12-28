@@ -7,7 +7,7 @@ use super::super::*;
 use super::bgworker::BgWorkerRequest;
 use super::metadata::SharedMetadataState;
 use super::metadata::{Failed, Fetched, NoSource, NotFetched};
-use crate::{block_device::SharedBuffer, Result, VhostUserBlockError};
+use crate::{block_device::SharedBuffer, Result, UbiblkError};
 use log::error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +103,9 @@ impl LazyIoChannel {
                     .send(BgWorkerRequest::Fetch { stripe_id })
                     .map_err(|e| {
                         error!("Failed to send fetch request for stripe {stripe_id}: {e}");
-                        VhostUserBlockError::ChannelError
+                        UbiblkError::ChannelError {
+                            reason: "failed to send fetch request".to_string(),
+                        }
                     })?;
                 self.stripe_fetches_requested.insert(stripe_id);
             }
@@ -118,7 +120,9 @@ impl LazyIoChannel {
                     .send(BgWorkerRequest::SetWritten { stripe_id })
                     .map_err(|e| {
                         error!("Failed to send set written request for stripe {stripe_id}: {e}");
-                        VhostUserBlockError::ChannelError
+                        UbiblkError::ChannelError {
+                            reason: "failed to send set written request".to_string(),
+                        }
                     })?;
             }
         }

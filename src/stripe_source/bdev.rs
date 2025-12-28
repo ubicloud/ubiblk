@@ -1,5 +1,5 @@
 use crate::block_device::{BlockDevice, IoChannel, SharedBuffer};
-use crate::{Result, VhostUserBlockError};
+use crate::{Result, UbiblkError};
 
 use super::*;
 
@@ -23,7 +23,7 @@ impl StripeSource for BlockDeviceStripeSource {
     fn request(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
         let stripe_sector_offset = stripe_id as u64 * self.stripe_sector_count;
         if stripe_sector_offset >= self.source_sector_count {
-            return Err(VhostUserBlockError::InvalidParameter {
+            return Err(UbiblkError::InvalidParameter {
                 description: format!("Stripe {stripe_id} beyond end of source"),
             });
         }

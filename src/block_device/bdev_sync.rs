@@ -2,7 +2,7 @@ use super::{BlockDevice, IoChannel, SharedBuffer};
 #[cfg(test)]
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::vhost_backend::SECTOR_SIZE;
-use crate::{Result, VhostUserBlockError};
+use crate::{Result, UbiblkError};
 use log::error;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -35,7 +35,7 @@ impl SyncIoChannel {
 
         let file = opts.open(path).map_err(|e| {
             error!("Failed to open file {}: {}", path.display(), e);
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         Ok(SyncIoChannel {
             file,
@@ -142,7 +142,7 @@ impl SyncBlockDevice {
                         "File {} size is not a multiple of sector size",
                         path.display()
                     );
-                    return Err(VhostUserBlockError::InvalidParameter {
+                    return Err(UbiblkError::InvalidParameter {
                         description: "File size is not a multiple of sector size".to_string(),
                     });
                 }
@@ -157,7 +157,7 @@ impl SyncBlockDevice {
             }
             Err(e) => {
                 error!("Failed to get metadata for file {}: {}", path.display(), e);
-                Err(VhostUserBlockError::IoError { source: e })
+                Err(UbiblkError::IoError { source: e })
             }
         }
     }
@@ -177,7 +177,7 @@ mod tests {
     fn create_channel_and_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
 
         let path = tmpfile.path().to_path_buf();
@@ -213,7 +213,7 @@ mod tests {
     fn create_channel_and_basic_io_readonly() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
 
         let path = tmpfile.path().to_path_buf();
@@ -251,7 +251,7 @@ mod tests {
         let path = tmpfile.path().to_path_buf();
         assert!(matches!(
             SyncBlockDevice::new(path, false, false, false),
-            Err(VhostUserBlockError::InvalidParameter { .. })
+            Err(UbiblkError::InvalidParameter { .. })
         ));
     }
 
@@ -260,7 +260,7 @@ mod tests {
     fn read_and_write_error_paths() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         tmpfile.as_file().set_len(SECTOR_SIZE as u64).unwrap();
 
@@ -286,7 +286,7 @@ mod tests {
     fn seek_error_paths() -> Result<()> {
         let (read_fd, write_fd) = pipe().map_err(|e| {
             error!("Failed to create pipe: {e}");
-            VhostUserBlockError::IoError {
+            UbiblkError::IoError {
                 source: std::io::Error::from(e),
             }
         })?;
@@ -312,7 +312,7 @@ mod tests {
     fn flush_and_busy() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path();
         let mut chan = SyncIoChannel::new(path, false, false, false)?;
@@ -335,7 +335,7 @@ mod tests {
         let path = PathBuf::from("/no/such/file");
         assert!(matches!(
             SyncBlockDevice::new(path, false, false, false),
-            Err(VhostUserBlockError::IoError { .. })
+            Err(UbiblkError::IoError { .. })
         ));
 
         let tmpfile = NamedTempFile::new().unwrap();
@@ -349,7 +349,7 @@ mod tests {
     fn direct_io_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let device = SyncBlockDevice::new(path.clone(), false, true, false)?;
@@ -384,7 +384,7 @@ mod tests {
     fn sync_flush_noop() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let device = SyncBlockDevice::new(path.clone(), false, false, true)?;

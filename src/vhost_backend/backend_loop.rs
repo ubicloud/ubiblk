@@ -22,7 +22,7 @@ use crate::{
     stripe_source::StripeSourceBuilder,
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     vhost_backend::io_tracking::IoTracker,
-    Result, VhostUserBlockError,
+    Result, UbiblkError,
 };
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
@@ -81,7 +81,7 @@ impl BackendEnv {
 
     fn validate_metadata_requirements(options: &Options) -> Result<()> {
         if options.image_path.is_some() && options.metadata_path.is_none() {
-            return Err(VhostUserBlockError::InvalidParameter {
+            return Err(UbiblkError::InvalidParameter {
                 description: "metadata_path is required when image_path is provided".to_string(),
             });
         }
@@ -90,7 +90,7 @@ impl BackendEnv {
     }
 
     fn determine_alignment(path: &str) -> Result<usize> {
-        let stat = statfs(Path::new(path)).map_err(|e| VhostUserBlockError::InvalidParameter {
+        let stat = statfs(Path::new(path)).map_err(|e| UbiblkError::InvalidParameter {
             description: format!("Failed to statfs {path}: {e}"),
         })?;
 
@@ -231,9 +231,7 @@ impl BackendEnv {
                     })
                     .map_err(|e| {
                         error!("Failed to spawn bgworker thread: {e}");
-                        VhostUserBlockError::Other {
-                            description: format!("Failed to spawn bgworker thread: {e}"),
-                        }
+                        UbiblkError::ThreadCreation { source: e }
                     })?,
             );
         }
@@ -276,20 +274,13 @@ impl BackendEnv {
         info!("Backend is created!");
 
         let mut daemon = VhostUserDaemon::new("ubiblk-backend".to_string(), backend.clone(), mem)
-            .map_err(|e| {
-            error!("Failed to create VhostUserDaemon: {e:?}");
-            VhostUserBlockError::Other {
-                description: e.to_string(),
-            }
-        })?;
+            .map_err(|e| UbiblkError::VhostUserBackendError { reason: e })?;
 
         info!("Daemon is created!");
 
-        if let Err(e) = daemon.serve(&self.options.socket) {
-            return Err(VhostUserBlockError::Other {
-                description: e.to_string(),
-            });
-        }
+        daemon
+            .serve(&self.options.socket)
+            .map_err(|e| UbiblkError::VhostUserBackendError { reason: e })?;
 
         info!("Finished serving socket!");
 
@@ -340,12 +331,12 @@ pub fn init_metadata(
     config: &Options,
     kek: KeyEncryptionCipher,
     stripe_sector_count_shift: u8,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+) -> Result<()> {
     let metadata_path =
         config
             .metadata_path
             .as_ref()
-            .ok_or_else(|| VhostUserBlockError::InvalidParameter {
+            .ok_or_else(|| UbiblkError::InvalidParameter {
                 description: "metadata_path is none".to_string(),
             })?;
 

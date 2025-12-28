@@ -13,7 +13,7 @@ use ubiblk::{
     stripe_server::{wrap_psk_client_stream, DynStream, PskCredentials, StripeServerClient},
     utils::load_kek,
     vhost_backend::{Options, SECTOR_SIZE},
-    Result, VhostUserBlockError,
+    Result, UbiblkError,
 };
 
 #[derive(Parser)]
@@ -92,8 +92,8 @@ fn main() -> Result<()> {
             }
             Err(ReadlineError::Eof) => break,
             Err(err) => {
-                return Err(VhostUserBlockError::Other {
-                    description: err.to_string(),
+                return Err(UbiblkError::IoError {
+                    source: readline_err_to_io(err),
                 })
             }
         };
@@ -226,12 +226,14 @@ fn readline_err_to_io(err: ReadlineError) -> io::Error {
 
 fn parse<T: std::str::FromStr>(input: Option<&str>) -> Result<T> {
     input
-        .ok_or_else(|| VhostUserBlockError::Other {
+        .ok_or_else(|| UbiblkError::InvalidParameter {
             description: "MISSING_ARGUMENT".to_string(),
         })
         .and_then(|value| {
-            value.parse::<T>().map_err(|_| VhostUserBlockError::Other {
-                description: format!("INVALID_NUMBER: {value}"),
-            })
+            value
+                .parse::<T>()
+                .map_err(|_| UbiblkError::InvalidParameter {
+                    description: format!("INVALID_NUMBER: {value}"),
+                })
         })
 }

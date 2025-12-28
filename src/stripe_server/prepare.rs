@@ -4,7 +4,7 @@ use crate::{
     block_device::{load_metadata, UbiMetadata},
     stripe_server::StripeServer,
     vhost_backend::{build_block_device, Options},
-    KeyEncryptionCipher, Result, VhostUserBlockError,
+    KeyEncryptionCipher, Result, UbiblkError,
 };
 
 pub fn prepare_stripe_server(
@@ -15,7 +15,7 @@ pub fn prepare_stripe_server(
         options
             .metadata_path
             .as_deref()
-            .ok_or_else(|| VhostUserBlockError::InvalidParameter {
+            .ok_or_else(|| UbiblkError::InvalidParameter {
                 description: "Missing metadata_path in config file".to_string(),
             })?;
 

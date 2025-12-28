@@ -4,7 +4,7 @@ use crate::{
     block_device::BlockDevice,
     utils::block::{features_to_str, VirtioBlockConfig},
     vhost_backend::{io_tracking::IoTracker, SECTOR_SIZE},
-    Result, VhostUserBlockError,
+    Result, UbiblkError,
 };
 
 use super::{backend_thread::UbiBlkBackendThread, Options};
@@ -37,7 +37,7 @@ impl UbiBlkBackend {
 
     fn validate_options(options: &Options) -> Result<()> {
         if options.queue_size == 0 || !options.queue_size.is_power_of_two() {
-            return Err(VhostUserBlockError::InvalidParameter {
+            return Err(UbiblkError::InvalidParameter {
                 description: format!(
                     "queue_size {} is not a non-zero power of two",
                     options.queue_size
@@ -47,7 +47,7 @@ impl UbiBlkBackend {
 
         if let Some(ref cpus) = options.cpus {
             if cpus.len() != options.num_queues {
-                return Err(VhostUserBlockError::InvalidParameter {
+                return Err(UbiblkError::InvalidParameter {
                     description: "cpus length must equal num_queues".to_string(),
                 });
             }

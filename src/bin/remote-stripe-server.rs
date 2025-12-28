@@ -1,4 +1,4 @@
-use std::{error::Error, net::TcpListener, path::PathBuf, sync::Arc, thread};
+use std::{net::TcpListener, path::PathBuf, sync::Arc, thread};
 
 use clap::Parser;
 use log::{error, info};
@@ -7,6 +7,7 @@ use ubiblk::{
     stripe_server::{prepare_stripe_server, wrap_psk_server_stream, DynStream, PskCredentials},
     utils::load_kek,
     vhost_backend::Options,
+    Error, Result,
 };
 
 #[derive(Parser)]
@@ -32,18 +33,15 @@ struct Args {
     unlink_kek: bool,
 }
 
-fn main() {
+fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
 
-    if let Err(err) = run(args) {
-        error!("{err}");
-        std::process::exit(1);
-    }
+    run(args)
 }
 
-fn run(args: Args) -> Result<(), Box<dyn Error>> {
+fn run(args: Args) -> Result<()> {
     let Args {
         bind,
         config,
@@ -53,9 +51,10 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
 
     let options = Options::load_from_file(&config)?;
     if options.image_path.is_some() {
-        return Err(
-            "config must not specify image_path when used with remote-stripe-server".into(),
-        );
+        return Err(Error::InvalidParameter {
+            description: "config must not specify image_path when used with remote-stripe-server"
+                .to_string(),
+        });
     }
 
     let kek = load_kek(kek.as_ref(), unlink_kek)?;
@@ -71,7 +70,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         let stripe_server = Arc::clone(&stripe_server);
         let psk = psk.clone();
         thread::spawn(move || {
-            let result = (|| -> Result<(), Box<dyn Error>> {
+            let result = (|| -> Result<()> {
                 let stream: DynStream = Box::new(stream);
                 let stream = if let Some(ref creds) = psk {
                     wrap_psk_server_stream(stream, creds)?

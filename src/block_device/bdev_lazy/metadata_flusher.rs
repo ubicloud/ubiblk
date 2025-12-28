@@ -5,7 +5,7 @@ use crate::{
     },
     utils::AlignedBufferPool,
     vhost_backend::SECTOR_SIZE,
-    Result, VhostUserBlockError,
+    Result, UbiblkError,
 };
 use log::{debug, error};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -60,7 +60,7 @@ impl MetadataFlusher {
         // Validate stripe count
         let source_stripe_count = source_sector_count.div_ceil(metadata.stripe_size());
         if source_stripe_count > metadata.stripe_count() {
-            return Err(VhostUserBlockError::InvalidParameter {
+            return Err(UbiblkError::InvalidParameter {
                 description: format!(
                     "Source stripe count {} exceeds metadata stripe count {}",
                     source_stripe_count,

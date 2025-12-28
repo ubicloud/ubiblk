@@ -12,5 +12,5 @@ pub mod stripe_source;
 pub mod utils;
 pub mod vhost_backend;
 
-pub use error::{Result, VhostUserBlockError};
+pub use error::{Error, Result, UbiblkError};
 pub use key_encryption::{CipherMethod, KeyEncryptionCipher};

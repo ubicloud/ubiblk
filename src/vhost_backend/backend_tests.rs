@@ -5,7 +5,7 @@ mod tests {
         key_encryption::KeyEncryptionCipher,
         utils::{aligned_buffer::BUFFER_ALIGNMENT, block::VirtioBlockConfig},
         vhost_backend::{init_metadata, Options, UbiBlkBackend, SECTOR_SIZE},
-        VhostUserBlockError,
+        UbiblkError,
     };
 
     use vhost::vhost_user::message::VhostUserProtocolFeatures;
@@ -49,10 +49,7 @@ mod tests {
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let result = UbiBlkBackend::new(&opts, mem, block_device, BUFFER_ALIGNMENT, vec![]);
-        assert!(matches!(
-            result,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
+        assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
     }
 
     /// Ensure a backend can be created with valid parameters and exposes expected features.

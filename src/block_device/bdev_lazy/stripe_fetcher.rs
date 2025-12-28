@@ -4,7 +4,7 @@ use super::super::*;
 use super::metadata::SharedMetadataState;
 use crate::stripe_source::StripeSource;
 use crate::utils::aligned_buffer_pool::AlignedBufferPool;
-use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
+use crate::{vhost_backend::SECTOR_SIZE, Result, UbiblkError};
 use log::{debug, error, warn};
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
@@ -49,7 +49,7 @@ impl StripeFetcher {
 
         let stripe_size_u64 = stripe_sector_count
             .checked_mul(SECTOR_SIZE as u64)
-            .ok_or_else(|| VhostUserBlockError::InvalidParameter {
+            .ok_or_else(|| UbiblkError::InvalidParameter {
                 description: "stripe size too large".to_string(),
             })?;
         let stripe_size = stripe_size_u64 as usize;
@@ -58,7 +58,7 @@ impl StripeFetcher {
         let source_sector_count = stripe_source.sector_count();
         let target_sector_count = target_dev.sector_count();
         if target_sector_count < source_sector_count {
-            return Err(VhostUserBlockError::InvalidParameter {
+            return Err(UbiblkError::InvalidParameter {
                 description: "target device too small".into(),
             });
         }

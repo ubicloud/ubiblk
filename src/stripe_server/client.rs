@@ -1,6 +1,6 @@
 use log::info;
 
-use crate::{vhost_backend::SECTOR_SIZE, VhostUserBlockError};
+use crate::{vhost_backend::SECTOR_SIZE, UbiblkError};
 
 use super::*;
 
@@ -24,9 +24,7 @@ impl StripeServerClient {
         self.stream.read_exact(&mut status)?;
 
         if status[0] != STATUS_OK {
-            return Err(VhostUserBlockError::Other {
-                description: format!("Server returned error status: {}", status[0]),
-            });
+            return Err(UbiblkError::RemoteStatus { status: status[0] });
         }
 
         // Read metadata size
@@ -47,9 +45,10 @@ impl StripeServerClient {
     pub fn fetch_stripe(&mut self, stripe_idx: u64) -> Result<Vec<u8>> {
         info!("Fetching stripe {} from server", stripe_idx);
 
-        let metadata = self.metadata.as_ref().ok_or(VhostUserBlockError::Other {
-            description: "Metadata not fetched yet".to_string(),
-        })?;
+        let metadata = self
+            .metadata
+            .as_ref()
+            .ok_or(UbiblkError::MissingStripeMetadata)?;
 
         // Prepare request
         let mut request = [0u8; 9];
@@ -74,11 +73,10 @@ impl StripeServerClient {
                 let expected_stripe_size = metadata.stripe_size() as usize * SECTOR_SIZE;
 
                 if stripe_size != expected_stripe_size {
-                    return Err(VhostUserBlockError::Other {
-                        description: format!(
-                            "Unexpected stripe size: {} (expected {})",
-                            stripe_size, expected_stripe_size
-                        ),
+                    return Err(UbiblkError::StripeSizeMismatch {
+                        stripe: stripe_idx,
+                        expected: expected_stripe_size,
+                        actual: stripe_size,
                     });
                 }
 
@@ -88,18 +86,14 @@ impl StripeServerClient {
 
                 Ok(stripe_data)
             }
-            STATUS_INVALID_STRIPE => Err(VhostUserBlockError::InvalidParameter {
+            STATUS_INVALID_STRIPE => Err(UbiblkError::InvalidParameter {
                 description: format!("Invalid stripe index: {}", stripe_idx),
             }),
-            STATUS_UNWRITTEN => Err(VhostUserBlockError::Other {
-                description: format!("Stripe {} is unwritten", stripe_idx),
+            STATUS_UNWRITTEN => Err(UbiblkError::UnwrittenStripe { stripe: stripe_idx }),
+            STATUS_SERVER_ERROR => Err(UbiblkError::RemoteStatus {
+                status: STATUS_SERVER_ERROR,
             }),
-            STATUS_SERVER_ERROR => Err(VhostUserBlockError::Other {
-                description: "Server reported an internal error".to_string(),
-            }),
-            _ => Err(VhostUserBlockError::Other {
-                description: format!("Unknown status code: {}", status[0]),
-            }),
+            _ => Err(UbiblkError::RemoteStatus { status: status[0] }),
         }
     }
 }
@@ -230,9 +224,7 @@ mod tests {
         });
         assert!(matches!(
             err,
-            VhostUserBlockError::Other {
-                description
-            } if description.contains("Stripe 1 is unwritten")
+            UbiblkError::UnwrittenStripe { stripe } if stripe == 1
         ));
     }
 

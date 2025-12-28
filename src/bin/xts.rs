@@ -3,19 +3,17 @@ use std::{
     fs::{File, OpenOptions},
     io::{BufWriter, Read, Seek, SeekFrom, Write},
     path::PathBuf,
-    process,
     rc::Rc,
     time::Duration,
 };
 
 use clap::{Parser, ValueEnum};
-use log::error;
 
 use ubiblk::{
     block_device::{self, wait_for_completion, BlockDevice},
     utils::{aligned_buffer::AlignedBuf, load_kek},
     vhost_backend::{Options, SECTOR_SIZE},
-    KeyEncryptionCipher,
+    Error, KeyEncryptionCipher, Result,
 };
 
 const MAX_CHUNK_SECTORS: u32 = 1024;
@@ -61,27 +59,20 @@ struct Args {
     output: String,
 }
 
-fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
+fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) -> Result<()> {
     let base_device: Box<dyn BlockDevice> =
-        block_device::SyncBlockDevice::new(PathBuf::from(&args.input), true, false, false)
-            .unwrap_or_else(|e| {
-                error!("Failed to open input file {}: {e}", args.input);
-                process::exit(1);
-            });
+        block_device::SyncBlockDevice::new(PathBuf::from(&args.input), true, false, false)?;
 
-    let crypt_device = match block_device::CryptBlockDevice::new(base_device, key1, key2, kek) {
-        Ok(dev) => dev,
-        Err(e) => {
-            error!("Failed to create crypt device: {e}");
-            process::exit(1);
-        }
-    };
+    let crypt_device = block_device::CryptBlockDevice::new(base_device, key1, key2, kek)?;
 
     let total_sectors = crypt_device.sector_count();
     let start_sector = args.start_sector.unwrap_or(0);
     if start_sector >= total_sectors {
-        error!("Start sector {start_sector} is out of range (device has {total_sectors} sectors)");
-        process::exit(1);
+        return Err(Error::InvalidParameter {
+            description: format!(
+                "Start sector {start_sector} is out of range (device has {total_sectors} sectors)",
+            ),
+        });
     }
 
     let max_available = total_sectors - start_sector;
@@ -90,8 +81,11 @@ fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
             if len == 0 {
                 0
             } else if len > max_available {
-                error!("Requested length {len} exceeds available sectors ({max_available})");
-                process::exit(1);
+                return Err(Error::InvalidParameter {
+                    description: format!(
+                        "Requested length {len} exceeds available sectors ({max_available})",
+                    ),
+                });
             } else {
                 len
             }
@@ -99,27 +93,14 @@ fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
         None => max_available,
     };
 
-    let output_file = match OpenOptions::new()
+    let output_file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&args.output)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            error!("Failed to open output file {}: {}", args.output, e);
-            process::exit(1);
-        }
-    };
+        .open(&args.output)?;
     let mut writer = BufWriter::new(output_file);
 
-    let mut channel = match crypt_device.create_channel() {
-        Ok(chan) => chan,
-        Err(e) => {
-            error!("Failed to create IO channel: {e}");
-            process::exit(1);
-        }
-    };
+    let mut channel = crypt_device.create_channel()?;
 
     let mut remaining = sectors_to_process;
     let mut current_sector = start_sector;
@@ -131,66 +112,42 @@ fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
         let buffer = Rc::new(RefCell::new(AlignedBuf::new(chunk_bytes)));
 
         channel.add_read(current_sector, chunk_sectors, buffer.clone(), request_id);
-        if let Err(e) = channel.submit() {
-            error!("Failed to submit read request: {e}");
-            process::exit(1);
-        }
+        channel.submit()?;
 
-        if let Err(e) = wait_for_completion(channel.as_mut(), request_id, Duration::from_secs(30)) {
-            error!("Read request failed at sector {current_sector}: {e}");
-            process::exit(1);
-        }
+        wait_for_completion(channel.as_mut(), request_id, Duration::from_secs(30))?;
 
         let data = buffer.borrow();
-        if let Err(e) = writer.write_all(&data.as_slice()[..chunk_bytes]) {
-            error!("Failed to write decrypted data: {e}");
-            process::exit(1);
-        }
+        writer.write_all(&data.as_slice()[..chunk_bytes])?;
 
         current_sector += chunk_sectors as u64;
         remaining -= chunk_sectors as u64;
     }
 
-    if let Err(e) = writer.flush() {
-        error!("Failed to flush output file: {e}");
-        process::exit(1);
-    }
+    writer.flush()?;
+
+    Ok(())
 }
 
-fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
-    let mut input_file = match File::open(&args.input) {
-        Ok(f) => f,
-        Err(e) => {
-            error!("Failed to open input file {}: {}", args.input, e);
-            process::exit(1);
-        }
-    };
+fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) -> Result<()> {
+    let mut input_file = File::open(&args.input)?;
 
-    let input_metadata = match input_file.metadata() {
-        Ok(meta) => meta,
-        Err(e) => {
-            error!(
-                "Failed to get metadata for input file {}: {}",
-                args.input, e
-            );
-            process::exit(1);
-        }
-    };
+    let input_metadata = input_file.metadata()?;
 
     let input_len = input_metadata.len();
     if input_len % SECTOR_SIZE as u64 != 0 {
-        error!(
-            "Input file size {} is not a multiple of sector size",
-            input_len
-        );
-        process::exit(1);
+        return Err(Error::InvalidParameter {
+            description: format!("Input file size {input_len} is not a multiple of sector size",),
+        });
     }
 
     let total_sectors = input_len / SECTOR_SIZE as u64;
     let start_sector = args.start_sector.unwrap_or(0);
     if start_sector >= total_sectors {
-        error!("Start sector {start_sector} is out of range (input has {total_sectors} sectors)");
-        process::exit(1);
+        return Err(Error::InvalidParameter {
+            description: format!(
+                "Start sector {start_sector} is out of range (input has {total_sectors} sectors)",
+            ),
+        });
     }
 
     let max_available = total_sectors - start_sector;
@@ -199,8 +156,11 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
             if len == 0 {
                 0
             } else if len > max_available {
-                error!("Requested length {len} exceeds available sectors ({max_available})");
-                process::exit(1);
+                return Err(Error::InvalidParameter {
+                    description: format!(
+                        "Requested length {len} exceeds available sectors ({max_available})",
+                    ),
+                });
             } else {
                 len
             }
@@ -209,51 +169,21 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
     };
 
     let target_size = sectors_to_process * SECTOR_SIZE as u64;
-    match OpenOptions::new()
+    let output_file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&args.output)
-    {
-        Ok(f) => {
-            if let Err(e) = f.set_len(target_size) {
-                error!("Failed to resize output file {}: {}", args.output, e);
-                process::exit(1);
-            }
-        }
-        Err(e) => {
-            error!("Failed to prepare output file {}: {}", args.output, e);
-            process::exit(1);
-        }
-    }
+        .open(&args.output)?;
+    output_file.set_len(target_size)?;
 
     let base_device: Box<dyn BlockDevice> =
-        block_device::SyncBlockDevice::new(PathBuf::from(&args.output), false, false, false)
-            .unwrap_or_else(|e| {
-                error!("Failed to open output file {}: {e}", args.output);
-                process::exit(1);
-            });
+        block_device::SyncBlockDevice::new(PathBuf::from(&args.output), false, false, false)?;
 
-    let crypt_device = match block_device::CryptBlockDevice::new(base_device, key1, key2, kek) {
-        Ok(dev) => dev,
-        Err(e) => {
-            error!("Failed to create crypt device: {e}");
-            process::exit(1);
-        }
-    };
+    let crypt_device = block_device::CryptBlockDevice::new(base_device, key1, key2, kek)?;
 
-    if let Err(e) = input_file.seek(SeekFrom::Start(start_sector * SECTOR_SIZE as u64)) {
-        error!("Failed to seek input file to sector {start_sector}: {e}");
-        process::exit(1);
-    }
+    input_file.seek(SeekFrom::Start(start_sector * SECTOR_SIZE as u64))?;
 
-    let mut channel = match crypt_device.create_channel() {
-        Ok(chan) => chan,
-        Err(e) => {
-            error!("Failed to create IO channel: {e}");
-            process::exit(1);
-        }
-    };
+    let mut channel = crypt_device.create_channel()?;
 
     let mut remaining = sectors_to_process;
     let mut current_sector = start_sector;
@@ -266,57 +196,36 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) {
 
         {
             let mut data = buffer.borrow_mut();
-            if let Err(e) = input_file.read_exact(&mut data.as_mut_slice()[..chunk_bytes]) {
-                error!("Failed to read plaintext data: {e}");
-                process::exit(1);
-            }
+            input_file.read_exact(&mut data.as_mut_slice()[..chunk_bytes])?;
         }
 
         channel.add_write(current_sector, chunk_sectors, buffer.clone(), request_id);
-        if let Err(e) = channel.submit() {
-            error!("Failed to submit write request: {e}");
-            process::exit(1);
-        }
+        channel.submit()?;
 
-        if let Err(e) = wait_for_completion(channel.as_mut(), request_id, Duration::from_secs(30)) {
-            error!("Write request failed at sector {current_sector}: {e}");
-            process::exit(1);
-        }
+        wait_for_completion(channel.as_mut(), request_id, Duration::from_secs(30))?;
 
         current_sector += chunk_sectors as u64;
         remaining -= chunk_sectors as u64;
     }
+
+    Ok(())
 }
 
-fn main() {
+fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
-    let options = match Options::load_from_file(&PathBuf::from(&args.config)) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            error!("Error parsing config file {}: {}", args.config, e);
-            process::exit(1);
-        }
-    };
+    let options = Options::load_from_file(&PathBuf::from(&args.config))?;
 
-    let (key1, key2) = match options.encryption_key.clone() {
-        Some(keys) => keys,
-        None => {
-            error!("Configuration does not contain encryption keys");
-            process::exit(1);
-        }
-    };
+    let (key1, key2) = options
+        .encryption_key
+        .clone()
+        .ok_or_else(|| Error::InvalidParameter {
+            description: "Configuration does not contain encryption keys".to_string(),
+        })?;
 
     let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = load_kek(kek_path.as_ref(), false).unwrap_or_else(|e| {
-        if let Some(path) = kek_path.as_ref() {
-            error!("Error loading KEK file {}: {e}", path.display());
-        } else {
-            error!("Error loading KEK: {e}");
-        }
-        process::exit(1);
-    });
+    let kek = load_kek(kek_path.as_ref(), false)?;
 
     match args.action {
         Action::Decode => decode(&args, key1, key2, kek),

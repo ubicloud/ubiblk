@@ -1,7 +1,7 @@
 use crate::{
     block_device::{bdev_lazy::metadata::UBI_MAGIC, AlignedBuf, IoChannel, UbiMetadata},
     vhost_backend::SECTOR_SIZE,
-    Result, VhostUserBlockError,
+    Result, UbiblkError,
 };
 use log::{error, info};
 use std::{cell::RefCell, rc::Rc};
@@ -15,12 +15,11 @@ pub fn load_metadata(
     let buf: Rc<RefCell<AlignedBuf>> = Rc::new(RefCell::new(AlignedBuf::new(
         sector_count as usize * SECTOR_SIZE,
     )));
-    let sector_count_u32 =
-        sector_count
-            .try_into()
-            .map_err(|_| VhostUserBlockError::InvalidParameter {
-                description: "Metadata file too large".to_string(),
-            })?;
+    let sector_count_u32 = sector_count
+        .try_into()
+        .map_err(|_| UbiblkError::InvalidParameter {
+            description: "Metadata file too large".to_string(),
+        })?;
 
     io_channel.add_read(0, sector_count_u32, buf.clone(), 0);
     io_channel.submit()?;
@@ -36,18 +35,18 @@ pub fn load_metadata(
             "Failed to read metadata: expected 1 result, got {}",
             results.len()
         );
-        return Err(VhostUserBlockError::MetadataError {
+        return Err(UbiblkError::MetadataError {
             description: format!("Expected 1 result, got {}", results.len()),
         });
     }
 
-    let (id, success) = results.pop().ok_or(VhostUserBlockError::MetadataError {
+    let (id, success) = results.pop().ok_or(UbiblkError::MetadataError {
         description: "Missing poll result".to_string(),
     })?;
 
     if !success || id != 0 {
         error!("Failed to read metadata: id {id}, success {success}");
-        return Err(VhostUserBlockError::MetadataError {
+        return Err(UbiblkError::MetadataError {
             description: format!("Failed to read metadata, id: {id}, success: {success}"),
         });
     }
@@ -59,7 +58,7 @@ pub fn load_metadata(
             "Metadata magic mismatch: expected {:?}, found {:?}",
             UBI_MAGIC, metadata.magic
         );
-        return Err(VhostUserBlockError::MetadataError {
+        return Err(UbiblkError::MetadataError {
             description: format!(
                 "Metadata magic mismatch! Expected: {:?}, Found: {:?}",
                 UBI_MAGIC, metadata.magic

@@ -1,4 +1,4 @@
-use crate::{Result, VhostUserBlockError};
+use crate::{Result, UbiblkError};
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, Payload},
     Aes256Gcm, Nonce,
@@ -126,8 +126,8 @@ fn ensure_32_bytes(data: Vec<u8>) -> Result<[u8; 32]> {
     })
 }
 
-fn param_err(description: impl Into<String>) -> VhostUserBlockError {
-    VhostUserBlockError::InvalidParameter {
+fn param_err(description: impl Into<String>) -> UbiblkError {
+    UbiblkError::InvalidParameter {
         description: description.into(),
     }
 }
@@ -231,10 +231,7 @@ mod tests {
         };
 
         let res = decrypt_keys(enc.clone(), enc, config);
-        assert!(matches!(
-            res,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
+        assert!(matches!(res, Err(UbiblkError::InvalidParameter { .. })));
     }
 
     #[test]
@@ -247,7 +244,7 @@ mod tests {
         };
         let res = decrypt_psk_secret(vec![], &config);
         assert!(
-            matches!(res, Err(VhostUserBlockError::InvalidParameter { ref description }) if description == "Key is required")
+            matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description == "Key is required")
         );
     }
 
@@ -261,7 +258,7 @@ mod tests {
         };
         let res = decrypt_psk_secret(vec![], &config);
         assert!(
-            matches!(res, Err(VhostUserBlockError::InvalidParameter { ref description }) if description.contains("12 bytes"))
+            matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description.contains("12 bytes"))
         );
     }
 
@@ -285,7 +282,7 @@ mod tests {
         // Decryption succeeds, but length validation should fail
         let res = decrypt_keys(enc.clone(), enc, config);
         assert!(
-            matches!(res, Err(VhostUserBlockError::InvalidParameter { ref description }) if description.contains("exactly 32 bytes"))
+            matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description.contains("exactly 32 bytes"))
         );
     }
 }

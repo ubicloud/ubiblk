@@ -4,7 +4,7 @@ use crate::{
     block_device::{wait_for_completion, IoChannel, UbiMetadata},
     utils::aligned_buffer::AlignedBuf,
     vhost_backend::SECTOR_SIZE,
-    Result, VhostUserBlockError,
+    Result, UbiblkError,
 };
 
 pub const METADATA_WRITE_ID: usize = 0;
@@ -19,12 +19,12 @@ pub fn init_metadata(
     let total_size = metadata_sector_count
         .checked_mul(SECTOR_SIZE as u64)
         .and_then(|size| usize::try_from(size).ok())
-        .ok_or(VhostUserBlockError::InvalidParameter {
+        .ok_or(UbiblkError::InvalidParameter {
             description: "Metadata device too large".to_string(),
         })?;
 
     if metadata_size > total_size {
-        return Err(VhostUserBlockError::InvalidParameter {
+        return Err(UbiblkError::InvalidParameter {
             description: format!(
                 "Metadata size {metadata_size} exceeds device capacity {total_size}"
             ),
@@ -34,7 +34,7 @@ pub fn init_metadata(
     let sectors: u32 =
         metadata_sector_count
             .try_into()
-            .map_err(|_| VhostUserBlockError::InvalidParameter {
+            .map_err(|_| UbiblkError::InvalidParameter {
                 description: "Metadata sector count exceeds u32".to_string(),
             })?;
 

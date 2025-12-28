@@ -1,7 +1,7 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
 #[cfg(test)]
 use crate::utils::aligned_buffer::AlignedBuf;
-use crate::{vhost_backend::SECTOR_SIZE, Result, VhostUserBlockError};
+use crate::{vhost_backend::SECTOR_SIZE, Result, UbiblkError};
 use io_uring::IoUring;
 use log::error;
 use nix::errno::Errno;
@@ -44,17 +44,17 @@ impl UringIoChannel {
         }
         let file = opts.open(path).map_err(|e| {
             error!("Failed to open file {path}: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let io_uring_entries: u32 = queue_size.try_into().map_err(|_| {
             error!("Invalid queue size: {queue_size}");
-            VhostUserBlockError::InvalidParameter {
+            UbiblkError::InvalidParameter {
                 description: "Invalid io_uring queue size".to_string(),
             }
         })?;
         let ring = IoUring::new(io_uring_entries).map_err(|e| {
             error!("Failed to create io_uring: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         Ok(UringIoChannel {
             file,
@@ -126,7 +126,7 @@ impl IoChannel for UringIoChannel {
         self.pending = 0;
         if let Err(e) = self.ring.submit() {
             error!("Failed to submit IO request: {e}");
-            return Err(VhostUserBlockError::IoError { source: e });
+            return Err(UbiblkError::IoError { source: e });
         }
         Ok(())
     }
@@ -207,7 +207,7 @@ impl UringBlockDevice {
     ) -> Result<Box<Self>> {
         if !queue_size.is_power_of_two() {
             error!("Invalid queue size: {queue_size}");
-            return Err(VhostUserBlockError::InvalidParameter {
+            return Err(UbiblkError::InvalidParameter {
                 description: "queue_size must be a positive power of two".to_string(),
             });
         }
@@ -219,7 +219,7 @@ impl UringBlockDevice {
                         "File {} size is not a multiple of sector size",
                         path.display()
                     );
-                    return Err(VhostUserBlockError::InvalidParameter {
+                    return Err(UbiblkError::InvalidParameter {
                         description: "File size is not a multiple of sector size".to_string(),
                     });
                 }
@@ -235,7 +235,7 @@ impl UringBlockDevice {
             }
             Err(e) => {
                 error!("Failed to get metadata for {}: {}", path.display(), e);
-                Err(VhostUserBlockError::IoError { source: e })
+                Err(UbiblkError::IoError { source: e })
             }
         }
     }
@@ -264,7 +264,7 @@ mod tests {
     fn create_channel_and_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, false, false, false)?;
@@ -299,7 +299,7 @@ mod tests {
     fn create_channel_and_basic_io_readonly() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, true, false, false)?;
@@ -329,14 +329,14 @@ mod tests {
     fn new_with_unaligned_size_fails() -> Result<()> {
         let mut tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         tmpfile
             .as_file_mut()
             .set_len(SECTOR_SIZE as u64 + 1)
             .map_err(|e| {
                 error!("Failed to set temporary file size: {e}");
-                VhostUserBlockError::IoError { source: e }
+                UbiblkError::IoError { source: e }
             })?;
         let path = tmpfile.path().to_owned();
         let result = UringBlockDevice::new(path, 8, false, false, false);
@@ -359,14 +359,11 @@ mod tests {
     fn new_invalid_queue_size_fails() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let result = UringBlockDevice::new(path, 3, false, false, false);
-        assert!(matches!(
-            result,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
+        assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
         Ok(())
     }
 
@@ -375,14 +372,11 @@ mod tests {
     fn new_zero_queue_size_fails() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let result = UringBlockDevice::new(path, 0, false, false, false);
-        assert!(matches!(
-            result,
-            Err(VhostUserBlockError::InvalidParameter { .. })
-        ));
+        assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
         Ok(())
     }
 
@@ -391,7 +385,7 @@ mod tests {
     fn busy_and_flush() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, false, false, false)?;
@@ -417,7 +411,7 @@ mod tests {
     fn sync_flush_noop() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, false, false, true)?;
@@ -437,7 +431,7 @@ mod tests {
     fn queue_overflow() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         // Queue size of one allows only a single in-flight request.
@@ -464,7 +458,7 @@ mod tests {
     fn busy_reports_finished_requests() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let mut chan = UringIoChannel::new(path.to_str().unwrap(), 8, false, false, false)?;
@@ -485,7 +479,7 @@ mod tests {
     fn direct_io_basic_io() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, false, true, false)?;
@@ -517,7 +511,7 @@ mod tests {
     fn direct_io_queue_overflow() -> Result<()> {
         let tmpfile = NamedTempFile::new().map_err(|e| {
             error!("Failed to create temporary file: {e}");
-            VhostUserBlockError::IoError { source: e }
+            UbiblkError::IoError { source: e }
         })?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 1, false, true, false)?;

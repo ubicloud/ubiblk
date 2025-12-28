@@ -1,8 +1,8 @@
 use clap::Parser;
-use log::error;
-use std::{path::PathBuf, process};
+use std::path::PathBuf;
 use ubiblk::utils::load_kek;
 use ubiblk::vhost_backend::*;
+use ubiblk::{Error, Result};
 
 #[derive(Parser)]
 #[command(
@@ -25,37 +25,22 @@ struct Args {
     unlink_kek: bool,
 }
 
-fn main() {
+fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
 
     let config_path = &args.config;
-    let options = match Options::load_from_file(&PathBuf::from(config_path)) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            error!("Failed to load configuration: {e}");
-            process::exit(1);
-        }
-    };
+    let options = Options::load_from_file(&PathBuf::from(config_path))?;
 
     if options.num_queues > 1 && options.io_debug_path.is_some() {
-        error!("Error: I/O debug path is not supported with multiple queues.");
-        process::exit(1);
+        return Err(Error::InvalidParameter {
+            description: "I/O debug path is not supported with multiple queues.".to_string(),
+        });
     }
 
     let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = load_kek(kek_path.as_ref(), args.unlink_kek).unwrap_or_else(|e| {
-        if let Some(path) = kek_path.as_ref() {
-            error!("Error loading KEK file {}: {e}", path.display());
-        } else {
-            error!("Error loading KEK: {e}");
-        }
-        process::exit(1);
-    });
+    let kek = load_kek(kek_path.as_ref(), args.unlink_kek)?;
 
-    if let Err(e) = block_backend_loop(&options, kek) {
-        error!("Backend exited with error: {e}");
-        process::exit(1);
-    }
+    block_backend_loop(&options, kek)
 }

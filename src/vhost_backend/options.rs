@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Deserializer, Serialize};
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
@@ -145,6 +147,31 @@ pub struct Options {
     pub io_engine: IoEngine,
 }
 
+impl Options {
+    fn validate(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
+    pub fn load_from_str(yaml_str: &str) -> crate::Result<Self> {
+        let options: Options = serde_yaml::from_str(yaml_str).map_err(|e| {
+            crate::VhostUserBlockError::InvalidParameter {
+                description: format!("Failed to parse options YAML: {}", e),
+            }
+        })?;
+        options.validate()?;
+        Ok(options)
+    }
+
+    pub fn load_from_file(path: &Path) -> crate::Result<Self> {
+        let contents = std::fs::read_to_string(path).map_err(|e| {
+            crate::VhostUserBlockError::InvalidParameter {
+                description: format!("Failed to read options file {}: {}", path.display(), e),
+            }
+        })?;
+        Self::load_from_str(&contents)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IoEngine {
@@ -201,7 +228,7 @@ mod tests {
           - "aISq7jbeNWO8U+VHOb09K4K5Sj1DsMGLf289oO4vOG9SI1WpGdUM7WmuWQBtGhky"
           - "5OTauknSxwWFqRGvE2Ef3Zv2s1syPdbYFXyq3FHkK69/BhI+7jF+VFQGFb1+j3sj"
         "#;
-        let options: Options = from_str(yaml).unwrap();
+        let options = Options::load_from_str(yaml).unwrap();
         assert_eq!(
             options.encryption_key,
             Some((
@@ -227,7 +254,7 @@ mod tests {
         path: "/path/to/image"
         socket: "/path/to/socket"
         "#;
-        let options: Options = from_str(yaml).unwrap();
+        let options = Options::load_from_str(yaml).unwrap();
         assert!(options.encryption_key.is_none());
     }
 
@@ -240,7 +267,7 @@ mod tests {
         psk_secret: "MDEyMzQ1Njc4OUFCQ0RFRg=="
         "#;
 
-        let options: Options = from_str(yaml).unwrap();
+        let options = Options::load_from_str(yaml).unwrap();
 
         assert_eq!(options.psk_identity.as_deref(), Some("client1"));
         assert_eq!(
@@ -255,7 +282,7 @@ mod tests {
         path: "/path/to/image"
         socket: "/path/to/socket"
         "#;
-        let options: Options = from_str(yaml).unwrap();
+        let options = Options::load_from_str(yaml).unwrap();
         assert!(!options.copy_on_read);
         assert!(!options.track_written);
         assert!(!options.write_through);
@@ -272,7 +299,7 @@ mod tests {
         socket: "/path/to/socket"
         device_id: "12345678901234567890"
         "#;
-        let options: Options = from_str(yaml).unwrap();
+        let options = Options::load_from_str(yaml).unwrap();
         assert_eq!(options.device_id, "12345678901234567890".to_string());
 
         let yaml_too_long = r#"
@@ -290,7 +317,7 @@ mod tests {
         socket: "/path/to/socket"
         write_through: true
         "#;
-        let options: Options = from_str(yaml).unwrap();
+        let options = Options::load_from_str(yaml).unwrap();
         assert!(options.write_through);
     }
 
@@ -304,7 +331,7 @@ mod tests {
           - 1
           - 2
         "#;
-        let options: Options = from_str(yaml).unwrap();
+        let options = Options::load_from_str(yaml).unwrap();
         assert_eq!(options.cpus, Some(vec![1, 2]));
     }
 
@@ -315,7 +342,7 @@ mod tests {
         socket: "/path/to/socket"
         io_engine: io_uring
         "#;
-        let options_uring: Options = from_str(yaml_uring).unwrap();
+        let options_uring = Options::load_from_str(yaml_uring).unwrap();
         assert_eq!(options_uring.io_engine, IoEngine::IoUring);
 
         let yaml_sync = r#"
@@ -323,7 +350,7 @@ mod tests {
         socket: "/path/to/socket"
         io_engine: sync
         "#;
-        let options_sync: Options = from_str(yaml_sync).unwrap();
+        let options_sync = Options::load_from_str(yaml_sync).unwrap();
         assert_eq!(options_sync.io_engine, IoEngine::Sync);
     }
 }

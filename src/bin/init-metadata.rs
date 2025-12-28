@@ -1,6 +1,6 @@
 use clap::Parser;
 use log::error;
-use std::{fs::File, path::PathBuf, process};
+use std::{path::PathBuf, process};
 use ubiblk::utils::load_kek;
 use ubiblk::vhost_backend::*;
 
@@ -38,15 +38,7 @@ fn main() {
     let args = Args::parse();
 
     let config_path = &args.config;
-    let file = match File::open(config_path) {
-        Ok(file) => file,
-        Err(e) => {
-            error!("Error opening config file {config_path}: {e}");
-            process::exit(1);
-        }
-    };
-
-    let options: Options = match serde_yaml::from_reader(file) {
+    let options = match Options::load_from_file(&PathBuf::from(config_path)) {
         Ok(cfg) => cfg,
         Err(e) => {
             error!("Error parsing config file {config_path}: {e}");

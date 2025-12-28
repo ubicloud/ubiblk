@@ -1,4 +1,4 @@
-use std::{error::Error, fs::File, io, net::TcpListener, path::PathBuf, sync::Arc, thread};
+use std::{error::Error, net::TcpListener, path::PathBuf, sync::Arc, thread};
 
 use clap::Parser;
 use log::{error, info};
@@ -51,7 +51,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         unlink_kek,
     } = args;
 
-    let options = load_options(&config)?;
+    let options = Options::load_from_file(&config)?;
     if options.image_path.is_some() {
         return Err(
             "config must not specify image_path when used with remote-stripe-server".into(),
@@ -88,20 +88,4 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             }
         });
     }
-}
-
-fn load_options(config: &PathBuf) -> Result<Options, Box<dyn Error>> {
-    let file = File::open(config).map_err(|err| {
-        Box::<dyn Error>::from(io::Error::new(
-            err.kind(),
-            format!("failed to open config file {}: {err}", config.display()),
-        ))
-    })?;
-
-    serde_yaml::from_reader(file).map_err(|err| {
-        Box::<dyn Error>::from(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("failed to parse config file {}: {err}", config.display()),
-        ))
-    })
 }

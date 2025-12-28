@@ -292,16 +292,7 @@ fn main() {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
-
-    let config_file = match File::open(&args.config) {
-        Ok(f) => f,
-        Err(e) => {
-            error!("Error opening config file {}: {}", args.config, e);
-            process::exit(1);
-        }
-    };
-
-    let options: Options = match serde_yaml::from_reader(config_file) {
+    let options = match Options::load_from_file(&PathBuf::from(&args.config)) {
         Ok(cfg) => cfg,
         Err(e) => {
             error!("Error parsing config file {}: {}", args.config, e);

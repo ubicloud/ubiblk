@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    fs::File,
     io::{self, ErrorKind},
     net::{SocketAddr, TcpStream},
     path::PathBuf,
@@ -58,7 +57,7 @@ fn main() -> Result<()> {
     let kek = load_kek(kek.as_ref(), unlink_kek)?;
     let psk = match config {
         Some(config) => {
-            let options = load_options(&config)?;
+            let options = Options::load_from_file(&config)?;
             PskCredentials::from_options(&options, &kek)?
         }
         None => None,
@@ -235,14 +234,4 @@ fn parse<T: std::str::FromStr>(input: Option<&str>) -> Result<T> {
                 description: format!("INVALID_NUMBER: {value}"),
             })
         })
-}
-
-fn load_options(config: &PathBuf) -> Result<Options> {
-    let file = File::open(config).map_err(|err| VhostUserBlockError::Other {
-        description: format!("failed to open config file {}: {err}", config.display()),
-    })?;
-
-    serde_yaml::from_reader(file).map_err(|err| VhostUserBlockError::Other {
-        description: format!("failed to parse config file {}: {err}", config.display()),
-    })
 }

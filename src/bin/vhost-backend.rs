@@ -1,6 +1,6 @@
 use clap::Parser;
 use log::error;
-use std::{fs::File, path::PathBuf, process};
+use std::{path::PathBuf, process};
 use ubiblk::utils::load_kek;
 use ubiblk::vhost_backend::*;
 
@@ -31,16 +31,13 @@ fn main() {
     let args = Args::parse();
 
     let config_path = &args.config;
-
-    let file = File::open(config_path).unwrap_or_else(|e| {
-        error!("Error opening config file {config_path}: {e}");
-        process::exit(1);
-    });
-
-    let options: Options = serde_yaml::from_reader(file).unwrap_or_else(|e| {
-        error!("Error parsing config file {config_path}: {e}");
-        process::exit(1);
-    });
+    let options = match Options::load_from_file(&PathBuf::from(config_path)) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            error!("Failed to load configuration: {e}");
+            process::exit(1);
+        }
+    };
 
     if options.num_queues > 1 && options.io_debug_path.is_some() {
         error!("Error: I/O debug path is not supported with multiple queues.");

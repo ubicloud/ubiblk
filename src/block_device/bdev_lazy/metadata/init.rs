@@ -9,6 +9,7 @@ use crate::{
 
 pub const METADATA_WRITE_ID: usize = 0;
 pub const METADATA_FLUSH_ID: usize = 1;
+pub const DEFAULT_STRIPE_SECTOR_COUNT_SHIFT: u8 = 11;
 
 pub fn init_metadata(
     metadata: &UbiMetadata,

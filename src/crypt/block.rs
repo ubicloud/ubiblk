@@ -1,7 +1,6 @@
 use crate::{
-    crypt::{decrypt_keys, KeyEncryptionCipher},
-    vhost_backend::SECTOR_SIZE,
-    Result, XTS_AES_256_dec, XTS_AES_256_enc,
+    crypt::KeyEncryptionCipher, vhost_backend::SECTOR_SIZE, Result, XTS_AES_256_dec,
+    XTS_AES_256_enc,
 };
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -12,7 +11,7 @@ pub struct XtsBlockCipher {
 
 impl XtsBlockCipher {
     pub fn new(key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) -> Result<Self> {
-        let (dec_key1, dec_key2) = decrypt_keys(key1, key2, kek)?;
+        let (dec_key1, dec_key2) = kek.decrypt_xts_keys(key1, key2)?;
 
         Ok(XtsBlockCipher {
             key1: dec_key1,

@@ -3,9 +3,7 @@ use openssl::{
     ssl::{Ssl, SslContext, SslContextBuilder, SslMethod, SslOptions, SslStream, SslVerifyMode},
 };
 
-use crate::{
-    crypt::decrypt_psk_secret, vhost_backend::Options, KeyEncryptionCipher, Result, UbiblkError,
-};
+use crate::{vhost_backend::Options, KeyEncryptionCipher, Result, UbiblkError};
 
 use super::DynStream;
 
@@ -29,7 +27,7 @@ impl PskCredentials {
             (Some(id), Some(sec)) => {
                 Self::validate_identity(id)?;
 
-                let secret = decrypt_psk_secret(sec.clone(), kek)?;
+                let secret = kek.decrypt_psk_secret(sec.clone())?;
                 Self::validate_secret(&secret)?;
 
                 Ok(Some(Self {

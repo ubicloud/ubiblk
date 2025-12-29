@@ -84,35 +84,31 @@ impl KeyEncryptionCipher {
 
         Ok(kek)
     }
-}
 
-pub fn decrypt_keys(
-    key1: Vec<u8>,
-    key2: Vec<u8>,
-    kek: KeyEncryptionCipher,
-) -> Result<([u8; 32], [u8; 32])> {
-    match kek.method {
-        CipherMethod::None => {
-            // "None" implies inputs are already plain text; just validate length.
-            Ok((ensure_32_bytes(key1)?, ensure_32_bytes(key2)?))
-        }
-        CipherMethod::Aes256Gcm => {
-            let (cipher, nonce, auth) = kek.init_cipher_context()?;
+    pub fn decrypt_xts_keys(&self, key1: Vec<u8>, key2: Vec<u8>) -> Result<([u8; 32], [u8; 32])> {
+        match self.method {
+            CipherMethod::None => {
+                // "None" implies inputs are already plain text; just validate length.
+                Ok((ensure_32_bytes(key1)?, ensure_32_bytes(key2)?))
+            }
+            CipherMethod::Aes256Gcm => {
+                let (cipher, nonce, auth) = self.init_cipher_context()?;
 
-            let k1 = decrypt_bytes(&cipher, &nonce, auth, &key1)?;
-            let k2 = decrypt_bytes(&cipher, &nonce, auth, &key2)?;
+                let k1 = decrypt_bytes(&cipher, &nonce, auth, &key1)?;
+                let k2 = decrypt_bytes(&cipher, &nonce, auth, &key2)?;
 
-            Ok((ensure_32_bytes(k1)?, ensure_32_bytes(k2)?))
+                Ok((ensure_32_bytes(k1)?, ensure_32_bytes(k2)?))
+            }
         }
     }
-}
 
-pub fn decrypt_psk_secret(secret: Vec<u8>, kek: &KeyEncryptionCipher) -> Result<Vec<u8>> {
-    match kek.method {
-        CipherMethod::None => Ok(secret),
-        CipherMethod::Aes256Gcm => {
-            let (cipher, nonce, auth) = kek.init_cipher_context()?;
-            decrypt_bytes(&cipher, &nonce, auth, &secret)
+    pub fn decrypt_psk_secret(&self, secret: Vec<u8>) -> Result<Vec<u8>> {
+        match self.method {
+            CipherMethod::None => Ok(secret),
+            CipherMethod::Aes256Gcm => {
+                let (cipher, nonce, auth) = self.init_cipher_context()?;
+                decrypt_bytes(&cipher, &nonce, auth, &secret)
+            }
         }
     }
 }
@@ -184,14 +180,16 @@ mod tests {
         let enc1 = encrypt_helper(&kek_key, &iv, aad, &target_key1);
         let enc2 = encrypt_helper(&kek_key, &iv, aad, &target_key2);
 
-        let config = KeyEncryptionCipher {
+        let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
             init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
-        let (res1, res2) = decrypt_keys(enc1, enc2, config).expect("Decryption should succeed");
+        let (res1, res2) = cipher
+            .decrypt_xts_keys(enc1, enc2)
+            .expect("Decryption should succeed");
         assert_eq!(res1, target_key1);
         assert_eq!(res2, target_key2);
     }
@@ -205,14 +203,16 @@ mod tests {
 
         let enc_secret = encrypt_helper(&kek_key, &iv, aad, secret_msg);
 
-        let config = KeyEncryptionCipher {
+        let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
             init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
-        let res = decrypt_psk_secret(enc_secret, &config).expect("Decryption should succeed");
+        let res = cipher
+            .decrypt_psk_secret(enc_secret)
+            .expect("Decryption should succeed");
         assert_eq!(res, secret_msg);
     }
 
@@ -221,12 +221,14 @@ mod tests {
         // When method is None, input is treated as raw plaintext
         let raw_key1 = vec![1u8; 32];
         let raw_key2 = vec![2u8; 32];
-        let config = KeyEncryptionCipher {
+        let cipher = KeyEncryptionCipher {
             method: CipherMethod::None,
             ..Default::default()
         };
 
-        let (k1, k2) = decrypt_keys(raw_key1.clone(), raw_key2.clone(), config).unwrap();
+        let (k1, k2) = cipher
+            .decrypt_xts_keys(raw_key1.clone(), raw_key2.clone())
+            .unwrap();
         assert_eq!(k1.to_vec(), raw_key1);
         assert_eq!(k2.to_vec(), raw_key2);
     }
@@ -243,26 +245,26 @@ mod tests {
         let last_idx = enc.len() - 1;
         enc[last_idx] ^= 0xFF;
 
-        let config = KeyEncryptionCipher {
+        let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
             init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
-        let res = decrypt_keys(enc.clone(), enc, config);
+        let res = cipher.decrypt_xts_keys(enc.clone(), enc);
         assert!(matches!(res, Err(UbiblkError::InvalidParameter { .. })));
     }
 
     #[test]
     fn test_aes_gcm_missing_parameters() {
-        let config = KeyEncryptionCipher {
+        let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: None, // Missing key
             init_vector: Some(vec![0u8; 12]),
             auth_data: Some(vec![]),
         };
-        let res = decrypt_psk_secret(vec![], &config);
+        let res = cipher.decrypt_psk_secret(vec![]);
         assert!(
             matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description == "Key is required")
         );
@@ -270,13 +272,13 @@ mod tests {
 
     #[test]
     fn test_aes_gcm_invalid_iv_length() {
-        let config = KeyEncryptionCipher {
+        let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(vec![0u8; 32]),
             init_vector: Some(vec![0u8; 11]), // 11 bytes (too short)
             auth_data: Some(vec![]),
         };
-        let res = decrypt_psk_secret(vec![], &config);
+        let res = cipher.decrypt_psk_secret(vec![]);
         assert!(
             matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description.contains("12 bytes"))
         );
@@ -292,7 +294,7 @@ mod tests {
         let short_key = [0xAAu8; 31];
         let enc = encrypt_helper(&kek_key, &iv, aad, &short_key);
 
-        let config = KeyEncryptionCipher {
+        let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
             init_vector: Some(iv.to_vec()),
@@ -300,7 +302,7 @@ mod tests {
         };
 
         // Decryption succeeds, but length validation should fail
-        let res = decrypt_keys(enc.clone(), enc, config);
+        let res = cipher.decrypt_xts_keys(enc.clone(), enc);
         assert!(
             matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description.contains("exactly 32 bytes"))
         );

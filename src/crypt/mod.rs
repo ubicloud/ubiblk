@@ -1,5 +1,5 @@
 mod key;
-pub use key::{decrypt_keys, decrypt_psk_secret, CipherMethod, KeyEncryptionCipher};
+pub use key::{CipherMethod, KeyEncryptionCipher};
 
 mod block;
 pub use block::XtsBlockCipher;

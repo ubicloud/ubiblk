@@ -3,6 +3,7 @@ use crate::vhost_backend::SECTOR_SIZE;
 pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
 pub const STRIPE_WRITTEN_MASK: u8 = 1 << 1;
+pub const STRIPE_NO_SOURCE_MASK: u8 = 1 << 2;
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -58,7 +59,47 @@ impl UbiMetadata {
         image_stripe_count: usize,
     ) -> Box<Self> {
         let headers = (0..base_stripe_count)
-            .map(|i| if i < image_stripe_count { 0 } else { 1 << 2 })
+            .map(|i| {
+                if i < image_stripe_count {
+                    0
+                } else {
+                    STRIPE_NO_SOURCE_MASK
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let mut magic = [0u8; UBI_MAGIC_SIZE];
+        magic.copy_from_slice(UBI_MAGIC);
+
+        Box::new(UbiMetadata {
+            magic,
+            version_major: [0; 2],
+            version_minor: [0; 2],
+            stripe_sector_count_shift,
+            stripe_headers: headers,
+        })
+    }
+
+    pub fn new_from_remote(
+        stripe_sector_count_shift: u8,
+        base_stripe_count: usize,
+        remote_metadata: &UbiMetadata,
+    ) -> Box<Self> {
+        let headers = (0..base_stripe_count)
+            .map(|i| {
+                // The number of stripe headers in remote_metadata represents the stripe count
+                // of the remote image. Each header corresponds to one stripe in the remote device.
+                if i < remote_metadata.stripe_headers.len() {
+                    // Check if stripe is written on remote
+                    if remote_metadata.stripe_headers[i] & STRIPE_WRITTEN_MASK != 0 {
+                        0 // Has source (written on remote)
+                    } else {
+                        STRIPE_NO_SOURCE_MASK // No source (unwritten on remote)
+                    }
+                } else {
+                    STRIPE_NO_SOURCE_MASK // Beyond remote image size
+                }
+            })
             .collect::<Vec<_>>();
 
         let mut magic = [0u8; UBI_MAGIC_SIZE];
@@ -172,7 +213,66 @@ mod tests {
             assert_eq!(metadata.stripe_header(i), 0);
         }
         for i in 4..10 {
-            assert_eq!(metadata.stripe_header(i), 1 << 2);
+            assert_eq!(metadata.stripe_header(i), STRIPE_NO_SOURCE_MASK);
         }
+    }
+
+    #[test]
+    fn new_from_remote_marks_unwritten_stripes_as_no_source() {
+        // Create a remote metadata with some stripes written
+        let mut remote_metadata = UbiMetadata::new(9, 8, 8);
+        // Mark stripes 0, 2, 4 as written
+        remote_metadata.set_stripe_header(0, STRIPE_WRITTEN_MASK);
+        remote_metadata.set_stripe_header(2, STRIPE_WRITTEN_MASK);
+        remote_metadata.set_stripe_header(4, STRIPE_WRITTEN_MASK);
+
+        // Create new metadata from remote with 10 total stripes
+        let metadata = UbiMetadata::new_from_remote(9, 10, &remote_metadata);
+
+        // Written stripes should have source (header = 0)
+        assert_eq!(
+            metadata.stripe_header(0),
+            0,
+            "Written stripe 0 should have source"
+        );
+        assert_eq!(
+            metadata.stripe_header(2),
+            0,
+            "Written stripe 2 should have source"
+        );
+        assert_eq!(
+            metadata.stripe_header(4),
+            0,
+            "Written stripe 4 should have source"
+        );
+
+        // Unwritten stripes should be marked as no source (bit 2 set)
+        assert_eq!(
+            metadata.stripe_header(1),
+            STRIPE_NO_SOURCE_MASK,
+            "Unwritten stripe 1 should have no source"
+        );
+        assert_eq!(
+            metadata.stripe_header(3),
+            STRIPE_NO_SOURCE_MASK,
+            "Unwritten stripe 3 should have no source"
+        );
+        assert_eq!(
+            metadata.stripe_header(5),
+            STRIPE_NO_SOURCE_MASK,
+            "Unwritten stripe 5 should have no source"
+        );
+
+        // Stripes beyond remote image should be marked as no source
+        assert_eq!(
+            metadata.stripe_header(8),
+            STRIPE_NO_SOURCE_MASK,
+            "Stripe 8 beyond remote should have no source"
+        );
+        assert_eq!(
+            metadata.stripe_header(9),
+            STRIPE_NO_SOURCE_MASK,
+            "Stripe 9 beyond remote should have no source"
+        );
     }
 }

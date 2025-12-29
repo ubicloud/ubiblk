@@ -156,6 +156,12 @@ impl Options {
                     .to_string(),
             });
         }
+        if self.remote_image.is_some() && !self.copy_on_read {
+            return Err(crate::UbiblkError::InvalidParameter {
+                description: "copy_on_read must be enabled when using remote_image stripe source."
+                    .to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -369,5 +375,28 @@ mod tests {
         "#;
         let result = Options::load_from_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_error_on_remote_image_without_copy_on_read() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        remote_image: "1.2.3.4:4567"
+        "#;
+        let result = Options::load_from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_valid_remote_image_with_copy_on_read() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        remote_image: "1.2.3.4:4567"
+        copy_on_read: true
+        "#;
+        let result = Options::load_from_str(yaml);
+        assert!(result.is_ok());
     }
 }

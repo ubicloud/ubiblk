@@ -11,7 +11,7 @@ use clap::{Parser, ValueEnum};
 
 use ubiblk::{
     block_device::{self, wait_for_completion, BlockDevice},
-    utils::{aligned_buffer::AlignedBuf, load_kek},
+    utils::aligned_buffer::AlignedBuf,
     vhost_backend::{Options, SECTOR_SIZE},
     Error, KeyEncryptionCipher, Result,
 };
@@ -225,7 +225,7 @@ fn main() -> Result<()> {
         })?;
 
     let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = load_kek(kek_path.as_ref(), false)?;
+    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;
 
     match args.action {
         Action::Decode => decode(&args, key1, key2, kek),

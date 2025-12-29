@@ -5,9 +5,8 @@ use log::{error, info};
 
 use ubiblk::{
     stripe_server::{prepare_stripe_server, wrap_psk_server_stream, DynStream, PskCredentials},
-    utils::load_kek,
     vhost_backend::Options,
-    Error, Result,
+    Error, KeyEncryptionCipher, Result,
 };
 
 #[derive(Parser)]
@@ -57,7 +56,7 @@ fn run(args: Args) -> Result<()> {
         });
     }
 
-    let kek = load_kek(kek.as_ref(), unlink_kek)?;
+    let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
     let stripe_server = prepare_stripe_server(&options, kek.clone())?;
     let psk = PskCredentials::from_options(&options, &kek)?;
 

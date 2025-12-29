@@ -4,8 +4,7 @@ use openssl::{
 };
 
 use crate::{
-    key_encryption::decrypt_psk_secret, vhost_backend::Options, KeyEncryptionCipher, Result,
-    UbiblkError,
+    crypt::decrypt_psk_secret, vhost_backend::Options, KeyEncryptionCipher, Result, UbiblkError,
 };
 
 use super::DynStream;

@@ -5,9 +5,8 @@ use std::{collections::HashMap, io, path::PathBuf};
 use ubiblk::{
     block_device::STRIPE_WRITTEN_MASK,
     stripe_server::{connect_to_stripe_server, PskCredentials, RemoteStripeProvider},
-    utils::load_kek,
     vhost_backend::{Options, SECTOR_SIZE},
-    Result, UbiblkError,
+    KeyEncryptionCipher, Result, UbiblkError,
 };
 
 #[derive(Parser)]
@@ -41,7 +40,7 @@ fn main() -> Result<()> {
         unlink_kek,
     } = Args::parse();
 
-    let kek = load_kek(kek.as_ref(), unlink_kek)?;
+    let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
     let psk = match config {
         Some(config) => {
             let options = Options::load_from_file(&config)?;

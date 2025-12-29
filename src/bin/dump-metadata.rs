@@ -1,7 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
 use ubiblk::block_device::{self, load_metadata, BlockDevice};
-use ubiblk::utils::load_kek;
 use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
 use ubiblk::{Error, KeyEncryptionCipher, Result};
 
@@ -86,7 +85,7 @@ fn main() -> Result<()> {
     let options = Options::load_from_file(&PathBuf::from(&args.config))?;
 
     let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = load_kek(kek_path.as_ref(), false)?;
+    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;
 
     // base data device
     let base_dev = build_block_device(&options.path, &options, true, kek.clone())?;

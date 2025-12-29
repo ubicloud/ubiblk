@@ -2,7 +2,7 @@
 mod tests {
     use crate::{
         block_device::bdev_test::TestBlockDevice,
-        key_encryption::KeyEncryptionCipher,
+        crypt::KeyEncryptionCipher,
         utils::{aligned_buffer::BUFFER_ALIGNMENT, block::VirtioBlockConfig},
         vhost_backend::{init_metadata, Options, UbiBlkBackend, SECTOR_SIZE},
         UbiblkError,

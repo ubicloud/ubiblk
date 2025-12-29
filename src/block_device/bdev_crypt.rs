@@ -1,9 +1,8 @@
 use super::*;
 
 use crate::{
-    crypt::{decrypt_keys, KeyEncryptionCipher},
-    vhost_backend::SECTOR_SIZE,
-    Result, XTS_AES_256_dec, XTS_AES_256_enc,
+    crypt::{KeyEncryptionCipher, XtsBlockCipher},
+    Result,
 };
 
 struct Request {
@@ -14,81 +13,16 @@ struct Request {
 
 struct CryptIoChannel {
     base: Box<dyn IoChannel>,
-    key1: [u8; 32],
-    key2: [u8; 32],
+    xts_cipher: XtsBlockCipher,
     read_requests: Vec<Option<Request>>,
 }
 
 impl CryptIoChannel {
-    pub fn new(base: Box<dyn IoChannel>, key1: [u8; 32], key2: [u8; 32]) -> Self {
+    pub fn new(base: Box<dyn IoChannel>, xts_cipher: XtsBlockCipher) -> Self {
         CryptIoChannel {
             base,
-            key1,
-            key2,
+            xts_cipher,
             read_requests: Vec::new(),
-        }
-    }
-}
-
-impl CryptIoChannel {
-    fn get_initial_tweak(&self, sector: u64) -> [u8; 16] {
-        /*
-         * Based on SPDK's _sw_accel_crypto_operation() in spdk/lib/accel/accel_sw.c:
-         *   uint64_t iv[2];
-         *   iv[0] = 0;
-         *   iv[1] = accel_task->iv;
-         */
-        let mut tweak = [0u8; 16];
-        // First 8 bytes are already zero.
-        // Encode the sector number as little-endian into the second 8 bytes.
-        tweak[8..].copy_from_slice(&sector.to_le_bytes());
-        tweak
-    }
-
-    /*
-     * From isa-l_crypto/include/aes_xts.h:
-     *
-     * The input and output buffers can be overlapping as long as the output buffer
-     * pointer is not less than the input buffer pointer. If the two pointers are the
-     * same, then encryption/decryption will occur in-place.
-     *
-     * The input and output buffers, keys, pre-expanded keys and initial tweak value
-     * are not required to be aligned to 16 bytes, any alignment works.
-     */
-
-    fn decrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
-        for i in 0..sector_count as usize {
-            let sector = sector_start + i as u64;
-            let mut tweak = self.get_initial_tweak(sector);
-            let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
-            unsafe {
-                XTS_AES_256_dec(
-                    self.key2.as_mut_ptr(),
-                    self.key1.as_mut_ptr(),
-                    tweak.as_mut_ptr(),
-                    SECTOR_SIZE as u64,
-                    sector_data.as_ptr(),
-                    sector_data.as_mut_ptr(),
-                );
-            }
-        }
-    }
-
-    fn encrypt(&mut self, buf: &mut [u8], sector_start: u64, sector_count: u64) {
-        for i in 0..sector_count as usize {
-            let sector = sector_start + i as u64;
-            let mut tweak = self.get_initial_tweak(sector);
-            let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
-            unsafe {
-                XTS_AES_256_enc(
-                    self.key2.as_mut_ptr(),
-                    self.key1.as_mut_ptr(),
-                    tweak.as_mut_ptr(),
-                    SECTOR_SIZE as u64,
-                    sector_data.as_ptr(),
-                    sector_data.as_mut_ptr(),
-                );
-            }
         }
     }
 }
@@ -108,7 +42,7 @@ impl IoChannel for CryptIoChannel {
     }
 
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
-        self.encrypt(
+        self.xts_cipher.encrypt(
             buf.borrow_mut().as_mut_slice(),
             sector_offset,
             sector_count as u64,
@@ -131,7 +65,7 @@ impl IoChannel for CryptIoChannel {
             if id < self.read_requests.len() {
                 if let Some(req) = self.read_requests[id].take() {
                     if result {
-                        self.decrypt(
+                        self.xts_cipher.decrypt(
                             req.buf.borrow_mut().as_mut_slice(),
                             req.sector_offset,
                             req.sector_count as u64,
@@ -153,14 +87,13 @@ impl IoChannel for CryptIoChannel {
 
 pub struct CryptBlockDevice {
     base: Box<dyn BlockDevice>,
-    key1: [u8; 32],
-    key2: [u8; 32],
+    xts_cipher: XtsBlockCipher,
 }
 
 impl BlockDevice for CryptBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
         let base_channel = self.base.create_channel()?;
-        let crypt_channel = CryptIoChannel::new(base_channel, self.key1, self.key2);
+        let crypt_channel = CryptIoChannel::new(base_channel, self.xts_cipher.clone());
         Ok(Box::new(crypt_channel))
     }
 
@@ -171,8 +104,7 @@ impl BlockDevice for CryptBlockDevice {
     fn clone(&self) -> Box<dyn BlockDevice> {
         Box::new(CryptBlockDevice {
             base: self.base.clone(),
-            key1: self.key1,
-            key2: self.key2,
+            xts_cipher: self.xts_cipher.clone(),
         })
     }
 }
@@ -184,8 +116,8 @@ impl CryptBlockDevice {
         key2: Vec<u8>,
         kek: KeyEncryptionCipher,
     ) -> Result<Box<Self>> {
-        let (key1, key2) = decrypt_keys(key1, key2, kek)?;
-        Ok(Box::new(CryptBlockDevice { base, key1, key2 }))
+        let xts_cipher = XtsBlockCipher::new(key1, key2, kek)?;
+        Ok(Box::new(CryptBlockDevice { base, xts_cipher }))
     }
 }
 
@@ -304,19 +236,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_initial_tweak() {
-        let base = TestBlockDevice::new(1024 * 1024);
-        let base_chan = base.create_channel().unwrap();
-        let chan = CryptIoChannel::new(base_chan, [1u8; 32], [2u8; 32]);
-
-        let sector = 0x1122_3344_5566_7788u64;
-        let tweak = chan.get_initial_tweak(sector);
-
-        assert_eq!(&tweak[0..8], &[0u8; 8]);
-        assert_eq!(&tweak[8..16], &sector.to_le_bytes());
-    }
-
-    #[test]
     fn test_sector_count() {
         let base = TestBlockDevice::new(1024 * 1024);
         let bdev = CryptBlockDevice::new(
@@ -379,10 +298,13 @@ mod tests {
 
         let expected_key1_hex = "13a13755601ef674dab4ba8f8c33762082270f9d1aad33ae1bec63919501d176";
         let expected_key2_hex = "9fc147011f120412e34e4e67a6ef54d69b68f6fb6b2024fd71fff4ed2acac2b6";
-        let key1 = hex::encode(bdev_crypt.key1);
-        let key2 = hex::encode(bdev_crypt.key2);
-        assert_eq!(key1, expected_key1_hex);
-        assert_eq!(key2, expected_key2_hex);
+        let expected_block_cipher = XtsBlockCipher::new(
+            hex::decode(expected_key1_hex).unwrap(),
+            hex::decode(expected_key2_hex).unwrap(),
+            KeyEncryptionCipher::default(),
+        )
+        .unwrap();
+        assert_eq!(bdev_crypt.xts_cipher, expected_block_cipher);
     }
 
     #[test]

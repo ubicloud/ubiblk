@@ -1,7 +1,7 @@
 use super::*;
 
 use crate::{
-    key_encryption::{decrypt_keys, KeyEncryptionCipher},
+    crypt::{decrypt_keys, KeyEncryptionCipher},
     vhost_backend::SECTOR_SIZE,
     Result, XTS_AES_256_dec, XTS_AES_256_enc,
 };
@@ -197,7 +197,7 @@ mod tests {
 
     use crate::{
         block_device::bdev_test::TestBlockDevice,
-        key_encryption::{CipherMethod, KeyEncryptionCipher},
+        crypt::{CipherMethod, KeyEncryptionCipher},
         vhost_backend::SECTOR_SIZE,
     };
 

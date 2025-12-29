@@ -1,7 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use ubiblk::utils::load_kek;
-use ubiblk::vhost_backend::*;
+use ubiblk::{vhost_backend::*, KeyEncryptionCipher};
 use ubiblk::{Error, Result};
 
 #[derive(Parser)]
@@ -40,7 +39,7 @@ fn main() -> Result<()> {
     }
 
     let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = load_kek(kek_path.as_ref(), args.unlink_kek)?;
+    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), args.unlink_kek)?;
 
     block_backend_loop(&options, kek)
 }

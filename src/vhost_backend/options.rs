@@ -194,7 +194,7 @@ pub enum IoEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::key_encryption::{CipherMethod, KeyEncryptionCipher};
+    use crate::crypt::{CipherMethod, KeyEncryptionCipher};
     use serde_yaml::from_str;
 
     #[test]

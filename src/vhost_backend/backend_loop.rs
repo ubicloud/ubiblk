@@ -18,7 +18,7 @@ use crate::{
         self, init_metadata as init_metadata_file, load_metadata, BgWorker, BgWorkerRequest,
         BlockDevice, SharedMetadataState, StatusReporter, UbiMetadata, UringBlockDevice,
     },
-    key_encryption::KeyEncryptionCipher,
+    crypt::KeyEncryptionCipher,
     stripe_source::StripeSourceBuilder,
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     vhost_backend::io_tracking::IoTracker,

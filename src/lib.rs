@@ -5,12 +5,12 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 pub mod block_device;
+pub mod crypt;
 pub mod error;
-pub mod key_encryption;
 pub mod stripe_server;
 pub mod stripe_source;
 pub mod utils;
 pub mod vhost_backend;
 
+pub use crypt::{CipherMethod, KeyEncryptionCipher};
 pub use error::{Error, Result, UbiblkError};
-pub use key_encryption::{CipherMethod, KeyEncryptionCipher};

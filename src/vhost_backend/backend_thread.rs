@@ -50,7 +50,6 @@ pub struct UbiBlkBackendThread {
     io_channel: Box<dyn IoChannel>,
     request_slots: Vec<RequestSlot>,
     io_debug_file: Option<fs::File>,
-    skip_sync: bool,
     device_id: String,
     alignment: usize,
     pinned: bool,
@@ -121,7 +120,6 @@ impl UbiBlkBackendThread {
             io_channel,
             request_slots,
             io_debug_file,
-            skip_sync: options.skip_sync,
             device_id: options.device_id.clone(),
             alignment,
             pinned: false,
@@ -379,16 +377,7 @@ impl UbiBlkBackendThread {
             .add_write(id, request.sector, sector_count as u64);
     }
 
-    fn process_flush(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
-        if self.skip_sync {
-            self.complete_io(
-                vring,
-                desc_chain,
-                request.status_addr,
-                VIRTIO_BLK_S_OK as u8,
-            );
-            return;
-        }
+    fn process_flush(&mut self, request: &Request, desc_chain: &DescChain, _vring: &mut Vring<'_>) {
         let id = self.get_request_slot(0, request, desc_chain);
         self.io_channel.add_flush(id);
         self.io_tracker.add_flush(id);

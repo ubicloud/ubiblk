@@ -53,7 +53,6 @@ The configuration YAML must define:
 - `rpc_socket_path`: (Optional) Path to a Unix domain socket for runtime RPC commands.
 - `socket`: vhost-user socket path.
 - `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
-- `skip_sync`: (Optional) Skip flush handling for faster operation.
 - `copy_on_read`: (Optional) Copy stripes from the image only when accessed.
 - `track_written`: (Optional) Track stripes that have been written.
 - `write_through`: (Optional) Enable the write-through mode.
@@ -112,7 +111,6 @@ seg_size_max: 4096                       # Integer: max IO segment size (bytes)
 seg_count_max: 1                         # Integer: max segments per IO
 poll_queue_timeout_us: 500               # Integer: poll timeout in microseconds
 io_debug_path: "/tmp/io_debug.log"       # Optional: path for I/O debug log
-skip_sync: false                         # Optional: skip flush handling
 copy_on_read: false                      # Optional: copy stripes on first read
 track_written: false                     # Optional: track written stripes
 write_through: false                     # Optional: enable write-through mode

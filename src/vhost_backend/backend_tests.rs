@@ -29,7 +29,6 @@ mod tests {
             seg_size_max: 65536,
             seg_count_max: 4,
             poll_queue_timeout_us: 1000,
-            skip_sync: false,
             copy_on_read: false,
             track_written: false,
             write_through: true,

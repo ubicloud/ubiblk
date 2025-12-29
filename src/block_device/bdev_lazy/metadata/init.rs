@@ -1,5 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
+use log::info;
+
 use crate::{
     block_device::{wait_for_completion, IoChannel, UbiMetadata},
     utils::aligned_buffer::AlignedBuf,
@@ -45,6 +47,8 @@ pub fn init_metadata(
 
     let timeout = std::time::Duration::from_secs(30);
 
+    info!("Initializing metadata device with {} sectors", sectors);
+
     ch.add_write(0, sectors, buf.clone(), METADATA_WRITE_ID);
     ch.submit()?;
     wait_for_completion(ch.as_mut(), METADATA_WRITE_ID, timeout)?;
@@ -52,5 +56,8 @@ pub fn init_metadata(
     ch.add_flush(METADATA_FLUSH_ID);
     ch.submit()?;
     wait_for_completion(ch.as_mut(), METADATA_FLUSH_ID, timeout)?;
+
+    info!("Metadata device initialized successfully");
+
     Ok(())
 }

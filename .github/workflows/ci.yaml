@@ -53,7 +53,7 @@ jobs:
 
       - name: Run tests with coverage
         if: ${{ matrix.arch == 'x86_64' }}
-        run: cargo llvm-cov --fail-under-lines 60 --ignore-filename-regex src/bin/
+        run: cargo llvm-cov --fail-under-lines 76 --ignore-filename-regex src/bin/
 
       - name: Build project
         run: cargo build

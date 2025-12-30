@@ -43,14 +43,19 @@ mod bdev_uring;
 #[cfg(test)]
 pub(crate) mod bdev_test;
 
+pub use bdev_lazy::{
+    bgworker::{BgWorker, BgWorkerRequest},
+    device::LazyBlockDevice,
+    metadata::{
+        init::{init_metadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT},
+        load::load_metadata,
+        shared_state::SharedMetadataState,
+        types::{UbiMetadata, STRIPE_FETCHED_MASK, STRIPE_WRITTEN_MASK},
+    },
+    status_report::{StatusReport, StatusReporter},
+};
+
 pub use bdev_crypt::CryptBlockDevice;
-pub use bdev_lazy::init_metadata;
-pub use bdev_lazy::load_metadata;
-pub use bdev_lazy::LazyBlockDevice;
-pub use bdev_lazy::UbiMetadata;
-pub use bdev_lazy::DEFAULT_STRIPE_SECTOR_COUNT_SHIFT;
-pub use bdev_lazy::{BgWorker, BgWorkerRequest, SharedMetadataState, StatusReport, StatusReporter};
-pub use bdev_lazy::{STRIPE_FETCHED_MASK, STRIPE_WRITTEN_MASK};
 pub use bdev_null::NullBlockDevice;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;

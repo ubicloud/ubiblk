@@ -1,6 +1,8 @@
 use super::{
-    metadata::SharedMetadataState, metadata_flusher::MetadataFlusher, stripe_fetcher::StripeFetcher,
+    metadata::shared_state::SharedMetadataState, metadata_flusher::MetadataFlusher,
+    stripe_fetcher::StripeFetcher,
 };
+
 use crate::{block_device::BlockDevice, stripe_source::StripeSource, Result};
 use log::{error, info};
 use std::sync::mpsc::{Receiver, TryRecvError};

@@ -1,4 +1,4 @@
-use super::UbiMetadata;
+use crate::block_device::UbiMetadata;
 use std::sync::{
     atomic::{AtomicU64, AtomicU8, Ordering},
     Arc,

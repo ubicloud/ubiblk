@@ -1,8 +1,5 @@
 use crate::{
-    block_device::{
-        bdev_lazy::metadata::{load_metadata, SharedMetadataState},
-        BlockDevice, IoChannel, UbiMetadata,
-    },
+    block_device::{load_metadata, BlockDevice, IoChannel, SharedMetadataState, UbiMetadata},
     utils::AlignedBufferPool,
     vhost_backend::SECTOR_SIZE,
     Result, UbiblkError,

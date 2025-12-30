@@ -1,5 +1,5 @@
 use crate::{
-    block_device::{bdev_lazy::metadata::UBI_MAGIC, AlignedBuf, IoChannel, UbiMetadata},
+    block_device::{bdev_lazy::metadata::types::UBI_MAGIC, AlignedBuf, IoChannel, UbiMetadata},
     vhost_backend::SECTOR_SIZE,
     Result, UbiblkError,
 };

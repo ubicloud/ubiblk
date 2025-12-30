@@ -1,17 +1,14 @@
 use std::{
-    cell::RefCell,
     fs::{File, OpenOptions},
     io::{BufWriter, Read, Seek, SeekFrom, Write},
     path::PathBuf,
-    rc::Rc,
     time::Duration,
 };
 
 use clap::{Parser, ValueEnum};
 
 use ubiblk::{
-    block_device::{self, wait_for_completion, BlockDevice},
-    utils::aligned_buffer::AlignedBuf,
+    block_device::{self, shared_buffer, wait_for_completion, BlockDevice},
     vhost_backend::{Options, SECTOR_SIZE},
     Error, KeyEncryptionCipher, Result,
 };
@@ -109,7 +106,7 @@ fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) -
     while remaining > 0 {
         let chunk_sectors = std::cmp::min(remaining, MAX_CHUNK_SECTORS as u64) as u32;
         let chunk_bytes = chunk_sectors as usize * SECTOR_SIZE;
-        let buffer = Rc::new(RefCell::new(AlignedBuf::new(chunk_bytes)));
+        let buffer = shared_buffer(chunk_bytes);
 
         channel.add_read(current_sector, chunk_sectors, buffer.clone(), request_id);
         channel.submit()?;
@@ -192,7 +189,7 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) -
     while remaining > 0 {
         let chunk_sectors = std::cmp::min(remaining, MAX_CHUNK_SECTORS as u64) as u32;
         let chunk_bytes = chunk_sectors as usize * SECTOR_SIZE;
-        let buffer = Rc::new(RefCell::new(AlignedBuf::new(chunk_bytes)));
+        let buffer = shared_buffer(chunk_bytes);
 
         {
             let mut data = buffer.borrow_mut();

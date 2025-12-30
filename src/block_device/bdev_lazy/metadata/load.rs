@@ -1,10 +1,9 @@
 use crate::{
-    block_device::{bdev_lazy::metadata::types::UBI_MAGIC, AlignedBuf, IoChannel, UbiMetadata},
+    block_device::{bdev_lazy::metadata::types::UBI_MAGIC, shared_buffer, IoChannel, UbiMetadata},
     vhost_backend::SECTOR_SIZE,
     Result, UbiblkError,
 };
 use log::{error, info};
-use std::{cell::RefCell, rc::Rc};
 
 pub fn load_metadata(
     io_channel: &mut Box<dyn IoChannel>,
@@ -12,9 +11,7 @@ pub fn load_metadata(
 ) -> Result<Box<UbiMetadata>> {
     info!("Loading metadata from device");
 
-    let buf: Rc<RefCell<AlignedBuf>> = Rc::new(RefCell::new(AlignedBuf::new(
-        sector_count as usize * SECTOR_SIZE,
-    )));
+    let buf = shared_buffer(sector_count as usize * SECTOR_SIZE);
     let sector_count_u32 = sector_count
         .try_into()
         .map_err(|_| UbiblkError::InvalidParameter {

@@ -1,6 +1,4 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
-#[cfg(test)]
-use crate::utils::aligned_buffer::AlignedBuf;
 use crate::{vhost_backend::SECTOR_SIZE, Result, UbiblkError};
 use io_uring::IoUring;
 use log::error;
@@ -243,10 +241,12 @@ impl UringBlockDevice {
 
 #[cfg(test)]
 mod tests {
+    use crate::block_device::shared_buffer;
+
     use super::*;
 
     use log::error;
-    use std::{cell::RefCell, rc::Rc, thread::sleep, time::Duration};
+    use std::{thread::sleep, time::Duration};
     use tempfile::NamedTempFile;
 
     fn spin_until_complete(chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
@@ -272,7 +272,7 @@ mod tests {
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf = shared_buffer(SECTOR_SIZE);
         write_buf
             .borrow_mut()
             .as_mut_slice()
@@ -283,7 +283,7 @@ mod tests {
         assert_eq!(result, vec![(1, true)]);
 
         // Read it back
-        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);
@@ -306,14 +306,14 @@ mod tests {
         let mut chan = block_dev.create_channel()?;
 
         // Read sector 0
-        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);
         assert_eq!(result, vec![(2, true)]);
 
         // Attempt to write should fail
-        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf = shared_buffer(SECTOR_SIZE);
         write_buf.borrow_mut().as_mut_slice().fill(0xABu8);
         chan.add_write(0, 1, write_buf.clone(), 1);
         chan.submit()?;
@@ -392,7 +392,7 @@ mod tests {
         let mut chan = block_dev.create_channel()?;
 
         // Queue a write followed by a flush and ensure busy() reflects it.
-        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf = shared_buffer(SECTOR_SIZE);
         write_buf.borrow_mut().as_mut_slice().fill(0xCDu8);
         chan.add_write(0, 1, write_buf.clone(), 1);
         chan.add_flush(2);
@@ -438,11 +438,11 @@ mod tests {
         let block_dev = UringBlockDevice::new(path.clone(), 1, false, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
-        let write_buf1 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf1 = shared_buffer(SECTOR_SIZE);
         write_buf1.borrow_mut().as_mut_slice().fill(0xAAu8);
         chan.add_write(0, 1, write_buf1.clone(), 1);
         // Second request should fail to queue.
-        let write_buf2 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf2 = shared_buffer(SECTOR_SIZE);
         write_buf2.borrow_mut().as_mut_slice().fill(0xBBu8);
         chan.add_write(1, 1, write_buf2.clone(), 2);
         chan.submit()?;
@@ -486,7 +486,7 @@ mod tests {
         let mut chan = block_dev.create_channel()?;
 
         let pattern = vec![0xACu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf = shared_buffer(SECTOR_SIZE);
         write_buf
             .borrow_mut()
             .as_mut_slice()
@@ -496,7 +496,7 @@ mod tests {
         let result = spin_until_complete(&mut chan);
         assert_eq!(result, vec![(1, true)]);
 
-        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = spin_until_complete(&mut chan);
@@ -517,11 +517,11 @@ mod tests {
         let block_dev = UringBlockDevice::new(path.clone(), 1, false, true, false)?;
         let mut chan = block_dev.create_channel()?;
 
-        let write_buf1 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf1 = shared_buffer(SECTOR_SIZE);
         write_buf1.borrow_mut().as_mut_slice().fill(0xAAu8);
         chan.add_write(0, 1, write_buf1.clone(), 1);
 
-        let write_buf2 = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf2 = shared_buffer(SECTOR_SIZE);
         write_buf2.borrow_mut().as_mut_slice().fill(0xBBu8);
         chan.add_write(1, 1, write_buf2.clone(), 2);
         chan.submit()?;

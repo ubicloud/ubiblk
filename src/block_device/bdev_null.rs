@@ -85,9 +85,8 @@ impl BlockDevice for NullBlockDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::aligned_buffer::AlignedBuf;
+    use crate::block_device::shared_buffer;
     use crate::vhost_backend::SECTOR_SIZE;
-    use std::{cell::RefCell, rc::Rc};
 
     #[test]
     fn reports_zero_capacity() {
@@ -100,7 +99,7 @@ mod tests {
         let dev = NullBlockDevice::new();
         let mut chan = dev.create_channel().unwrap();
 
-        let buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE * 2)));
+        let buf: SharedBuffer = shared_buffer(SECTOR_SIZE * 2);
         chan.add_read(10, 2, buf.clone(), 1);
         chan.add_write(20, 2, buf.clone(), 2);
         chan.add_flush(3);

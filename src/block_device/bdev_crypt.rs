@@ -124,7 +124,6 @@ impl CryptBlockDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::aligned_buffer::AlignedBuf;
     use crate::UbiblkError;
 
     use crate::{
@@ -160,7 +159,7 @@ mod tests {
         );
 
         let sample_data = "Hello, world!".as_bytes();
-        let buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let buf = shared_buffer(SECTOR_SIZE);
 
         for i in 0..2 {
             buf.borrow_mut().as_mut_slice()[0..sample_data.len()].copy_from_slice(sample_data);

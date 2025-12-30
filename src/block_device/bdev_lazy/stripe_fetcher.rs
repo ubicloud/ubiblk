@@ -1,11 +1,13 @@
 use std::collections::{HashMap, VecDeque};
 
-use super::super::*;
-use super::metadata::SharedMetadataState;
-use crate::stripe_source::StripeSource;
-use crate::utils::aligned_buffer_pool::AlignedBufferPool;
-use crate::{vhost_backend::SECTOR_SIZE, Result, UbiblkError};
 use log::{debug, error, warn};
+
+use super::super::*;
+
+use crate::{
+    block_device::SharedMetadataState, stripe_source::StripeSource,
+    utils::aligned_buffer_pool::AlignedBufferPool, vhost_backend::SECTOR_SIZE, Result, UbiblkError,
+};
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
 const MAX_FETCH_RETRIES: u8 = 3;

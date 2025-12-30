@@ -1,4 +1,4 @@
-use super::metadata::SharedMetadataState;
+use super::SharedMetadataState;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,13 +1,18 @@
+use crate::{
+    block_device::{BlockDevice, IoChannel, SharedBuffer, SharedMetadataState},
+    Result, UbiblkError,
+};
+
+use super::{
+    bgworker::BgWorkerRequest,
+    metadata::{Failed, Fetched, NoSource, NotFetched},
+};
+
 use std::{
     collections::{HashSet, VecDeque},
     sync::mpsc::Sender,
 };
 
-use super::super::*;
-use super::bgworker::BgWorkerRequest;
-use super::metadata::SharedMetadataState;
-use super::metadata::{Failed, Fetched, NoSource, NotFetched};
-use crate::{block_device::SharedBuffer, Result, UbiblkError};
 use log::error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

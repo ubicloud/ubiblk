@@ -18,7 +18,7 @@ pub enum CipherMethod {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct KeyEncryptionCipher {
     pub method: CipherMethod,
 
@@ -305,6 +305,58 @@ mod tests {
         let res = cipher.decrypt_xts_keys(enc.clone(), enc);
         assert!(
             matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description.contains("exactly 32 bytes"))
+        );
+    }
+
+    #[test]
+    fn test_loading_from_none_path_returns_default() {
+        let cipher = KeyEncryptionCipher::load(None, false).unwrap();
+        assert_eq!(cipher, KeyEncryptionCipher::default());
+    }
+
+    #[test]
+    fn test_loading_from_nonexistent_path_fails() {
+        let bad_path = PathBuf::from("/path/to/nonexistent/kek.yaml");
+        let res = KeyEncryptionCipher::load(Some(&bad_path), false);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_loading_from_invalid_yaml_fails() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        write!(temp_file, "invalid: [this is not valid yaml").unwrap();
+        temp_file.flush().unwrap();
+
+        let res = KeyEncryptionCipher::load(Some(&temp_file.path().to_path_buf()), false);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_load_key_encryption_cipher_success() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let kek = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(vec![0x11u8; 32]),
+            init_vector: Some(vec![0x22u8; 12]),
+            auth_data: Some(b"test-aad".to_vec()),
+        };
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let yaml_data = serde_yaml::to_string(&kek).unwrap();
+        write!(temp_file, "{}", yaml_data).unwrap();
+        temp_file.flush().unwrap();
+
+        let loaded_kek =
+            KeyEncryptionCipher::load(Some(&temp_file.path().to_path_buf()), true).unwrap();
+        assert_eq!(loaded_kek, kek);
+        assert!(
+            !temp_file.path().exists(),
+            "Temporary KEK file should be unlinked"
         );
     }
 }

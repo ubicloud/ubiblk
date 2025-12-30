@@ -213,6 +213,10 @@ fn send_response(stream: &mut UnixStream, response: &Value) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use crate::block_device::{
+        SharedMetadataState, UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, STRIPE_FETCHED_MASK,
+    };
+
     use super::*;
     use serde_json::Value;
     use std::io::Write;
@@ -288,6 +292,32 @@ mod tests {
 
         // Assert the version matches the const
         assert_eq!(response["version"], VERSION);
+    }
+
+    #[test]
+    fn test_rpc_status() {
+        let path = test_socket_path("status");
+        let mut metadata = UbiMetadata::new(DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, 64, 16);
+
+        metadata.stripe_headers[0] |= STRIPE_FETCHED_MASK;
+        metadata.stripe_headers[2] |= STRIPE_FETCHED_MASK;
+
+        let shared_state = SharedMetadataState::new(&metadata);
+        let reporter = StatusReporter::new(shared_state, 64 * 2048);
+
+        let handle =
+            start_rpc_server(&path, Some(reporter), vec![]).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "status");
+        handle.stop().expect("Failed to stop RPC server");
+
+        assert!(response.get("status").is_some());
+        let status = &response["status"];
+        assert!(status.get("stripes").is_some());
+        let stripes = &status["stripes"];
+        assert_eq!(stripes["fetched"], 2);
+        assert_eq!(stripes["no_source"], 48);
+        assert_eq!(stripes["total"], 64);
     }
 
     #[test]

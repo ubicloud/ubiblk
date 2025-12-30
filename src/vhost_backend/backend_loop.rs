@@ -476,3 +476,63 @@ pub fn build_block_device(
 
     Ok(block_device)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_backend_env_no_metadata() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let options = Options {
+            path: disk_file.path().to_str().unwrap().to_string(),
+            socket: "/tmp/ubiblk-test.sock".to_string(),
+            queue_size: 128,
+            ..Default::default()
+        };
+
+        let result = BackendEnv::build(&options, KeyEncryptionCipher::default());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_backend_env_with_invalid_path() {
+        let options = Options {
+            path: "/non/existent/path".to_string(),
+            socket: "/tmp/ubiblk-test.sock".to_string(),
+            queue_size: 128,
+            ..Default::default()
+        };
+
+        let result = BackendEnv::build(&options, KeyEncryptionCipher::default());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_backend_with_base_image() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let image_file = tempfile::NamedTempFile::new().unwrap();
+        image_file.as_file().set_len(5 * 1024 * 1024).unwrap();
+
+        let metadata_path = tempfile::NamedTempFile::new().unwrap();
+        metadata_path.as_file().set_len(1024 * 1024).unwrap();
+
+        let options = Options {
+            path: disk_file.path().to_str().unwrap().to_string(),
+            image_path: Some(image_file.path().to_str().unwrap().to_string()),
+            metadata_path: Some(metadata_path.path().to_str().unwrap().to_string()),
+            socket: "/tmp/ubiblk-test.sock".to_string(),
+            queue_size: 128,
+            ..Default::default()
+        };
+
+        init_metadata(&options, KeyEncryptionCipher::default(), 11).unwrap();
+
+        let result = BackendEnv::build(&options, KeyEncryptionCipher::default());
+        assert!(result.is_ok());
+    }
+}

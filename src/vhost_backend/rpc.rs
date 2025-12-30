@@ -3,7 +3,10 @@ use std::{
     io::{self, BufRead, BufReader, Write},
     os::unix::net::{UnixListener, UnixStream},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread::JoinHandle,
 };
 
@@ -30,11 +33,34 @@ struct RpcRequest {
     command: String,
 }
 
+#[allow(dead_code)]
+pub struct RpcServerHandle {
+    join_handle: JoinHandle<()>,
+    stop_requested: Arc<AtomicBool>,
+    path: PathBuf,
+}
+
+#[allow(dead_code)]
+impl RpcServerHandle {
+    pub fn stop(self) -> Result<()> {
+        self.stop_requested.store(true, Ordering::Release);
+
+        // connect to the socket to unblock the listener
+        UnixStream::connect(&self.path)?;
+
+        self.join_handle.join().map_err(|_| UbiblkError::RpcError {
+            description: "failed to join RPC server thread".to_string(),
+        })?;
+
+        Ok(())
+    }
+}
+
 pub fn start_rpc_server<P: AsRef<Path>>(
     path: P,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
-) -> Result<JoinHandle<()>> {
+) -> Result<RpcServerHandle> {
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
         if e.kind() != io::ErrorKind::NotFound {
@@ -54,14 +80,33 @@ pub fn start_rpc_server<P: AsRef<Path>>(
 
     info!("RPC server listening on {:?}", path);
 
-    std::thread::Builder::new()
+    let path_clone = path.clone();
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let stop_requested_clone = stop_requested.clone();
+    let join_handle = std::thread::Builder::new()
         .name("ubiblk-rpc-listener".to_string())
-        .spawn(move || run_listener(listener, state, path))
-        .map_err(|e| UbiblkError::ThreadCreation { source: e })
+        .spawn(move || run_listener(listener, state, path_clone, stop_requested_clone))
+        .map_err(|e| UbiblkError::ThreadCreation { source: e })?;
+
+    Ok(RpcServerHandle {
+        join_handle,
+        stop_requested,
+        path,
+    })
 }
 
-fn run_listener(listener: UnixListener, state: Arc<RpcState>, path: PathBuf) {
+fn run_listener(
+    listener: UnixListener,
+    state: Arc<RpcState>,
+    path: PathBuf,
+    stop_requested: Arc<AtomicBool>,
+) {
     for stream in listener.incoming() {
+        if stop_requested.load(Ordering::Acquire) {
+            info!("RPC shutdown signal received.");
+            break;
+        }
+
         match stream {
             Ok(stream) => {
                 let state = state.clone();
@@ -164,4 +209,214 @@ fn send_response(stream: &mut UnixStream, response: &Value) -> io::Result<()> {
     payload.push(b'\n');
     stream.write_all(&payload)?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    fn test_socket_path(test_name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!("ubiblk_rpc_test_{}.sock", test_name));
+        path
+    }
+
+    fn connect(socket_path: &Path) -> UnixStream {
+        // Retry connection a few times to allow the server thread to spin up
+        let mut stream = None;
+        for _ in 0..10 {
+            if let Ok(s) = UnixStream::connect(socket_path) {
+                stream = Some(s);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        stream.expect("Failed to connect to RPC socket")
+    }
+
+    fn read_response(stream: &mut UnixStream) -> Value {
+        let mut reader = std::io::BufReader::new(stream);
+        let mut response_line = String::new();
+        reader
+            .read_line(&mut response_line)
+            .expect("Failed to read response");
+
+        serde_json::from_str(&response_line).expect("Failed to parse response JSON")
+    }
+
+    fn rpc_call(socket_path: &Path, command: &str) -> Value {
+        let mut stream = connect(socket_path);
+
+        // Send request
+        let request = json!({ "command": command }).to_string();
+        stream
+            .write_all(request.as_bytes())
+            .expect("Failed to write to socket");
+        stream.write_all(b"\n").expect("Failed to write newline"); // Important: logic expects read_line
+
+        read_response(&mut stream)
+    }
+
+    #[test]
+    fn test_nonexistent_directory_socket_path() {
+        let bad_path = PathBuf::from("/nonexistent_directory/ubiblk_rpc.sock");
+        let result = start_rpc_server(&bad_path, None, vec![]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_non_removable_socket_path() {
+        let bad_path = PathBuf::from("/dev/zero");
+        let result = start_rpc_server(&bad_path, None, vec![]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rpc_version() {
+        let path = test_socket_path("version");
+
+        // Start server with no trackers and no reporter
+        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "version");
+
+        handle.stop().expect("Failed to stop RPC server");
+
+        // Assert the version matches the const
+        assert_eq!(response["version"], VERSION);
+    }
+
+    #[test]
+    fn test_rpc_status_empty() {
+        let path = test_socket_path("status_empty");
+
+        // Start server with None for status_reporter
+        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "status");
+
+        handle.stop().expect("Failed to stop RPC server");
+
+        // Should return null for status
+        assert!(response.get("status").is_some());
+        assert!(response["status"].is_null());
+    }
+
+    #[test]
+    fn test_rpc_queues() {
+        let path = test_socket_path("queues");
+
+        let mut io_tracker_1 = IoTracker::new(4);
+        io_tracker_1.add_flush(0);
+        io_tracker_1.add_read(1, 2, 3);
+        io_tracker_1.add_write(2, 4, 5);
+        io_tracker_1.add_flush(3);
+
+        let mut io_tracker_2 = IoTracker::new(4);
+        io_tracker_2.add_write(2, 10, 20);
+
+        let io_tracker_3 = IoTracker::new(4);
+        // No IOs added to tracker 3
+
+        let io_trackers = vec![io_tracker_1, io_tracker_2, io_tracker_3];
+
+        // Start server with multiple trackers and no reporter
+        let handle =
+            start_rpc_server(&path, None, io_trackers).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "queues");
+
+        handle.stop().expect("Failed to stop RPC server");
+
+        // Should return array with 3 queues (one per tracker)
+        assert!(response["queues"].is_array());
+        let queues = response["queues"].as_array().unwrap();
+        assert_eq!(queues.len(), 3);
+        assert_eq!(
+            queues[0],
+            json!([["flush"], ["read", 2, 3], ["write", 4, 5], ["flush"]])
+        );
+        assert_eq!(queues[1], json!([["write", 10, 20]]));
+        assert_eq!(queues[2], json!([]));
+    }
+
+    #[test]
+    fn test_rpc_queues_empty() {
+        let path = test_socket_path("queues_empty");
+
+        // Start server with empty trackers vector
+        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "queues");
+
+        handle.stop().expect("Failed to stop RPC server");
+
+        // Should return empty array
+        assert!(response["queues"].is_array());
+        assert_eq!(response["queues"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_rpc_unknown_command() {
+        let path = test_socket_path("unknown");
+        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "destroy_world");
+
+        handle.stop().expect("Failed to stop RPC server");
+
+        // Should return an error field
+        assert!(response.get("error").is_some());
+        let error_msg = response["error"].as_str().unwrap();
+        assert!(error_msg.contains("unknown command"));
+    }
+
+    #[test]
+    fn test_ignore_empty_lines() {
+        let path = test_socket_path("empty_lines");
+        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+
+        let mut stream = connect(&path);
+
+        // Send empty lines and then a valid command
+        stream.write_all(b"\n\n\n").unwrap();
+        let request = json!({ "command": "version" }).to_string();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.write_all(b"\n").unwrap();
+
+        let response = read_response(&mut stream);
+
+        handle.stop().expect("Failed to stop RPC server");
+
+        assert_eq!(response["version"], VERSION);
+    }
+
+    #[test]
+    fn test_rpc_malformed_json() {
+        let path = test_socket_path("malformed");
+        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+
+        let mut stream = connect(&path);
+
+        // Manually writing garbage to stream instead of using helper
+        stream.write_all(b"{ not valid json }\n").unwrap();
+
+        let mut reader = std::io::BufReader::new(stream);
+        let mut response_line = String::new();
+        reader.read_line(&mut response_line).unwrap();
+
+        let response: Value = serde_json::from_str(&response_line).unwrap();
+
+        handle.stop().expect("Failed to stop RPC server");
+
+        assert!(response.get("error").is_some());
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("invalid request"));
+    }
 }

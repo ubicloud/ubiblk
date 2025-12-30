@@ -48,17 +48,27 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
 
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-
-      - name: Run cargo audit
-        run: cargo audit --deny warnings
-
       - name: Run tests with coverage
         run: cargo llvm-cov --fail-under-lines 60 --ignore-filename-regex src/bin/
 
       - name: Build project
         run: cargo build
+
+  audit:
+    runs-on: ubicloud-standard-4
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run cargo audit
+        run: cargo audit --deny warnings
 
   e2e:
     runs-on: ubicloud-standard-4

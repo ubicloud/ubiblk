@@ -12,7 +12,7 @@ pub use metadata::load_metadata;
 pub use metadata::SharedMetadataState;
 pub use metadata::UbiMetadata;
 pub use metadata::DEFAULT_STRIPE_SECTOR_COUNT_SHIFT;
-pub use metadata::STRIPE_WRITTEN_MASK;
+pub use metadata::{STRIPE_FETCHED_MASK, STRIPE_WRITTEN_MASK};
 pub use status_report::{StatusReport, StatusReporter};
 
 #[cfg(test)]

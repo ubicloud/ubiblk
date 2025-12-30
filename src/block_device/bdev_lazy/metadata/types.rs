@@ -2,6 +2,7 @@ use crate::vhost_backend::SECTOR_SIZE;
 
 pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
+pub const STRIPE_FETCHED_MASK: u8 = 1 << 0;
 pub const STRIPE_WRITTEN_MASK: u8 = 1 << 1;
 pub const STRIPE_NO_SOURCE_MASK: u8 = 1 << 2;
 

@@ -19,6 +19,7 @@ pub const READ_STRIPE_CMD: u8 = 0x01;
 pub const STATUS_OK: u8 = 0x00;
 pub const STATUS_INVALID_STRIPE: u8 = 0x01;
 pub const STATUS_UNWRITTEN: u8 = 0x02;
+pub const STATUS_INVALID_COMMAND: u8 = 0xFE;
 pub const STATUS_SERVER_ERROR: u8 = 0xFF;
 
 pub struct StripeServer {

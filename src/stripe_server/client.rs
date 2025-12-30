@@ -43,6 +43,17 @@ impl StripeServerClient {
 
         Ok(())
     }
+
+    #[cfg(test)]
+    fn send_invalid_command(&mut self) -> Result<u8> {
+        self.stream.write_all(&[0xFF])?;
+        self.stream.flush()?;
+
+        let mut status = [0u8; 1];
+        self.stream.read_exact(&mut status)?;
+
+        Ok(status[0])
+    }
 }
 
 impl RemoteStripeProvider for StripeServerClient {
@@ -198,17 +209,14 @@ mod tests {
             (stripe_count as u64) * SECTOR_SIZE as u64,
         ));
 
-        let metadata_result =
+        let fetched_metadata =
             run_client_with_server(metadata.clone(), stripe_device, None, |client| {
                 client
                     .fetch_metadata()
                     .expect("metadata fetch should succeed");
-                client.metadata.clone()
+                client.get_metadata().unwrap().clone()
             });
 
-        let fetched_metadata = metadata_result
-            .as_ref()
-            .expect("client should have fetched metadata");
         assert_eq!(fetched_metadata.stripe_headers.len(), stripe_count);
         assert_ne!(fetched_metadata.stripe_headers[0] & STRIPE_WRITTEN_MASK, 0);
         assert_eq!(fetched_metadata.stripe_headers[1] & STRIPE_WRITTEN_MASK, 0);
@@ -261,6 +269,45 @@ mod tests {
     }
 
     #[test]
+    fn fetching_out_of_bounds_stripe_returns_error() {
+        let stripe_count = 2;
+        let metadata = written_unwritten_metadata(stripe_count);
+        let stripe_device = Arc::new(TestBlockDevice::new(
+            (stripe_count as u64) * SECTOR_SIZE as u64,
+        ));
+
+        let err = run_client_with_server(metadata, stripe_device, None, |client| {
+            client
+                .fetch_metadata()
+                .expect("metadata fetch should succeed");
+            client
+                .fetch_stripe(10)
+                .expect_err("out-of-bounds stripe should return an error")
+        });
+        assert!(matches!(
+            err,
+            UbiblkError::InvalidParameter { description } if description.contains("Invalid stripe index")
+        ));
+    }
+
+    #[test]
+    fn sending_invalid_command_returns_error_status() {
+        let stripe_count = 1;
+        let metadata = written_unwritten_metadata(stripe_count);
+        let stripe_device = Arc::new(TestBlockDevice::new(
+            (stripe_count as u64) * SECTOR_SIZE as u64,
+        ));
+
+        let status = run_client_with_server(metadata, stripe_device, None, |client| {
+            client
+                .send_invalid_command()
+                .expect("sending invalid command should succeed")
+        });
+
+        assert_eq!(status, STATUS_INVALID_COMMAND);
+    }
+
+    #[test]
     fn fetches_metadata_over_psk() {
         let stripe_count = 1;
         let metadata = written_unwritten_metadata(stripe_count);
@@ -284,5 +331,11 @@ mod tests {
 
         let fetched_metadata = metadata_result.expect("metadata should be returned");
         assert_eq!(fetched_metadata.stripe_headers.len(), stripe_count);
+    }
+
+    #[test]
+    fn test_connection_failure() {
+        let result = connect_to_stripe_server("127.0.0.1:9999", None);
+        assert!(result.is_err());
     }
 }

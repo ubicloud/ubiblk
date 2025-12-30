@@ -55,9 +55,9 @@ impl StripeServerSession {
                 self.handle_read_stripe_request(stripe_id)?;
             }
             _ => {
-                return Err(UbiblkError::InvalidParameter {
-                    description: format!("Unknown opcode: {}", opcode[0]),
-                });
+                error!("Received unknown opcode: {}", opcode[0]);
+                self.stream.write_all(&[STATUS_INVALID_COMMAND])?;
+                self.stream.flush()?;
             }
         }
 

@@ -1,6 +1,5 @@
 use std::sync::{Arc, RwLock};
 
-use crate::utils::aligned_buffer::AlignedBuf;
 use crate::vhost_backend::SECTOR_SIZE;
 
 use super::*;
@@ -144,7 +143,7 @@ mod tests {
         let device = TestBlockDevice::new(1024 * 1024);
         let mut channel = device.create_channel().unwrap();
 
-        let buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         channel.add_read(0, 1, buf.clone(), 1);
         channel.submit().unwrap();
         let results = channel.poll();
@@ -160,7 +159,7 @@ mod tests {
         let mut channel = device.create_channel().unwrap();
 
         let pattern = vec![0x55u8; SECTOR_SIZE];
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         write_buf
             .borrow_mut()
             .as_mut_slice()
@@ -172,7 +171,7 @@ mod tests {
         results.sort_by_key(|x| x.0);
         assert_eq!(results, vec![(1, true), (2, true)]);
 
-        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         channel.add_read(0, 1, read_buf.clone(), 3);
         channel.submit().unwrap();
         let results = channel.poll();
@@ -193,7 +192,7 @@ mod tests {
         let device = TestBlockDevice::new(SECTOR_SIZE as u64);
         let mut channel = device.create_channel().unwrap();
 
-        let buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         channel.add_read(1, 1, buf.clone(), 1);
         channel.add_write(1, 1, buf.clone(), 2);
         channel.submit().unwrap();

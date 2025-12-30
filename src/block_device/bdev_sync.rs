@@ -1,6 +1,4 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
-#[cfg(test)]
-use crate::utils::aligned_buffer::AlignedBuf;
 use crate::vhost_backend::SECTOR_SIZE;
 use crate::{Result, UbiblkError};
 use log::error;
@@ -166,9 +164,10 @@ impl SyncBlockDevice {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-    use std::{cell::RefCell, rc::Rc};
 
     use tempfile::NamedTempFile;
+
+    use crate::block_device::shared_buffer;
 
     use super::*;
 
@@ -187,7 +186,7 @@ mod tests {
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf = shared_buffer(SECTOR_SIZE);
         write_buf
             .borrow_mut()
             .as_mut_slice()
@@ -198,7 +197,7 @@ mod tests {
         assert_eq!(result, vec![(1, true)]);
 
         // Read it back
-        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = chan.poll();
@@ -223,7 +222,7 @@ mod tests {
 
         // Write sector 0
         let pattern = vec![0xABu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf = shared_buffer(SECTOR_SIZE);
         write_buf
             .borrow_mut()
             .as_mut_slice()
@@ -267,13 +266,13 @@ mod tests {
         let path = tmpfile.path();
         let mut chan = SyncIoChannel::new(path, false, false, false)?;
 
-        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf = shared_buffer(SECTOR_SIZE);
         chan.add_read(1, 1, read_buf.clone(), 1);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(1, false)]);
 
         let mut ro_chan = SyncIoChannel::new(path, true, false, false)?;
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         ro_chan.add_write(0, 1, write_buf.clone(), 2);
         ro_chan.submit()?;
         assert_eq!(ro_chan.poll(), vec![(2, false)]);
@@ -296,7 +295,7 @@ mod tests {
             file,
             finished_requests: Vec::new(),
         };
-        let buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, buf.clone(), 1);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(1, false)]);
@@ -356,7 +355,7 @@ mod tests {
         let mut chan = device.create_channel()?;
 
         let pattern = vec![0xACu8; SECTOR_SIZE];
-        let write_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf = shared_buffer(SECTOR_SIZE);
         write_buf
             .borrow_mut()
             .as_mut_slice()
@@ -366,7 +365,7 @@ mod tests {
         let result = chan.poll();
         assert_eq!(result, vec![(1, true)]);
 
-        let read_buf = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 2);
         chan.submit()?;
         let result = chan.poll();

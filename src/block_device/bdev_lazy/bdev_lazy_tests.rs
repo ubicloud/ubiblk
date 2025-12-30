@@ -1,15 +1,13 @@
 #[cfg(test)]
 mod tests {
-    use crate::block_device::SharedBuffer;
     use crate::block_device::{
         bdev_lazy::{init_metadata, BgWorker, LazyBlockDevice, SharedMetadataState, UbiMetadata},
         bdev_test::{TestBlockDevice, TestDeviceMetrics},
         load_metadata, BlockDevice, IoChannel,
     };
-    use crate::utils::aligned_buffer::AlignedBuf;
+    use crate::block_device::{shared_buffer, SharedBuffer};
     use crate::vhost_backend::SECTOR_SIZE;
     use std::cell::RefCell;
-    use std::rc::Rc;
     use std::sync::{mpsc::channel, Arc, RwLock};
     use std::thread::sleep;
     use std::time::Duration;
@@ -169,7 +167,7 @@ mod tests {
         assert_eq!(env.target_metrics.read().unwrap().reads, 0);
         assert_eq!(env.target_metrics.read().unwrap().writes, 0);
 
-        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
         let results = drive(&env.bgworker, &mut chan);
@@ -187,7 +185,7 @@ mod tests {
         assert_eq!(env.target_metrics.read().unwrap().writes, 1);
 
         let write_data = b"queued_write";
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(env.stripe_sectors, 1, write_buf.clone(), 2);
         chan.submit().unwrap();
@@ -217,7 +215,7 @@ mod tests {
         assert_eq!(env.target_metrics.read().unwrap().reads, 0);
         assert_eq!(env.target_metrics.read().unwrap().writes, 0);
 
-        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
         let results = drive(&env.bgworker, &mut chan);
@@ -235,7 +233,7 @@ mod tests {
         assert_eq!(env.target_metrics.read().unwrap().writes, 0);
 
         let write_data = b"write_after_fetch";
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(env.stripe_sectors, 1, write_buf.clone(), 2);
         chan.submit().unwrap();
@@ -261,7 +259,7 @@ mod tests {
         let env = setup_env(true, false, b"image_read");
         let mut chan = env.lazy.create_channel().unwrap();
 
-        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE * 4)));
+        let read_buf: SharedBuffer = shared_buffer(SECTOR_SIZE * 4);
         chan.add_read(STRIPE_SECTORS - 2, 4, read_buf.clone(), 1);
         chan.submit().unwrap();
         let results = drive(&env.bgworker, &mut chan);
@@ -299,7 +297,7 @@ mod tests {
         let mut chan = env.lazy.create_channel().unwrap();
 
         let write_data = b"write_with_tracking";
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(env.stripe_sectors, 1, write_buf.clone(), 1);
         chan.submit().unwrap();
@@ -328,7 +326,7 @@ mod tests {
         let mut chan = env.lazy.create_channel().unwrap();
 
         let write_data = b"track_image_write";
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(env.stripe_sectors, 1, write_buf.clone(), 1);
         chan.submit().unwrap();
@@ -357,7 +355,7 @@ mod tests {
 
         env.metadata_state.set_stripe_failed(0);
 
-        let read_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let read_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 1);
         chan.submit().unwrap();
         let results = drive(&env.bgworker, &mut chan);
@@ -365,7 +363,7 @@ mod tests {
         assert_eq!(results, vec![(1, false)]);
 
         let write_data = b"write_to_failed_stripe";
-        let write_buf: SharedBuffer = Rc::new(RefCell::new(AlignedBuf::new(SECTOR_SIZE)));
+        let write_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
         write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
         chan.add_write(0, 1, write_buf.clone(), 2);
         chan.submit().unwrap();

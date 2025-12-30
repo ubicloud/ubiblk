@@ -1,10 +1,9 @@
-use std::{cell::RefCell, io::ErrorKind, rc::Rc};
+use std::io::ErrorKind;
 
 use log::{error, info};
 
 use crate::{
-    block_device::{wait_for_completion, SharedBuffer, STRIPE_WRITTEN_MASK},
-    utils::AlignedBuf,
+    block_device::{shared_buffer, wait_for_completion, SharedBuffer, STRIPE_WRITTEN_MASK},
     vhost_backend::SECTOR_SIZE,
     UbiblkError,
 };
@@ -126,7 +125,7 @@ impl StripeServerSession {
 
         let offset = stripe_id * (stripe_sector_count as u64);
 
-        let buffer = Rc::new(RefCell::new(AlignedBuf::new(stripe_len_bytes)));
+        let buffer = shared_buffer(stripe_len_bytes);
         self.stripe_channel
             .add_read(offset, stripe_sector_count, buffer.clone(), 0);
         self.stripe_channel.submit()?;

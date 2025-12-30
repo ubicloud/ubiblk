@@ -1,10 +1,7 @@
-use std::{cell::RefCell, rc::Rc};
-
 use log::info;
 
 use crate::{
-    block_device::{wait_for_completion, IoChannel, UbiMetadata},
-    utils::aligned_buffer::AlignedBuf,
+    block_device::{shared_buffer, wait_for_completion, IoChannel, UbiMetadata},
     vhost_backend::SECTOR_SIZE,
     Result, UbiblkError,
 };
@@ -41,7 +38,7 @@ pub fn init_metadata(
                 description: "Metadata sector count exceeds u32".to_string(),
             })?;
 
-    let buf = Rc::new(RefCell::new(AlignedBuf::new(total_size)));
+    let buf = shared_buffer(total_size);
 
     metadata.write_to_buf(&mut buf.borrow_mut().as_mut_slice()[..metadata_size]);
 

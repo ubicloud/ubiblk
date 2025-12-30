@@ -315,16 +315,19 @@ pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<
     let mut backend_env = BackendEnv::build(config, kek.clone())?;
     backend_env.run_bgworker_thread()?;
 
-    if let Some(path) = config.rpc_socket_path.as_ref() {
+    let _rpc_handle = if let Some(path) = config.rpc_socket_path.as_ref() {
         let status_reporter = backend_env.status_reporter();
         let io_trackers = backend_env.io_trackers.clone();
-        let _join_handle = rpc::start_rpc_server(path, status_reporter, io_trackers)?;
-        // TODO: store the join handle and use it to stop the RPC server on shutdown
-    }
+        Some(rpc::start_rpc_server(path, status_reporter, io_trackers)?)
+    } else {
+        None
+    };
 
     loop {
         backend_env.serve()?;
     }
+
+    // TODO: Graceful shutdown handling
 }
 
 pub fn init_metadata(

@@ -14,7 +14,9 @@ jobs:
       matrix:
         include:
           - runner: ubicloud-standard-4
+            arch: x86_64
           - runner: ubicloud-standard-4-arm
+            arch: aarch64
 
     steps:
       - name: Checkout source
@@ -46,13 +48,19 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Install cargo-llvm-cov
+        if: ${{ matrix.arch == 'x86_64' }}
         run: cargo install cargo-llvm-cov --locked
 
       - name: Run tests with coverage
+        if: ${{ matrix.arch == 'x86_64' }}
         run: cargo llvm-cov --fail-under-lines 60 --ignore-filename-regex src/bin/
 
       - name: Build project
         run: cargo build
+
+      - name: Run tests (no coverage)
+        if: ${{ matrix.arch != 'x86_64' }}
+        run: cargo test
 
   audit:
     runs-on: ubicloud-standard-4

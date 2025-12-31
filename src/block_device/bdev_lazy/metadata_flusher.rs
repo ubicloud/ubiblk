@@ -187,19 +187,14 @@ impl MetadataFlusher {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_device::{bdev_test::TestBlockDevice, init_metadata};
+    use crate::block_device::bdev_test::TestBlockDevice;
 
     use super::*;
 
     fn init_metadata_device() -> TestBlockDevice {
         let metadata = UbiMetadata::new(11, 16, 16);
         let block_device = TestBlockDevice::new(8 * 1024);
-        init_metadata(
-            &metadata,
-            &mut block_device.create_channel().unwrap(),
-            block_device.sector_count(),
-        )
-        .expect("Failed to initialize metadata");
+        metadata.save_to_bdev(&block_device).unwrap();
         block_device
     }
 

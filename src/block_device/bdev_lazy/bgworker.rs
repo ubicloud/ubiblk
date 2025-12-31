@@ -123,8 +123,8 @@ mod tests {
     use super::*;
     use crate::{
         block_device::{
-            bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, init_metadata,
-            NullBlockDevice, UbiMetadata,
+            bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, NullBlockDevice,
+            UbiMetadata,
         },
         stripe_source,
     };
@@ -140,13 +140,8 @@ mod tests {
             stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
                 .unwrap(),
         );
-        init_metadata(
-            &UbiMetadata::new(stripe_sector_count_shift, 16, 16),
-            &mut metadata_dev.create_channel().unwrap(),
-            metadata_dev.sector_count(),
-        )
-        .expect("Failed to initialize metadata");
-
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, 16, 16);
+        metadata.save_to_bdev(&metadata_dev).unwrap();
         let metadata_state = {
             let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
             SharedMetadataState::new(&metadata)
@@ -186,12 +181,9 @@ mod tests {
         let stripe_source = Box::new(
             stripe_source::BlockDeviceStripeSource::new(source_dev, stripe_sector_count).unwrap(),
         );
-        init_metadata(
-            &UbiMetadata::new(stripe_sector_count_shift, 16, 0),
-            &mut metadata_dev.create_channel().unwrap(),
-            metadata_dev.sector_count(),
-        )
-        .expect("Failed to initialize metadata");
+
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, 16, 0);
+        metadata.save_to_bdev(&metadata_dev).unwrap();
 
         let metadata_state = {
             let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");

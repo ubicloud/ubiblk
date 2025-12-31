@@ -15,6 +15,7 @@ pub trait StripeSource {
 mod bdev;
 mod builder;
 mod remote;
+pub mod wait;
 pub use bdev::BlockDeviceStripeSource;
 pub use builder::StripeSourceBuilder;
 pub use remote::RemoteStripeSource;

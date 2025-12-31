@@ -85,6 +85,20 @@ impl KeyEncryptionCipher {
         Ok(kek)
     }
 
+    pub fn encrypt_xts_keys(&self, key1: &[u8], key2: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        match self.method {
+            CipherMethod::None => Ok((key1.to_vec(), key2.to_vec())),
+            CipherMethod::Aes256Gcm => {
+                let (cipher, nonce, auth) = self.init_cipher_context()?;
+
+                let k1 = encrypt_bytes(&cipher, &nonce, auth, key1)?;
+                let k2 = encrypt_bytes(&cipher, &nonce, auth, key2)?;
+
+                Ok((k1, k2))
+            }
+        }
+    }
+
     pub fn decrypt_xts_keys(&self, key1: Vec<u8>, key2: Vec<u8>) -> Result<([u8; 32], [u8; 32])> {
         match self.method {
             CipherMethod::None => {
@@ -129,6 +143,27 @@ fn decrypt_bytes(
         )
         .map_err(|e| {
             let msg = format!("Failed to decrypt data: {e}");
+            error!("{}", msg);
+            param_err(msg)
+        })
+}
+
+fn encrypt_bytes(
+    cipher: &Aes256Gcm,
+    nonce: &KekNonce,
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| {
+            let msg = format!("Failed to encrypt data: {e}");
             error!("{}", msg);
             param_err(msg)
         })
@@ -358,5 +393,46 @@ mod tests {
             !temp_file.path().exists(),
             "Temporary KEK file should be unlinked"
         );
+    }
+
+    #[test]
+    fn test_encrypt_xts_keys_none_method() {
+        let key1 = [0xAAu8; 32];
+        let key2 = [0xBBu8; 32];
+
+        let cipher = KeyEncryptionCipher {
+            method: CipherMethod::None,
+            ..Default::default()
+        };
+
+        let (enc1, enc2) = cipher.encrypt_xts_keys(&key1, &key2).unwrap();
+        assert_eq!(enc1, key1);
+        assert_eq!(enc2, key2);
+    }
+
+    #[test]
+    fn test_encrypt_xts_keys_aes_gcm_success() {
+        let kek_key = [0x11u8; 32];
+        let iv = [0x22u8; 12];
+        let aad = b"test-aad";
+
+        let key1 = [0xAAu8; 32];
+        let key2 = [0xBBu8; 32];
+
+        let cipher = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(kek_key.to_vec()),
+            init_vector: Some(iv.to_vec()),
+            auth_data: Some(aad.to_vec()),
+        };
+
+        let (enc1, enc2) = cipher.encrypt_xts_keys(&key1, &key2).unwrap();
+        assert_ne!(enc1, key1);
+        assert_ne!(enc2, key2);
+
+        // Decrypt to verify correctness
+        let (dec1, dec2) = cipher.decrypt_xts_keys(enc1, enc2).unwrap();
+        assert_eq!(dec1, key1);
+        assert_eq!(dec2, key2);
     }
 }

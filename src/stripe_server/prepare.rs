@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use crate::{
-    block_device::{
-        load_metadata, UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, STRIPE_WRITTEN_MASK,
-    },
+    block_device::{UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, STRIPE_WRITTEN_MASK},
     stripe_server::StripeServer,
     vhost_backend::{build_block_device, Options},
     KeyEncryptionCipher, Result,
@@ -16,9 +14,7 @@ pub fn prepare_stripe_server(
     let stripe_device = build_block_device(&options.path, options, kek.clone(), false)?;
     let metadata: Arc<UbiMetadata> = if let Some(metadata_path) = options.metadata_path.as_deref() {
         let metadata_device = build_block_device(metadata_path, options, kek, false)?;
-
-        let mut metadata_channel = metadata_device.create_channel()?;
-        let metadata = load_metadata(&mut metadata_channel, metadata_device.sector_count())?;
+        let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
         Arc::from(metadata)
     } else {
         let stripe_sector_count_shift = DEFAULT_STRIPE_SECTOR_COUNT_SHIFT;

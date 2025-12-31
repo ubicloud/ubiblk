@@ -1,33 +1,8 @@
 use std::path::Path;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use crate::crypt::{decode_psk_key, decode_xts_keys};
 use serde::{Deserialize, Deserializer, Serialize};
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
-
-type OptKeyPair = Option<(Vec<u8>, Vec<u8>)>;
-type OptKey = Option<Vec<u8>>;
-
-fn decode_encryption_keys<'de, D>(deserializer: D) -> Result<OptKeyPair, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<(String, String)>::deserialize(deserializer)?
-        .map(|(k1, k2)| {
-            let decoded1 = STANDARD.decode(k1).map_err(serde::de::Error::custom)?;
-            let decoded2 = STANDARD.decode(k2).map_err(serde::de::Error::custom)?;
-            Ok((decoded1, decoded2))
-        })
-        .transpose()
-}
-
-fn decode_key<'de, D>(deserializer: D) -> Result<OptKey, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer)?
-        .map(|key| STANDARD.decode(key).map_err(serde::de::Error::custom))
-        .transpose()
-}
 
 fn default_poll_queue_timeout_us() -> u128 {
     1000
@@ -122,13 +97,13 @@ pub struct Options {
     #[serde(default = "default_autofetch")]
     pub autofetch: bool,
 
-    #[serde(default, deserialize_with = "decode_encryption_keys")]
+    #[serde(default, deserialize_with = "decode_xts_keys")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
 
     #[serde(default)]
     pub psk_identity: Option<String>,
 
-    #[serde(default, deserialize_with = "decode_key")]
+    #[serde(default, deserialize_with = "decode_psk_key")]
     pub psk_secret: Option<Vec<u8>>,
 
     #[serde(

@@ -32,6 +32,12 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache Rust (registry, git deps, target/)
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-${{ matrix.arch }}-stable
+          cache-on-failure: true
+
       - name: Clone and build isa-l_crypto
         run: |
           git clone --depth 1 --branch v2.25.0 https://github.com/intel/isa-l_crypto

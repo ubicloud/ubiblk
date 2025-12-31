@@ -5,7 +5,7 @@ use std::{collections::HashMap, io, path::PathBuf};
 use ubiblk::{
     block_device::STRIPE_WRITTEN_MASK,
     stripe_server::{connect_to_stripe_server, PskCredentials, RemoteStripeProvider},
-    vhost_backend::{Options, SECTOR_SIZE},
+    vhost_backend::Options,
     KeyEncryptionCipher, Result, UbiblkError,
 };
 
@@ -55,7 +55,7 @@ fn main() -> Result<()> {
         .as_ref()
         .expect("metadata should be fetched")
         .clone();
-    let stripe_len_bytes = metadata.stripe_size() as usize * SECTOR_SIZE;
+    let stripe_len_bytes = metadata.stripe_size();
 
     let mut rl = DefaultEditor::new().map_err(readline_err_to_io)?;
     let mut fetched_stripes: HashMap<u64, Vec<u8>> = HashMap::new();

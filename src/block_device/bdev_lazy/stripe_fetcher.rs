@@ -289,8 +289,6 @@ mod tests {
         let target_size: u64 = 2 * 1024 * 1024; // 2 MiB
         let stripe_sector_count_shift = 3; // 8 sectors per stripe
         let stripe_sector_count = 1u64 << stripe_sector_count_shift;
-        let source_stripe_count = source_size.div_ceil(stripe_sector_count * 512) as usize;
-        let target_stripe_count = target_size.div_ceil(stripe_sector_count * 512) as usize;
 
         let source_dev = Box::new(TestBlockDevice::new(source_size));
         let target_dev = Box::new(TestBlockDevice::new(target_size));
@@ -301,8 +299,8 @@ mod tests {
 
         let metadata = UbiMetadata::new(
             stripe_sector_count_shift,
-            target_stripe_count,
-            source_stripe_count,
+            target_dev.stripe_count(stripe_sector_count),
+            source_dev.stripe_count(stripe_sector_count),
         );
 
         let shared_metadata_state = SharedMetadataState::new(&metadata);
@@ -312,7 +310,7 @@ mod tests {
             &*target_dev,
             stripe_sector_count,
             shared_metadata_state.clone(),
-            512,
+            SECTOR_SIZE,
             autofetch,
         )
         .unwrap();

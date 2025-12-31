@@ -55,7 +55,7 @@ impl MetadataFlusher {
         let metadata = load_metadata(&mut channel, metadata_dev.sector_count())?;
 
         // Validate stripe count
-        let source_stripe_count = source_sector_count.div_ceil(metadata.stripe_size());
+        let source_stripe_count = source_sector_count.div_ceil(metadata.stripe_sector_count());
         if source_stripe_count > metadata.stripe_count() {
             return Err(UbiblkError::InvalidParameter {
                 description: format!(

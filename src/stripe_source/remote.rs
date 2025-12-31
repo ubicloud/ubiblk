@@ -20,18 +20,18 @@ impl RemoteStripeSource {
                 description: "metadata not fetched from remote server".to_string(),
             })?;
 
-        let remote_stripe_size = metadata.stripe_size();
-        if remote_stripe_size != stripe_sector_count {
+        let remote_stripe_sector_count = metadata.stripe_sector_count();
+        if remote_stripe_sector_count != stripe_sector_count {
             return Err(UbiblkError::InvalidParameter {
                 description: format!(
-                    "remote stripe size {remote_stripe_size} does not match expected {stripe_sector_count}",
+                    "remote stripe sector count {remote_stripe_sector_count} does not match expected {stripe_sector_count}",
                 ),
             });
         }
 
         let source_sector_count = metadata
             .stripe_count()
-            .checked_mul(remote_stripe_size)
+            .checked_mul(remote_stripe_sector_count)
             .ok_or_else(|| UbiblkError::InvalidParameter {
                 description: "remote stripe count too large (overflow)".to_string(),
             })?;

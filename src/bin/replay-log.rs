@@ -5,7 +5,7 @@ use std::{
     io::{BufRead, BufReader, Lines, Read, Seek, Write},
     iter::{Enumerate, Peekable},
 };
-use ubiblk::{utils::decode_hex, Error, Result};
+use ubiblk::{utils::decode_hex, vhost_backend::SECTOR_SIZE, Error, Result};
 
 fn first_difference<T: PartialEq>(a: &[T], b: &[T]) -> Option<usize> {
     a.iter().zip(b.iter()).position(|(x, y)| x != y)
@@ -77,7 +77,7 @@ fn main() -> Result<()> {
             });
         }
 
-        let offset = sector * 512;
+        let offset = sector * SECTOR_SIZE as u64;
         info!(
             "[{}] {}: sector {}, len {}",
             line_num + 1,

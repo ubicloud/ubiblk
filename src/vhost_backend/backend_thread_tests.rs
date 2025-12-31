@@ -1,19 +1,22 @@
 #[cfg(test)]
 mod tests {
-    use crate::block_device::bdev_test::TestBlockDevice;
-    use crate::block_device::BlockDevice;
-    use crate::utils::aligned_buffer::BUFFER_ALIGNMENT;
-    use crate::vhost_backend::backend_thread::UbiBlkBackendThread;
-    use crate::vhost_backend::io_tracking::IoTracker;
-    use crate::vhost_backend::request::{Request, RequestType};
-    use crate::vhost_backend::{Options, SECTOR_SIZE};
     use smallvec::smallvec;
     use vhost_user_backend::bitmap::BitmapMmapRegion;
     use virtio_bindings::bindings::virtio_ring::VRING_DESC_F_WRITE;
-    use virtio_queue::desc::split::Descriptor as SplitDescriptor;
-    use virtio_queue::{Queue, QueueOwnedT};
+    use virtio_queue::{desc::split::Descriptor as SplitDescriptor, Queue, QueueOwnedT};
     use vm_memory::{
         GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard, GuestMemoryMmap,
+    };
+
+    use crate::{
+        block_device::{bdev_test::TestBlockDevice, BlockDevice},
+        utils::aligned_buffer::BUFFER_ALIGNMENT,
+        vhost_backend::{
+            backend_thread::UbiBlkBackendThread,
+            io_tracking::IoTracker,
+            request::{Request, RequestType},
+            Options, SECTOR_SIZE,
+        },
     };
 
     type GuestMemory = GuestMemoryMmap<BitmapMmapRegion>;
@@ -51,7 +54,7 @@ mod tests {
             cpus: None,
             num_queues: 1,
             queue_size: 2,
-            seg_size_max: 512,
+            seg_size_max: SECTOR_SIZE as u32,
             seg_count_max: 1,
             poll_queue_timeout_us: 1000,
             copy_on_read: false,
@@ -83,7 +86,10 @@ mod tests {
         let req = Request {
             request_type: RequestType::Out,
             sector: 0,
-            data_descriptors: smallvec![(GuestAddress(0), 100u32), (GuestAddress(512), 200u32),],
+            data_descriptors: smallvec![
+                (GuestAddress(0), 100u32),
+                (GuestAddress(SECTOR_SIZE as u64), 200u32),
+            ],
             status_addr: GuestAddress(0),
         };
         assert_eq!(thread.request_len(&req), 300);

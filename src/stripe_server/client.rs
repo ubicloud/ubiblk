@@ -2,7 +2,7 @@ use std::net::{SocketAddr, TcpStream};
 
 use log::info;
 
-use crate::{vhost_backend::SECTOR_SIZE, UbiblkError};
+use crate::UbiblkError;
 
 use super::*;
 
@@ -85,7 +85,7 @@ impl RemoteStripeProvider for StripeServerClient {
                 self.stream.read_exact(&mut size_bytes)?;
                 let stripe_size = u64::from_le_bytes(size_bytes) as usize;
 
-                let expected_stripe_size = metadata.stripe_size() as usize * SECTOR_SIZE;
+                let expected_stripe_size = metadata.stripe_size();
 
                 if stripe_size != expected_stripe_size {
                     return Err(UbiblkError::StripeSizeMismatch {

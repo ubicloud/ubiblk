@@ -5,7 +5,7 @@ mod options;
 mod request;
 mod rpc;
 pub use backend_loop::{block_backend_loop, build_block_device, init_metadata};
-pub use options::{IoEngine, Options};
+pub use options::{decode_encryption_keys, IoEngine, Options};
 mod backend_thread;
 
 pub const SECTOR_SIZE: usize = 512;

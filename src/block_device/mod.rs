@@ -50,7 +50,7 @@ pub use bdev_lazy::{
         init::{init_metadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT},
         load::load_metadata,
         shared_state::SharedMetadataState,
-        types::{UbiMetadata, STRIPE_FETCHED_MASK, STRIPE_WRITTEN_MASK},
+        types::{UbiMetadata, STRIPE_FETCHED_MASK, STRIPE_NO_SOURCE_MASK, STRIPE_WRITTEN_MASK},
     },
     status_report::{StatusReport, StatusReporter},
 };

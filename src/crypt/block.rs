@@ -19,6 +19,20 @@ impl XtsBlockCipher {
         })
     }
 
+    pub fn random() -> Self {
+        use rand::RngCore;
+        let mut rng = rand::rng();
+        let mut key1 = [0u8; 32];
+        let mut key2 = [0u8; 32];
+        rng.fill_bytes(&mut key1);
+        rng.fill_bytes(&mut key2);
+        XtsBlockCipher { key1, key2 }
+    }
+
+    pub fn keys(&self, kek: KeyEncryptionCipher) -> Result<(Vec<u8>, Vec<u8>)> {
+        kek.encrypt_xts_keys(&self.key1, &self.key2)
+    }
+
     fn get_initial_tweak(&self, sector: u64) -> [u8; 16] {
         /*
          * Based on SPDK's _sw_accel_crypto_operation() in spdk/lib/accel/accel_sw.c:

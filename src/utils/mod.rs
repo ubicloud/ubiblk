@@ -2,6 +2,7 @@ pub mod aligned_buffer;
 pub mod aligned_buffer_pool;
 pub mod block;
 pub mod debug;
+pub mod hash;
 
 pub use debug::*;
 

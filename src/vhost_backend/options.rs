@@ -7,7 +7,7 @@ use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 type OptKeyPair = Option<(Vec<u8>, Vec<u8>)>;
 type OptKey = Option<Vec<u8>>;
 
-fn decode_encryption_keys<'de, D>(deserializer: D) -> Result<OptKeyPair, D::Error>
+pub fn decode_encryption_keys<'de, D>(deserializer: D) -> Result<OptKeyPair, D::Error>
 where
     D: Deserializer<'de>,
 {

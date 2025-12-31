@@ -85,6 +85,20 @@ impl KeyEncryptionCipher {
         Ok(kek)
     }
 
+    pub fn encrypt_xts_keys(&self, key1: &[u8], key2: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
+        match self.method {
+            CipherMethod::None => Ok((key1.to_vec(), key2.to_vec())),
+            CipherMethod::Aes256Gcm => {
+                let (cipher, nonce, auth) = self.init_cipher_context()?;
+
+                let k1 = encrypt_bytes(&cipher, &nonce, auth, &key1)?;
+                let k2 = encrypt_bytes(&cipher, &nonce, auth, &key2)?;
+
+                Ok((k1, k2))
+            }
+        }
+    }
+
     pub fn decrypt_xts_keys(&self, key1: Vec<u8>, key2: Vec<u8>) -> Result<([u8; 32], [u8; 32])> {
         match self.method {
             CipherMethod::None => {
@@ -129,6 +143,27 @@ fn decrypt_bytes(
         )
         .map_err(|e| {
             let msg = format!("Failed to decrypt data: {e}");
+            error!("{}", msg);
+            param_err(msg)
+        })
+}
+
+fn encrypt_bytes(
+    cipher: &Aes256Gcm,
+    nonce: &KekNonce,
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>> {
+    cipher
+        .encrypt(
+            nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
+        .map_err(|e| {
+            let msg = format!("Failed to encrypt data: {e}");
             error!("{}", msg);
             param_err(msg)
         })

@@ -40,6 +40,10 @@ pub enum UbiblkError {
         expected: usize,
         actual: usize,
     },
+    #[error("Stripe fetch failed for stripe {stripe}")]
+    StripeFetchFailed { stripe: usize },
+    #[error("Stripe fetch timeout for stripe {stripe}")]
+    StripeFetchTimeout { stripe: usize },
     #[error("Remote server returned error status: {status}")]
     RemoteStatus { status: u8 },
     #[error("TLS setup failed: {description}")]
@@ -50,6 +54,8 @@ pub enum UbiblkError {
     RpcError { description: String },
     #[error("Vhost user backend error: {reason}")]
     VhostUserBackendError { reason: vhost_user_backend::Error },
+    #[error("Archive error: {description}")]
+    ArchiveError { description: String },
 }
 
 pub type Error = UbiblkError;

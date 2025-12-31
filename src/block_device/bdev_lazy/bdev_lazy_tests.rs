@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::block_device::{
-        bdev_lazy::{init_metadata, BgWorker, LazyBlockDevice, SharedMetadataState, UbiMetadata},
+        bdev_lazy::{BgWorker, LazyBlockDevice, SharedMetadataState, UbiMetadata},
         bdev_test::{TestBlockDevice, TestDeviceMetrics},
         BlockDevice, IoChannel,
     };
@@ -34,9 +34,8 @@ mod tests {
         let target_metrics = target_dev.metrics.clone();
 
         let metadata_dev = TestBlockDevice::new(METADATA_SIZE);
-        let mut ch = metadata_dev.create_channel().unwrap();
         let metadata = UbiMetadata::new(STRIPE_SHIFT, STRIPE_COUNT, STRIPE_COUNT);
-        init_metadata(&metadata, &mut ch, metadata_dev.sector_count()).unwrap();
+        metadata.save_to_bdev(&metadata_dev).unwrap();
 
         let metadata_state = {
             let loaded = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");

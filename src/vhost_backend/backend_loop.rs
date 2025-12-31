@@ -15,8 +15,8 @@ use vm_memory::GuestMemoryAtomic;
 use super::{backend::UbiBlkBackend, rpc, IoEngine, Options};
 use crate::{
     block_device::{
-        self, init_metadata as init_metadata_file, BgWorker, BgWorkerRequest, BlockDevice,
-        SharedMetadataState, StatusReporter, UbiMetadata, UringBlockDevice,
+        self, BgWorker, BgWorkerRequest, BlockDevice, SharedMetadataState, StatusReporter,
+        UbiMetadata, UringBlockDevice,
     },
     crypt::KeyEncryptionCipher,
     stripe_source::StripeSourceBuilder,
@@ -413,8 +413,7 @@ pub fn init_metadata(
     };
 
     let metadata_bdev = build_block_device(metadata_path, config, kek.clone(), false)?;
-    let mut ch = metadata_bdev.create_channel()?;
-    init_metadata_file(&metadata, &mut ch, metadata_bdev.sector_count())?;
+    metadata.save_to_bdev(metadata_bdev.as_ref())?;
     Ok(())
 }
 

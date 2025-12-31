@@ -51,7 +51,7 @@ pub use bdev_lazy::{
     bgworker::{BgWorker, BgWorkerRequest},
     device::LazyBlockDevice,
     metadata::{
-        init::{init_metadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT},
+        save::DEFAULT_STRIPE_SECTOR_COUNT_SHIFT,
         shared_state::SharedMetadataState,
         types::{UbiMetadata, STRIPE_FETCHED_MASK, STRIPE_WRITTEN_MASK},
     },

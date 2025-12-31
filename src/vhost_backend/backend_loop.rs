@@ -15,8 +15,8 @@ use vm_memory::GuestMemoryAtomic;
 use super::{backend::UbiBlkBackend, rpc, IoEngine, Options};
 use crate::{
     block_device::{
-        self, init_metadata as init_metadata_file, load_metadata, BgWorker, BgWorkerRequest,
-        BlockDevice, SharedMetadataState, StatusReporter, UbiMetadata, UringBlockDevice,
+        self, init_metadata as init_metadata_file, BgWorker, BgWorkerRequest, BlockDevice,
+        SharedMetadataState, StatusReporter, UbiMetadata, UringBlockDevice,
     },
     crypt::KeyEncryptionCipher,
     stripe_source::StripeSourceBuilder,
@@ -124,8 +124,7 @@ impl BackendEnv {
         metadata_path: &str,
     ) -> Result<BgWorkerSetup> {
         let metadata_dev = build_block_device(metadata_path, options, kek.clone(), false)?;
-        let mut metadata_channel = metadata_dev.create_channel()?;
-        let metadata = load_metadata(&mut metadata_channel, metadata_dev.sector_count())?;
+        let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
         let shared_state = SharedMetadataState::new(&metadata);
 
         let (_, maybe_image_bdev) = Self::create_source_devices(options)?;

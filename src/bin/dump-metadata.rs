@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use ubiblk::block_device::{self, load_metadata, BlockDevice};
+use ubiblk::block_device::{self, BlockDevice, UbiMetadata};
 use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
 use ubiblk::{Error, KeyEncryptionCipher, Result};
 
@@ -113,8 +113,7 @@ fn main() -> Result<()> {
             description: "metadata_path is none".to_string(),
         })?;
     let metadata_dev = build_block_device(metadata_path, &options, true, kek.clone())?;
-    let mut ch = metadata_dev.create_channel()?;
-    let metadata = load_metadata(&mut ch, metadata_dev.sector_count())?;
+    let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
 
     let stripe_size = metadata.stripe_size();
     let fetched: Vec<usize> = metadata

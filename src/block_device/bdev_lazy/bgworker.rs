@@ -124,7 +124,7 @@ mod tests {
     use crate::{
         block_device::{
             bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, init_metadata,
-            load_metadata, NullBlockDevice, UbiMetadata,
+            NullBlockDevice, UbiMetadata,
         },
         stripe_source,
     };
@@ -148,8 +148,7 @@ mod tests {
         .expect("Failed to initialize metadata");
 
         let metadata_state = {
-            let mut channel = metadata_dev.create_channel().unwrap();
-            let metadata = load_metadata(&mut channel, metadata_dev.sector_count()).unwrap();
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
             SharedMetadataState::new(&metadata)
         };
 
@@ -195,8 +194,7 @@ mod tests {
         .expect("Failed to initialize metadata");
 
         let metadata_state = {
-            let mut channel = metadata_dev.create_channel().unwrap();
-            let metadata = load_metadata(&mut channel, metadata_dev.sector_count()).unwrap();
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
             SharedMetadataState::new(&metadata)
         };
 

@@ -1,5 +1,5 @@
 use crate::{
-    block_device::{load_metadata, BlockDevice, IoChannel, SharedMetadataState, UbiMetadata},
+    block_device::{BlockDevice, IoChannel, SharedMetadataState, UbiMetadata},
     utils::AlignedBufferPool,
     vhost_backend::SECTOR_SIZE,
     Result, UbiblkError,
@@ -51,8 +51,8 @@ impl MetadataFlusher {
         source_sector_count: u64,
         shared_state: SharedMetadataState,
     ) -> Result<Self> {
-        let mut channel = metadata_dev.create_channel()?;
-        let metadata = load_metadata(&mut channel, metadata_dev.sector_count())?;
+        let channel = metadata_dev.create_channel()?;
+        let metadata = UbiMetadata::load_from_bdev(metadata_dev)?;
 
         // Validate stripe count
         let source_stripe_count = source_sector_count.div_ceil(metadata.stripe_sector_count());
@@ -214,8 +214,7 @@ mod tests {
     fn test_metadata_flusher() {
         let metadata_dev = init_metadata_device();
         let shared_state = {
-            let mut channel = metadata_dev.create_channel().unwrap();
-            let metadata = load_metadata(&mut channel, metadata_dev.sector_count()).unwrap();
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
@@ -250,8 +249,7 @@ mod tests {
     fn test_source_stripe_count_too_large() {
         let metadata_dev = init_metadata_device();
         let shared_state = {
-            let mut channel = metadata_dev.create_channel().unwrap();
-            let metadata = load_metadata(&mut channel, metadata_dev.sector_count()).unwrap();
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
             SharedMetadataState::new(&metadata)
         };
         let metadata_flusher =

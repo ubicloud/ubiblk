@@ -52,7 +52,6 @@ pub use bdev_lazy::{
     device::LazyBlockDevice,
     metadata::{
         init::{init_metadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT},
-        load::load_metadata,
         shared_state::SharedMetadataState,
         types::{UbiMetadata, STRIPE_FETCHED_MASK, STRIPE_WRITTEN_MASK},
     },

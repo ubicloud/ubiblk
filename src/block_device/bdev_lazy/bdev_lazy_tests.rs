@@ -3,7 +3,7 @@ mod tests {
     use crate::block_device::{
         bdev_lazy::{init_metadata, BgWorker, LazyBlockDevice, SharedMetadataState, UbiMetadata},
         bdev_test::{TestBlockDevice, TestDeviceMetrics},
-        load_metadata, BlockDevice, IoChannel,
+        BlockDevice, IoChannel,
     };
     use crate::block_device::{shared_buffer, SharedBuffer};
     use crate::vhost_backend::SECTOR_SIZE;
@@ -39,9 +39,7 @@ mod tests {
         init_metadata(&metadata, &mut ch, metadata_dev.sector_count()).unwrap();
 
         let metadata_state = {
-            let mut load_ch = metadata_dev.create_channel().unwrap();
-            let loaded =
-                load_metadata(&mut load_ch, metadata_dev.sector_count()).expect("load metadata");
+            let loaded = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
             SharedMetadataState::new(&loaded)
         };
 

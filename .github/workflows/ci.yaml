@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - runner: ubicloud-standard-4
+          - runner: ubicloud-premium-4
             arch: x86_64
           - runner: ubicloud-standard-4-arm
             arch: aarch64

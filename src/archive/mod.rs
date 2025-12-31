@@ -21,5 +21,8 @@ pub struct ArchiveMetadata {
 mod archiver;
 mod fs_store;
 
+pub use archiver::StripeArchiver;
+pub use fs_store::FileSystemStore;
+
 #[cfg(test)]
 mod mem_store;

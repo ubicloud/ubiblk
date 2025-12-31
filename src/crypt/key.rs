@@ -91,8 +91,8 @@ impl KeyEncryptionCipher {
             CipherMethod::Aes256Gcm => {
                 let (cipher, nonce, auth) = self.init_cipher_context()?;
 
-                let k1 = encrypt_bytes(&cipher, &nonce, auth, &key1)?;
-                let k2 = encrypt_bytes(&cipher, &nonce, auth, &key2)?;
+                let k1 = encrypt_bytes(&cipher, &nonce, auth, key1)?;
+                let k2 = encrypt_bytes(&cipher, &nonce, auth, key2)?;
 
                 Ok((k1, k2))
             }

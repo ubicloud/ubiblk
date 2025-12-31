@@ -1,10 +1,10 @@
 use clap::Parser;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use ubiblk::archive::{FileSystemStore, StripeArchiver};
 use ubiblk::block_device::load_metadata;
 use ubiblk::stripe_source::StripeSourceBuilder;
+use ubiblk::Result;
 use ubiblk::{vhost_backend::*, KeyEncryptionCipher, UbiblkError};
-use ubiblk::{Error, Result};
 
 #[derive(Parser)]
 #[command(

@@ -165,7 +165,7 @@ mod tests {
     use crate::{
         archive::mem_store::MemStore,
         block_device::{BlockDevice, NullBlockDevice},
-        stripe_source::{BlockDeviceStripeSource, StripeSourceBuilder},
+        stripe_source::BlockDeviceStripeSource,
     };
 
     use super::*;

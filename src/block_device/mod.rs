@@ -26,6 +26,10 @@ pub trait BlockDevice: Send + Sync {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>>;
     fn sector_count(&self) -> u64;
     fn clone(&self) -> Box<dyn BlockDevice>;
+
+    fn stripe_count(&self, stripe_sector_count: u64) -> usize {
+        self.sector_count().div_ceil(stripe_sector_count) as usize
+    }
 }
 
 impl Clone for Box<dyn BlockDevice> {

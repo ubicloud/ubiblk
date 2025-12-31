@@ -31,8 +31,12 @@ impl UbiMetadata {
         SECTOR_SIZE + self.stripe_headers.len()
     }
 
-    pub fn stripe_size(&self) -> u64 {
+    pub fn stripe_sector_count(&self) -> u64 {
         1u64 << self.stripe_sector_count_shift
+    }
+
+    pub fn stripe_size(&self) -> usize {
+        (self.stripe_sector_count() as usize) * SECTOR_SIZE
     }
 
     pub fn stripe_count(&self) -> u64 {

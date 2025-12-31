@@ -116,7 +116,7 @@ fn main() -> Result<()> {
     let mut ch = metadata_dev.create_channel()?;
     let metadata = load_metadata(&mut ch, metadata_dev.sector_count())?;
 
-    let stripe_size = metadata.stripe_size() * SECTOR_SIZE as u64;
+    let stripe_size = metadata.stripe_size();
     let fetched: Vec<usize> = metadata
         .stripe_headers
         .iter()

@@ -345,7 +345,7 @@ pub fn init_metadata(
 
     let base_bdev = build_block_device(&config.path, config, kek.clone(), false)?;
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;
-    let base_stripe_count = base_bdev.sector_count().div_ceil(stripe_sector_count) as usize;
+    let base_stripe_count = base_bdev.stripe_count(stripe_sector_count);
 
     let metadata = if let Some(ref remote_image) = config.remote_image {
         // For remote images, connect to server and get its metadata
@@ -402,7 +402,7 @@ pub fn init_metadata(
             true,
             config.write_through,
         )?;
-        let image_stripe_count = image_bdev.sector_count().div_ceil(stripe_sector_count) as usize;
+        let image_stripe_count = image_bdev.stripe_count(stripe_sector_count);
         UbiMetadata::new(
             stripe_sector_count_shift,
             base_stripe_count,

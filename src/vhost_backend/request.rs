@@ -168,6 +168,8 @@ impl Request {
 
 #[cfg(test)]
 mod tests {
+    use crate::vhost_backend::SECTOR_SIZE;
+
     use super::*;
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
     use virtio_queue::desc::split::Descriptor as SplitDescriptor;
@@ -175,6 +177,7 @@ mod tests {
     use vm_memory::{Address, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryMmap};
 
     type GuestMemory = GuestMemoryMmap<()>;
+    const SECTOR_SIZE_U32: u32 = SECTOR_SIZE as u32;
 
     fn setup_mem() -> (GuestMemoryAtomic<GuestMemory>, GuestMemory) {
         let mem = GuestMemory::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
@@ -231,7 +234,7 @@ mod tests {
         mem.write_obj::<u64>(1, hdr.unchecked_add(8)).unwrap();
         let descs = [
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
-            SplitDescriptor::new(data.0, 512, VRING_DESC_F_NEXT as u16, 2),
+            SplitDescriptor::new(data.0, SECTOR_SIZE_U32, VRING_DESC_F_NEXT as u16, 2),
             SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
@@ -246,7 +249,7 @@ mod tests {
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
             SplitDescriptor::new(
                 data.0,
-                512,
+                SECTOR_SIZE_U32,
                 VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
                 2,
             ),
@@ -310,7 +313,7 @@ mod tests {
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
             SplitDescriptor::new(
                 data.0,
-                512,
+                SECTOR_SIZE_U32,
                 VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
                 2,
             ),
@@ -326,7 +329,7 @@ mod tests {
         mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
         let descs = [
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
-            SplitDescriptor::new(data.0, 512, VRING_DESC_F_NEXT as u16, 2),
+            SplitDescriptor::new(data.0, SECTOR_SIZE_U32, VRING_DESC_F_NEXT as u16, 2),
             SplitDescriptor::new(status.0, 1, VRING_DESC_F_WRITE as u16, 0),
         ];
         let mut chain = build_chain(&mem, &descs);
@@ -341,7 +344,7 @@ mod tests {
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
             SplitDescriptor::new(
                 data.0,
-                512,
+                SECTOR_SIZE_U32,
                 VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
                 2,
             ),
@@ -359,7 +362,7 @@ mod tests {
             SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1),
             SplitDescriptor::new(
                 data.0,
-                512,
+                SECTOR_SIZE_U32,
                 VRING_DESC_F_WRITE as u16 | VRING_DESC_F_NEXT as u16,
                 2,
             ),

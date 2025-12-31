@@ -21,10 +21,9 @@ pub fn prepare_stripe_server(
         let metadata = load_metadata(&mut metadata_channel, metadata_device.sector_count())?;
         Arc::from(metadata)
     } else {
-        let sector_count = stripe_device.sector_count();
         let stripe_sector_count_shift = DEFAULT_STRIPE_SECTOR_COUNT_SHIFT;
         let stripe_sector_count = 1u64 << stripe_sector_count_shift;
-        let stripe_count = sector_count.div_ceil(stripe_sector_count) as usize;
+        let stripe_count = stripe_device.stripe_count(stripe_sector_count);
         let mut metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count);
         for stripe_header in metadata.stripe_headers.iter_mut() {
             *stripe_header |= STRIPE_WRITTEN_MASK;

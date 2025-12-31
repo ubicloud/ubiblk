@@ -4,7 +4,6 @@ use log::{error, info};
 
 use crate::{
     block_device::{shared_buffer, wait_for_completion, SharedBuffer, STRIPE_WRITTEN_MASK},
-    vhost_backend::SECTOR_SIZE,
     UbiblkError,
 };
 
@@ -104,8 +103,7 @@ impl StripeServerSession {
             }
         })?;
 
-        let stripe_sector_count = self.metadata.stripe_size() as u32;
-        let stripe_len_bytes = (stripe_sector_count as usize) * SECTOR_SIZE;
+        let stripe_len_bytes = self.metadata.stripe_size();
 
         self.stream.write_all(&[STATUS_OK])?;
         self.stream
@@ -120,8 +118,8 @@ impl StripeServerSession {
     }
 
     fn read_stripe(&mut self, stripe_id: u64) -> Result<SharedBuffer> {
-        let stripe_sector_count = self.metadata.stripe_size() as u32;
-        let stripe_len_bytes = (stripe_sector_count as usize) * SECTOR_SIZE;
+        let stripe_sector_count = self.metadata.stripe_sector_count() as u32;
+        let stripe_len_bytes = self.metadata.stripe_size();
 
         let offset = stripe_id * (stripe_sector_count as u64);
 

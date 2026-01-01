@@ -3,7 +3,7 @@ use rustyline::{error::ReadlineError, DefaultEditor};
 use std::{collections::HashMap, io, path::PathBuf};
 
 use ubiblk::{
-    block_device::STRIPE_WRITTEN_MASK,
+    block_device::METADATA_STRIPE_WRITTEN_BITMASK,
     stripe_server::{connect_to_stripe_server, PskCredentials, RemoteStripeProvider},
     vhost_backend::Options,
     KeyEncryptionCipher, Result, UbiblkError,
@@ -99,7 +99,7 @@ fn main() -> Result<()> {
                         continue;
                     }
                     let header = metadata.stripe_headers[stripe_idx];
-                    let status = if header & STRIPE_WRITTEN_MASK != 0 {
+                    let status = if header & METADATA_STRIPE_WRITTEN_BITMASK != 0 {
                         "WRITTEN"
                     } else {
                         "NOT_WRITTEN"
@@ -145,7 +145,7 @@ fn main() -> Result<()> {
                     }
 
                     let header = metadata.stripe_headers[stripe_idx_usize];
-                    if header & STRIPE_WRITTEN_MASK == 0 {
+                    if header & METADATA_STRIPE_WRITTEN_BITMASK == 0 {
                         if offset.saturating_add(len) > stripe_len_bytes {
                             println!("INVALID_RANGE");
                             continue;

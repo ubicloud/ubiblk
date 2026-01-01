@@ -1,4 +1,7 @@
-use crate::block_device::UbiMetadata;
+use crate::block_device::{
+    UbiMetadata, METADATA_STRIPE_FETCHED_BITMASK, METADATA_STRIPE_NO_SOURCE_BITMASK,
+    METADATA_STRIPE_WRITTEN_BITMASK,
+};
 use std::sync::{
     atomic::{AtomicU64, AtomicU8, Ordering},
     Arc,
@@ -21,10 +24,6 @@ pub const NoSource: u8 = 3;
 pub const NotWritten: u8 = 0;
 pub const Written: u8 = 1;
 
-const METADATA_STRIPE_FETCHED_BITMASK: u8 = 1 << 0;
-const METADATA_STRIPE_WRITTEN_BITMASK: u8 = 1 << 1;
-const METADATA_STRIPE_NO_SOURCE_DATA_BITMASK: u8 = 1 << 2;
-
 impl SharedMetadataState {
     pub fn new(metadata: &UbiMetadata) -> Self {
         let (mut stripe_fetch_states, mut stripe_write_states) = (Vec::new(), Vec::new());
@@ -38,7 +37,7 @@ impl SharedMetadataState {
             if header & METADATA_STRIPE_WRITTEN_BITMASK != 0 {
                 write_state = Written;
             }
-            if header & METADATA_STRIPE_NO_SOURCE_DATA_BITMASK != 0 {
+            if header & METADATA_STRIPE_NO_SOURCE_BITMASK != 0 {
                 fetch_state = NoSource;
                 no_source_stripes_count += 1;
             }

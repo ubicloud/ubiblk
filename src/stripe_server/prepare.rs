@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
 use crate::{
-    block_device::{UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, STRIPE_WRITTEN_MASK},
+    block_device::{
+        UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, METADATA_STRIPE_WRITTEN_BITMASK,
+    },
     stripe_server::StripeServer,
     vhost_backend::{build_block_device, Options},
     KeyEncryptionCipher, Result,
@@ -22,7 +24,7 @@ pub fn prepare_stripe_server(
         let stripe_count = stripe_device.stripe_count(stripe_sector_count);
         let mut metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count);
         for stripe_header in metadata.stripe_headers.iter_mut() {
-            *stripe_header |= STRIPE_WRITTEN_MASK;
+            *stripe_header |= METADATA_STRIPE_WRITTEN_BITMASK;
         }
         Arc::from(metadata)
     };
@@ -68,7 +70,10 @@ mod tests {
         assert_eq!(metadata.stripe_headers.len(), stripe_count as usize);
 
         for header in metadata.stripe_headers.iter() {
-            assert_eq!(*header & STRIPE_WRITTEN_MASK, STRIPE_WRITTEN_MASK);
+            assert_eq!(
+                *header & METADATA_STRIPE_WRITTEN_BITMASK,
+                METADATA_STRIPE_WRITTEN_BITMASK
+            );
         }
 
         Ok(())
@@ -87,7 +92,7 @@ mod tests {
 
         for i in 0..stripe_count as usize {
             if i % 3 == 0 || i % 5 == 0 {
-                metadata.stripe_headers[i] |= STRIPE_WRITTEN_MASK;
+                metadata.stripe_headers[i] |= METADATA_STRIPE_WRITTEN_BITMASK;
             }
         }
 

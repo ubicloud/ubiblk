@@ -214,7 +214,8 @@ fn send_response(stream: &mut UnixStream, response: &Value) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use crate::block_device::{
-        SharedMetadataState, UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, STRIPE_FETCHED_MASK,
+        SharedMetadataState, UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT,
+        METADATA_STRIPE_FETCHED_BITMASK,
     };
 
     use super::*;
@@ -299,8 +300,8 @@ mod tests {
         let path = test_socket_path("status");
         let mut metadata = UbiMetadata::new(DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, 64, 16);
 
-        metadata.stripe_headers[0] |= STRIPE_FETCHED_MASK;
-        metadata.stripe_headers[2] |= STRIPE_FETCHED_MASK;
+        metadata.stripe_headers[0] |= METADATA_STRIPE_FETCHED_BITMASK;
+        metadata.stripe_headers[2] |= METADATA_STRIPE_FETCHED_BITMASK;
 
         let shared_state = SharedMetadataState::new(&metadata);
         let reporter = StatusReporter::new(shared_state, 64 * 2048);

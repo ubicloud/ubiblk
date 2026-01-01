@@ -2,9 +2,9 @@ use crate::vhost_backend::SECTOR_SIZE;
 
 pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
-pub const STRIPE_FETCHED_MASK: u8 = 1 << 0;
-pub const STRIPE_WRITTEN_MASK: u8 = 1 << 1;
-pub const STRIPE_NO_SOURCE_MASK: u8 = 1 << 2;
+pub const METADATA_STRIPE_FETCHED_BITMASK: u8 = 1 << 0;
+pub const METADATA_STRIPE_WRITTEN_BITMASK: u8 = 1 << 1;
+pub const METADATA_STRIPE_NO_SOURCE_BITMASK: u8 = 1 << 2;
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -68,7 +68,7 @@ impl UbiMetadata {
                 if i < image_stripe_count {
                     0
                 } else {
-                    STRIPE_NO_SOURCE_MASK
+                    METADATA_STRIPE_NO_SOURCE_BITMASK
                 }
             })
             .collect::<Vec<_>>();
@@ -96,13 +96,13 @@ impl UbiMetadata {
                 // of the remote image. Each header corresponds to one stripe in the remote device.
                 if i < remote_metadata.stripe_headers.len() {
                     // Check if stripe is written on remote
-                    if remote_metadata.stripe_headers[i] & STRIPE_WRITTEN_MASK != 0 {
+                    if remote_metadata.stripe_headers[i] & METADATA_STRIPE_WRITTEN_BITMASK != 0 {
                         0 // Has source (written on remote)
                     } else {
-                        STRIPE_NO_SOURCE_MASK // No source (unwritten on remote)
+                        METADATA_STRIPE_NO_SOURCE_BITMASK // No source (unwritten on remote)
                     }
                 } else {
-                    STRIPE_NO_SOURCE_MASK // Beyond remote image size
+                    METADATA_STRIPE_NO_SOURCE_BITMASK // Beyond remote image size
                 }
             })
             .collect::<Vec<_>>();
@@ -218,7 +218,7 @@ mod tests {
             assert_eq!(metadata.stripe_header(i), 0);
         }
         for i in 4..10 {
-            assert_eq!(metadata.stripe_header(i), STRIPE_NO_SOURCE_MASK);
+            assert_eq!(metadata.stripe_header(i), METADATA_STRIPE_NO_SOURCE_BITMASK);
         }
     }
 
@@ -227,9 +227,9 @@ mod tests {
         // Create a remote metadata with some stripes written
         let mut remote_metadata = UbiMetadata::new(9, 8, 8);
         // Mark stripes 0, 2, 4 as written
-        remote_metadata.set_stripe_header(0, STRIPE_WRITTEN_MASK);
-        remote_metadata.set_stripe_header(2, STRIPE_WRITTEN_MASK);
-        remote_metadata.set_stripe_header(4, STRIPE_WRITTEN_MASK);
+        remote_metadata.set_stripe_header(0, METADATA_STRIPE_WRITTEN_BITMASK);
+        remote_metadata.set_stripe_header(2, METADATA_STRIPE_WRITTEN_BITMASK);
+        remote_metadata.set_stripe_header(4, METADATA_STRIPE_WRITTEN_BITMASK);
 
         // Create new metadata from remote with 10 total stripes
         let metadata = UbiMetadata::new_from_remote(9, 10, &remote_metadata);
@@ -254,29 +254,29 @@ mod tests {
         // Unwritten stripes should be marked as no source (bit 2 set)
         assert_eq!(
             metadata.stripe_header(1),
-            STRIPE_NO_SOURCE_MASK,
+            METADATA_STRIPE_NO_SOURCE_BITMASK,
             "Unwritten stripe 1 should have no source"
         );
         assert_eq!(
             metadata.stripe_header(3),
-            STRIPE_NO_SOURCE_MASK,
+            METADATA_STRIPE_NO_SOURCE_BITMASK,
             "Unwritten stripe 3 should have no source"
         );
         assert_eq!(
             metadata.stripe_header(5),
-            STRIPE_NO_SOURCE_MASK,
+            METADATA_STRIPE_NO_SOURCE_BITMASK,
             "Unwritten stripe 5 should have no source"
         );
 
         // Stripes beyond remote image should be marked as no source
         assert_eq!(
             metadata.stripe_header(8),
-            STRIPE_NO_SOURCE_MASK,
+            METADATA_STRIPE_NO_SOURCE_BITMASK,
             "Stripe 8 beyond remote should have no source"
         );
         assert_eq!(
             metadata.stripe_header(9),
-            STRIPE_NO_SOURCE_MASK,
+            METADATA_STRIPE_NO_SOURCE_BITMASK,
             "Stripe 9 beyond remote should have no source"
         );
     }

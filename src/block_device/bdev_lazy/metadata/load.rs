@@ -1,6 +1,7 @@
 use crate::{
     block_device::{
-        bdev_lazy::metadata::types::UBI_MAGIC, shared_buffer, BlockDevice, UbiMetadata,
+        bdev_lazy::metadata::types::UBI_MAGIC, shared_buffer, wait_for_completion, BlockDevice,
+        UbiMetadata,
     },
     vhost_backend::SECTOR_SIZE,
     Result, UbiblkError,
@@ -25,32 +26,7 @@ impl UbiMetadata {
         io_channel.add_read(0, sector_count_u32, buf.clone(), 0);
         io_channel.submit()?;
 
-        let mut results = io_channel.poll();
-        while io_channel.busy() {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-            results.extend(io_channel.poll());
-        }
-
-        if results.len() != 1 {
-            error!(
-                "Failed to read metadata: expected 1 result, got {}",
-                results.len()
-            );
-            return Err(UbiblkError::MetadataError {
-                description: format!("Expected 1 result, got {}", results.len()),
-            });
-        }
-
-        let (id, success) = results.pop().ok_or(UbiblkError::MetadataError {
-            description: "Missing poll result".to_string(),
-        })?;
-
-        if !success || id != 0 {
-            error!("Failed to read metadata: id {id}, success {success}");
-            return Err(UbiblkError::MetadataError {
-                description: format!("Failed to read metadata, id: {id}, success: {success}"),
-            });
-        }
+        wait_for_completion(io_channel.as_mut(), 0, std::time::Duration::from_secs(30))?;
 
         let metadata = UbiMetadata::from_bytes(buf.borrow().as_slice());
 
@@ -70,5 +46,51 @@ impl UbiMetadata {
         info!("Metadata loaded successfully");
 
         Ok(metadata)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::block_device::bdev_test::TestBlockDevice;
+
+    use super::*;
+
+    #[test]
+    fn test_loads_metadata() {
+        let device = TestBlockDevice::new(1024 * 1024);
+        let mut metadata = UbiMetadata::new(11, 16, 16);
+
+        for (i, header) in metadata.stripe_headers.iter_mut().enumerate() {
+            *header = (i as u8) % 5;
+        }
+
+        metadata.save_to_bdev(&device).expect("save metadata");
+
+        let loaded_metadata = UbiMetadata::load_from_bdev(&device).expect("load metadata");
+
+        assert_eq!(metadata.magic, loaded_metadata.magic);
+        assert_eq!(metadata.version_major, loaded_metadata.version_major);
+        assert_eq!(metadata.version_minor, loaded_metadata.version_minor);
+        assert_eq!(
+            metadata.stripe_sector_count_shift,
+            loaded_metadata.stripe_sector_count_shift
+        );
+        assert_eq!(
+            metadata.stripe_headers,
+            loaded_metadata.stripe_headers[..metadata.stripe_headers.len()]
+        );
+    }
+
+    #[test]
+    fn test_invalid_magic() {
+        let device = TestBlockDevice::new(1024 * 1024);
+        let result = UbiMetadata::load_from_bdev(&device);
+        assert!(
+            result.is_err()
+                && result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Metadata magic mismatch")
+        );
     }
 }

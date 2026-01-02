@@ -36,3 +36,6 @@ pub use fs_store::FileSystemStore;
 
 #[cfg(test)]
 mod mem_store;
+
+#[cfg(test)]
+pub use mem_store::MemStore;

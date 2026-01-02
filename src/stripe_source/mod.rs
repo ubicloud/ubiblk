@@ -12,10 +12,12 @@ pub trait StripeSource {
     fn sector_count(&self) -> u64;
 }
 
+mod archive;
 mod bdev;
 mod builder;
 mod remote;
 pub mod wait;
+pub use archive::ArchiveStripeSource;
 pub use bdev::BlockDeviceStripeSource;
 pub use builder::StripeSourceBuilder;
 pub use remote::RemoteStripeSource;

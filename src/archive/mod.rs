@@ -30,9 +30,11 @@ pub struct ArchiveMetadata {
 
 mod archiver;
 mod fs_store;
+mod s3_store;
 
 pub use archiver::StripeArchiver;
 pub use fs_store::FileSystemStore;
+pub use s3_store::S3Store;
 
 #[cfg(test)]
 mod mem_store;

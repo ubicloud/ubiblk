@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::crypt::{decode_optional_key, decode_optional_key_pair};
+use crate::crypt::{decode_key, decode_optional_key, decode_optional_key_pair};
 use serde::{Deserialize, Deserializer, Serialize};
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 
@@ -62,6 +62,8 @@ pub struct Options {
     pub path: String,
     pub image_path: Option<String>,
     pub remote_image: Option<String>,
+    #[serde(default)]
+    pub archive_stripe_source: Option<ArchiveStripeSourceConfig>,
     pub metadata_path: Option<String>,
     pub io_debug_path: Option<String>,
     pub rpc_socket_path: Option<String>,
@@ -118,18 +120,32 @@ pub struct Options {
 
 impl Options {
     fn validate(&self) -> crate::Result<()> {
-        if self.remote_image.is_some() && self.image_path.is_some() {
+        let stripe_sources = [
+            self.image_path.is_some(),
+            self.remote_image.is_some(),
+            self.archive_stripe_source.is_some(),
+        ];
+
+        if stripe_sources.iter().filter(|b| **b).count() > 1 {
             return Err(crate::UbiblkError::InvalidParameter {
-                description: "Only one of remote_image and image_path should be specified."
-                    .to_string(),
+                description: "Only one stripe source may be specified".to_string(),
             });
         }
+
         if self.remote_image.is_some() && !self.copy_on_read {
             return Err(crate::UbiblkError::InvalidParameter {
                 description: "copy_on_read must be enabled when using remote_image stripe source."
                     .to_string(),
             });
         }
+
+        if self.archive_stripe_source.is_some() && !self.copy_on_read {
+            return Err(crate::UbiblkError::InvalidParameter {
+                description: "copy_on_read must be enabled when using archive_stripe_source."
+                    .to_string(),
+            });
+        }
+
         Ok(())
     }
 
@@ -149,6 +165,36 @@ impl Options {
             })?;
         Self::load_from_str(&contents)
     }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct AwsCredentials {
+    #[serde(deserialize_with = "decode_key")]
+    pub access_key_id: Vec<u8>,
+    #[serde(deserialize_with = "decode_key")]
+    pub secret_access_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ArchiveStripeSourceConfig {
+    Filesystem {
+        path: String,
+    },
+    S3 {
+        bucket: String,
+        #[serde(default)]
+        prefix: Option<String>,
+        #[serde(default)]
+        endpoint: Option<String>,
+        #[serde(default)]
+        region: Option<String>,
+        #[serde(default)]
+        profile: Option<String>,
+        #[serde(default)]
+        credentials: Option<AwsCredentials>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -366,5 +412,120 @@ mod tests {
         "#;
         let result = Options::load_from_str(yaml);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_filesystem_archive_source_parsing() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        copy_on_read: true
+        archive_stripe_source:
+          type: filesystem
+          path: "/path/to/archive"
+        "#;
+
+        let options = Options::load_from_str(yaml).unwrap();
+
+        assert_eq!(
+            options.archive_stripe_source,
+            Some(ArchiveStripeSourceConfig::Filesystem {
+                path: "/path/to/archive".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_s3_archive_source_parsing() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        copy_on_read: true
+        archive_stripe_source:
+          type: s3
+          bucket: backups
+          prefix: images
+          endpoint: https://account.r2.cloudflarestorage.com
+          region: auto
+          profile: r2
+          credentials:
+            access_key_id: "QUtJQUlBQUFBQUFBQQ=="
+            secret_access_key: "c2VjcmV0S2V5MTIzNDU2"
+        "#;
+
+        let options = Options::load_from_str(yaml).unwrap();
+
+        assert_eq!(
+            options.archive_stripe_source,
+            Some(ArchiveStripeSourceConfig::S3 {
+                bucket: "backups".to_string(),
+                prefix: Some("images".to_string()),
+                endpoint: Some("https://account.r2.cloudflarestorage.com".to_string()),
+                profile: Some("r2".to_string()),
+                region: Some("auto".to_string()),
+                credentials: Some(AwsCredentials {
+                    access_key_id: b"AKIAIAAAAAAAA".to_vec(),
+                    secret_access_key: b"secretKey123456".to_vec(),
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn test_error_on_archive_and_not_copy_on_read() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        copy_on_read: false
+        archive_stripe_source:
+          type: filesystem
+          path: "/path/to/archive"
+        "#;
+
+        let result = Options::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("copy_on_read must be enabled when using archive_stripe_source"));
+    }
+
+    #[test]
+    fn test_error_on_archive_and_remote() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        copy_on_read: true
+        archive_stripe_source:
+          type: filesystem
+          path: "/path/to/archive"
+        remote_image: "1.2.3.4:4567"
+        "#;
+
+        let result = Options::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Only one stripe source may be specified"));
+    }
+
+    #[test]
+    fn test_error_on_archive_and_image_path() {
+        let yaml = r#"
+        path: "/path/to/image"
+        socket: "/path/to/socket"
+        copy_on_read: true
+        archive_stripe_source:
+          type: filesystem
+          path: "/path/to/archive"
+        image_path: "/path/to/image_path"
+        "#;
+        let result = Options::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Only one stripe source may be specified"));
     }
 }

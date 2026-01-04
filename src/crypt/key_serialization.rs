@@ -40,6 +40,14 @@ where
         .transpose()
 }
 
+pub fn decode_key<'de, D>(deserializer: D) -> std::result::Result<Vec<u8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let key_str = String::deserialize(deserializer)?;
+    STANDARD.decode(key_str).map_err(serde::de::Error::custom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +67,12 @@ mod tests {
     struct WrapOptionalKey {
         #[serde(default, deserialize_with = "decode_optional_key")]
         key: OptKey,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+    struct WrapKey {
+        #[serde(deserialize_with = "decode_key")]
+        key: Vec<u8>,
     }
 
     #[test]
@@ -168,5 +182,18 @@ mod tests {
         // number instead of string/null
         let err = serde_json::from_str::<WrapOptionalKey>(r#"{"key":123}"#).unwrap_err();
         assert!(err.to_string().contains("invalid type: integer"));
+    }
+
+    #[test]
+    fn test_key_decodes_base64() {
+        let yaml = r#"key: "AQIDBAU=""#;
+        let w: WrapKey = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(w.key, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_key_invalid_base64_errors() {
+        let err = serde_yaml::from_str::<WrapKey>(r#"key: "%%%""#).unwrap_err();
+        assert_eq!(err.to_string(), "Invalid symbol 37, offset 0.");
     }
 }

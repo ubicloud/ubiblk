@@ -125,6 +125,22 @@ impl KeyEncryptionCipher {
             }
         }
     }
+
+    pub fn decrypt_aws_credential(&self, cred: Vec<u8>) -> Result<String> {
+        let decrypted_bytes = match self.method {
+            CipherMethod::None => cred,
+            CipherMethod::Aes256Gcm => {
+                let (cipher, nonce, auth) = self.init_cipher_context()?;
+                decrypt_bytes(&cipher, &nonce, auth, &cred)?
+            }
+        };
+
+        String::from_utf8(decrypted_bytes).map_err(|e| {
+            let msg = format!("Decrypted AWS credential is not valid UTF-8: {e}");
+            error!("{}", msg);
+            param_err(msg)
+        })
+    }
 }
 
 fn decrypt_bytes(
@@ -434,5 +450,58 @@ mod tests {
         let (dec1, dec2) = cipher.decrypt_xts_keys(enc1, enc2).unwrap();
         assert_eq!(dec1, key1);
         assert_eq!(dec2, key2);
+    }
+
+    #[test]
+    fn test_decrypt_aws_credential_aes_gcm_success() {
+        let kek_key = [0x33u8; 32];
+        let iv = [0x44u8; 12];
+        let aad = b"aws-cred-aad";
+        let credential_str = "AKIAEXAMPLEACCESSKEY";
+        let credential_bytes = credential_str.as_bytes();
+        let enc_cred = encrypt_helper(&kek_key, &iv, aad, credential_bytes);
+        let cipher = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(kek_key.to_vec()),
+            init_vector: Some(iv.to_vec()),
+            auth_data: Some(aad.to_vec()),
+        };
+        let dec_cred = cipher
+            .decrypt_aws_credential(enc_cred)
+            .expect("Decryption should succeed");
+        assert_eq!(dec_cred, credential_str);
+    }
+
+    #[test]
+    fn test_decrypt_aws_credential_none_method() {
+        let credential_str = "AKIAEXAMPLEACCESSKEY";
+        let credential_bytes = credential_str.as_bytes().to_vec();
+        let cipher = KeyEncryptionCipher {
+            method: CipherMethod::None,
+            ..Default::default()
+        };
+        let dec_cred = cipher
+            .decrypt_aws_credential(credential_bytes.clone())
+            .expect("Decryption should succeed");
+        assert_eq!(dec_cred, credential_str);
+    }
+
+    #[test]
+    fn test_decrypt_aws_credential_invalid_utf8() {
+        let kek_key = [0x33u8; 32];
+        let iv = [0x44u8; 12];
+        let aad = b"aws-cred-aad";
+        let invalid_utf8 = vec![0xFF, 0xFE, 0xFD]; // Invalid UTF-8 bytes
+        let enc_cred = encrypt_helper(&kek_key, &iv, aad, &invalid_utf8);
+        let cipher = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(kek_key.to_vec()),
+            init_vector: Some(iv.to_vec()),
+            auth_data: Some(aad.to_vec()),
+        };
+        let res = cipher.decrypt_aws_credential(enc_cred);
+        assert!(
+            matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description.contains("valid UTF-8"))
+        );
     }
 }

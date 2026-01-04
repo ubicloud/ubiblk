@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use aws_config::BehaviorVersion;
+use aws_config::{BehaviorVersion, Region};
 
 use crate::{Result, UbiblkError};
 
@@ -18,6 +18,7 @@ pub fn build_s3_client(
     runtime: &Arc<tokio::runtime::Runtime>,
     profile: Option<&str>,
     endpoint: Option<&str>,
+    region: Option<&str>,
     credentials: Option<aws_sdk_s3::config::Credentials>,
 ) -> Result<aws_sdk_s3::Client> {
     let config = runtime.block_on(async {
@@ -25,6 +26,10 @@ pub fn build_s3_client(
 
         if let Some(profile) = profile {
             loader = loader.profile_name(profile);
+        }
+
+        if let Some(region) = region {
+            loader = loader.region(Region::new(region.to_string()));
         }
 
         if let Some(credentials) = credentials {
@@ -67,6 +72,7 @@ mod tests {
             &runtime,
             Some("default"),
             Some("http://localhost:9000"),
+            Some("auto"),
             Some(credentials),
         )
         .expect("client should be created");

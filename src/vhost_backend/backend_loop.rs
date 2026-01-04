@@ -325,7 +325,10 @@ pub fn init_metadata(
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;
     let base_stripe_count = base_bdev.stripe_count(stripe_sector_count);
 
-    let metadata = if config.image_path.is_none() && config.remote_image.is_none() {
+    let metadata = if config.image_path.is_none()
+        && config.remote_image.is_none()
+        && config.archive_stripe_source.is_none()
+    {
         // No image source
         UbiMetadata::new(stripe_sector_count_shift, base_stripe_count, 0)
     } else {

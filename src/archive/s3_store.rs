@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use log::debug;
+
 use super::ArchiveStore;
 use crate::{Result, UbiblkError};
 
@@ -109,6 +111,7 @@ impl S3Store {
 
 impl ArchiveStore for S3Store {
     fn put_object(&mut self, name: &str, data: &[u8]) -> Result<()> {
+        debug!("Uploading object to S3: {}", name);
         Self::validate_key_name(name)?;
         let key = self.key_with_prefix(name);
 
@@ -130,6 +133,7 @@ impl ArchiveStore for S3Store {
     }
 
     fn get_object(&self, name: &str) -> Result<Vec<u8>> {
+        debug!("Fetching object from S3: {}", name);
         Self::validate_key_name(name)?;
         let key = self.key_with_prefix(name);
 

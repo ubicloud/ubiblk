@@ -126,6 +126,7 @@ fn build_store(args: &Args) -> Result<Box<dyn ArchiveStore>> {
                 args.s3_profile.as_deref(),
                 args.s3_endpoint.as_deref(),
                 None,
+                None,
             )?;
             Ok(Box::new(S3Store::new(client, bucket, prefix, runtime)?))
         }

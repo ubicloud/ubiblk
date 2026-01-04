@@ -1,21 +1,46 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use clap::Parser;
 
+use aws_config::BehaviorVersion;
+
 use ubiblk::{
-    archive::{FileSystemStore, StripeArchiver},
+    archive::{ArchiveStore, FileSystemStore, S3Store, StripeArchiver},
     block_device::UbiMetadata,
     stripe_source::StripeSourceBuilder,
     vhost_backend::*,
     KeyEncryptionCipher, Result, UbiblkError,
 };
 
+#[derive(Debug, Clone)]
+enum ArchiveTarget {
+    FileSystem(PathBuf),
+    S3 {
+        bucket: String,
+        prefix: Option<String>,
+    },
+}
+
 #[derive(Parser)]
 #[command(
     name = "archive",
     version,
     author,
-    about = "Archive stripes from a ubiblk device to a store."
+    about = "Archive stripes from a ubiblk device to a store.",
+    long_about = r#"Archive stripes from a ubiblk device to an S3-compatible bucket or local filesystem.
+
+Examples:
+  # Archive to a local folder
+  archive -f config.yaml -t /var/ubiblk/archive
+
+  # Archive to S3 with an optional prefix
+  archive -f config.yaml -t s3://my-bucket/backups
+
+  # Set up access key and secret key for R2. Use 'auto' region.
+  aws configure --profile r2
+
+  # Archive to Cloudflare R2
+  archive -f config.yaml -t s3://my-r2-bucket/ubiblk --s3-profile r2 --s3-endpoint https://<account>.r2.cloudflarestorage.com"#
 )]
 struct Args {
     /// Path to the configuration YAML file.
@@ -30,8 +55,21 @@ struct Args {
     #[arg(short = 'u', long = "unlink-kek", default_value_t = false)]
     unlink_kek: bool,
 
-    #[arg(short = 't', long = "target")]
-    target: PathBuf,
+    #[arg(
+        short = 't',
+        long = "target",
+        value_name = "TARGET",
+        help = "Archive destination: a local path or s3://bucket[/prefix]"
+    )]
+    target: String,
+
+    /// Custom S3 endpoint URL (e.g. https://<account>.r2.cloudflarestorage.com).
+    #[arg(long = "s3-endpoint")]
+    s3_endpoint: Option<String>,
+
+    /// Use a specific AWS profile when creating the S3 client.
+    #[arg(long = "s3-profile")]
+    s3_profile: Option<String>,
 
     #[arg(short = 'e', long = "encrypt", default_value_t = false)]
     encrypt: bool,
@@ -63,13 +101,13 @@ fn main() -> Result<()> {
     let stripe_source =
         StripeSourceBuilder::new(options.clone(), kek.clone(), stripe_sector_count).build()?;
 
-    let store = FileSystemStore::new(args.target.clone())?;
+    let store = build_store(&args)?;
 
     let mut archiver = StripeArchiver::new(
         stripe_source,
         disk_dev.as_ref(),
         metadata,
-        Box::new(store),
+        store,
         args.encrypt,
         kek.clone(),
     )?;
@@ -77,4 +115,69 @@ fn main() -> Result<()> {
     archiver.archive_all()?;
 
     Ok(())
+}
+
+fn build_store(args: &Args) -> Result<Box<dyn ArchiveStore>> {
+    match parse_archive_target(&args.target)? {
+        ArchiveTarget::FileSystem(path) => Ok(Box::new(FileSystemStore::new(path)?)),
+        ArchiveTarget::S3 { bucket, prefix } => {
+            let runtime = create_runtime()?;
+            let client = build_s3_client(args, runtime.clone())?;
+            Ok(Box::new(S3Store::new(client, bucket, prefix, runtime)?))
+        }
+    }
+}
+
+fn parse_archive_target(target: &str) -> Result<ArchiveTarget> {
+    if let Some(rest) = target.strip_prefix("s3://") {
+        let mut parts = rest.splitn(2, '/');
+        let bucket =
+            parts
+                .next()
+                .filter(|b| !b.is_empty())
+                .ok_or(UbiblkError::InvalidParameter {
+                    description: "S3 target must be in the form s3://<bucket>[/prefix]".to_string(),
+                })?;
+        let prefix = parts.next().map(|p| p.to_string());
+
+        Ok(ArchiveTarget::S3 {
+            bucket: bucket.to_string(),
+            prefix,
+        })
+    } else {
+        Ok(ArchiveTarget::FileSystem(PathBuf::from(target)))
+    }
+}
+
+fn create_runtime() -> Result<Arc<tokio::runtime::Runtime>> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map(Arc::new)
+        .map_err(|err| UbiblkError::ArchiveError {
+            description: format!("Failed to create Tokio runtime for S3 operations: {err}"),
+        })
+}
+
+fn build_s3_client(
+    args: &Args,
+    runtime: Arc<tokio::runtime::Runtime>,
+) -> Result<aws_sdk_s3::Client> {
+    let config = runtime.block_on(async {
+        let mut loader = aws_config::defaults(BehaviorVersion::latest());
+
+        if let Some(profile) = &args.s3_profile {
+            loader = loader.profile_name(profile);
+        }
+
+        loader.load().await
+    });
+
+    let mut builder = aws_sdk_s3::config::Builder::from(&config);
+
+    if let Some(endpoint) = &args.s3_endpoint {
+        builder = builder.endpoint_url(endpoint);
+    }
+
+    Ok(aws_sdk_s3::Client::from_conf(builder.build()))
 }

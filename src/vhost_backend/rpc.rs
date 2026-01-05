@@ -275,9 +275,20 @@ mod tests {
 
     #[test]
     fn test_non_removable_socket_path() {
-        let bad_path = PathBuf::from("/dev/zero");
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Make the would-be socket path an existing directory.
+        // This is reliably not removable via `remove_file()`.
+        let bad_path = tmp.path().join("rpc.sock");
+        std::fs::create_dir(&bad_path).unwrap();
+
         let result = start_rpc_server(&bad_path, None, vec![]);
         assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("failed to remove existing RPC socket"));
     }
 
     #[test]

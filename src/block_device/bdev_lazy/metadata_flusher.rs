@@ -251,4 +251,39 @@ mod tests {
             MetadataFlusher::new(&metadata_dev, 1024 * 1024 * 1024, shared_state);
         assert!(metadata_flusher.is_err());
     }
+
+    #[test]
+    fn test_request_serialization() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // Stripes 0-7 are in sector 1
+        for stripe_id in 0..8 {
+            metadata_flusher.set_stripe_fetched(stripe_id);
+            if stripe_id % 3 == 0 {
+                // Interleave some writes
+                metadata_flusher.set_stripe_written(stripe_id);
+            }
+        }
+
+        // add some duplicate requests
+        metadata_flusher.set_stripe_fetched(2);
+        metadata_flusher.set_stripe_written(3);
+
+        wait_for_completion(&mut metadata_flusher);
+
+        for stripe_id in 0..8 {
+            assert!(shared_state.stripe_fetched(stripe_id));
+            if stripe_id % 3 == 0 {
+                assert!(shared_state.stripe_written(stripe_id));
+            } else {
+                assert!(!shared_state.stripe_written(stripe_id));
+            }
+        }
+    }
 }

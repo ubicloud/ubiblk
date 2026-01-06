@@ -39,7 +39,7 @@ impl IoTracker {
     pub fn add_read(&mut self, slot: usize, offset_sectors: u64, length_sectors: u64) {
         if slot >= self.ios.len() {
             info!(
-                "Large IO (read): slot {}, offset {}, length {}",
+                "Large IO (read): slot {}, offset {} sectors, length {} sectors",
                 slot, offset_sectors, length_sectors
             );
             return;
@@ -57,7 +57,7 @@ impl IoTracker {
     pub fn add_write(&mut self, slot: usize, offset_sectors: u64, length_sectors: u64) {
         if slot >= self.ios.len() {
             info!(
-                "Large IO (write): slot {}, offset {}, length {}",
+                "Large IO (write): slot {}, offset {} sectors, length {} sectors",
                 slot, offset_sectors, length_sectors
             );
             return;

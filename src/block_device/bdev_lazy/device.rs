@@ -13,7 +13,7 @@ use std::{
     sync::mpsc::Sender,
 };
 
-use log::error;
+use log::{error, info};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestType {
@@ -231,6 +231,11 @@ impl IoChannel for LazyIoChannel {
                 image_channel.add_read(sector_offset, sector_count, buf, id);
                 return;
             }
+        } else {
+            info!(
+                "cross_stripe_read: fetching stripes [{}..={}]: offset {} sectors, length {} sectors",
+                request.stripe_id_first, request.stripe_id_last, sector_offset, sector_count
+            );
         }
 
         if let Err(e) = self.start_stripe_fetches(&request) {

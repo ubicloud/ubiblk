@@ -26,7 +26,6 @@ use crate::{
 };
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
-type SourceDevices = (Box<dyn BlockDevice>, Option<Box<dyn BlockDevice>>);
 
 struct BgWorkerConfig {
     target_dev: Box<dyn BlockDevice>,
@@ -127,7 +126,12 @@ impl BackendEnv {
         let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
         let shared_state = SharedMetadataState::new(&metadata);
 
-        let (_, maybe_image_bdev) = Self::create_source_devices(options)?;
+        let maybe_image_bdev = if options.copy_on_read {
+            None
+        } else {
+            Some(build_source_device(options)?)
+        };
+
         let target_clone = base_device.clone();
         let target_sector_count = target_clone.sector_count();
         let (bgworker_tx, bgworker_rx) = channel();
@@ -164,31 +168,6 @@ impl BackendEnv {
             channel: Some(bgworker_tx),
             status_reporter: Some(status_reporter),
         })
-    }
-
-    fn create_source_devices(options: &Options) -> Result<SourceDevices> {
-        let source: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
-            let readonly = true;
-            create_io_engine_device(
-                options.io_engine.clone(),
-                PathBuf::from(path),
-                64,
-                readonly,
-                true,
-                options.write_through,
-            )?
-        } else {
-            block_device::NullBlockDevice::new()
-        };
-
-        let clone_for_worker = source.clone();
-        let maybe_image = if options.copy_on_read {
-            None
-        } else {
-            Some(source)
-        };
-
-        Ok((clone_for_worker, maybe_image))
     }
 
     fn run_bgworker_thread(&mut self) -> Result<()> {
@@ -446,6 +425,23 @@ fn create_io_engine_device(
             Ok(dev as Box<dyn BlockDevice>)
         }
     }
+}
+
+pub fn build_source_device(options: &Options) -> Result<Box<dyn BlockDevice>> {
+    let source: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
+        let readonly = true;
+        create_io_engine_device(
+            options.io_engine.clone(),
+            PathBuf::from(path),
+            64,
+            readonly,
+            true,
+            options.write_through,
+        )?
+    } else {
+        block_device::NullBlockDevice::new()
+    };
+    Ok(source)
 }
 
 pub fn build_block_device(

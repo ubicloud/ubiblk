@@ -1,5 +1,8 @@
 use crate::{
-    block_device::{BlockDevice, IoChannel, SharedMetadataState, UbiMetadata},
+    block_device::{
+        BlockDevice, IoChannel, SharedMetadataState, UbiMetadata, METADATA_STRIPE_FETCHED_BITMASK,
+        METADATA_STRIPE_WRITTEN_BITMASK,
+    },
     utils::AlignedBufferPool,
     vhost_backend::SECTOR_SIZE,
     Result, UbiblkError,
@@ -152,14 +155,18 @@ impl MetadataFlusher {
             }
             self.queued_requests.pop_front();
 
-            let (buf, index) = self.buffer_pool.get_buffer().unwrap();
-            self.metadata.stripe_headers[req.stripe_id] |=
-                if req.kind == MetadataFlusherRequestKind::SetFetched {
-                    0b01
-                } else {
-                    0b10
-                };
+            let requested_bitmask = match req.kind {
+                MetadataFlusherRequestKind::SetFetched => METADATA_STRIPE_FETCHED_BITMASK,
+                MetadataFlusherRequestKind::SetWritten => METADATA_STRIPE_WRITTEN_BITMASK,
+            };
 
+            if self.metadata.stripe_headers[req.stripe_id] & requested_bitmask != 0 {
+                // Already set, skip
+                continue;
+            }
+
+            let (buf, index) = self.buffer_pool.get_buffer().unwrap();
+            self.metadata.stripe_headers[req.stripe_id] |= requested_bitmask;
             buf.borrow_mut().as_mut_slice().copy_from_slice(
                 &self.metadata.stripe_headers[group * SECTOR_SIZE..(group + 1) * SECTOR_SIZE],
             );
@@ -285,5 +292,38 @@ mod tests {
                 assert!(!shared_state.stripe_written(stripe_id));
             }
         }
+    }
+
+    #[test]
+    fn test_metadata_flusher_coalesces_duplicate_requests() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+        let (start_writes, start_flushes) = {
+            let metrics = metadata_dev.metrics.read().unwrap();
+            (metrics.writes, metrics.flushes)
+        };
+
+        metadata_flusher.set_stripe_written(3);
+        metadata_flusher.set_stripe_written(3);
+        metadata_flusher.set_stripe_written(3);
+        metadata_flusher.set_stripe_fetched(3);
+        metadata_flusher.set_stripe_fetched(3);
+
+        assert!(!shared_state.stripe_written(3));
+        assert!(!shared_state.stripe_fetched(3));
+
+        wait_for_completion(&mut metadata_flusher);
+
+        assert!(shared_state.stripe_written(3));
+        assert!(shared_state.stripe_fetched(3));
+
+        let metrics = metadata_dev.metrics.read().unwrap();
+        assert_eq!(metrics.writes - start_writes, 2);
+        assert_eq!(metrics.flushes - start_flushes, 2);
     }
 }

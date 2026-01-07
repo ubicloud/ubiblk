@@ -6,6 +6,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+env:
+  CARGO_LLVM_COV_VERSION: "0.6.23"
+  CARGO_AUDIT_VERSION: "0.22.0"
+
 jobs:
   build:
     runs-on: ${{ matrix.runner }}
@@ -35,7 +39,7 @@ jobs:
       - name: Cache Rust (registry, git deps, target/)
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ runner.os }}-${{ matrix.arch }}-stable
+          key: ${{ runner.os }}-${{ matrix.arch }}-stable-llvm-cov-${{ env.CARGO_LLVM_COV_VERSION }}
           cache-on-failure: true
 
       - name: Clone and build isa-l_crypto
@@ -55,7 +59,7 @@ jobs:
 
       - name: Install cargo-llvm-cov
         if: ${{ matrix.arch == 'x86_64' }}
-        run: cargo install cargo-llvm-cov --locked
+        run: cargo install cargo-llvm-cov --version ${{ env.CARGO_LLVM_COV_VERSION }} --locked
 
       - name: Run tests with coverage
         if: ${{ matrix.arch == 'x86_64' }}
@@ -81,10 +85,11 @@ jobs:
       - name: Cache Rust (registry, git deps, target/)
         uses: Swatinem/rust-cache@v2
         with:
+          key: audit-${{ env.CARGO_AUDIT_VERSION }}
           cache-on-failure: true
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: cargo install cargo-audit --version ${{ env.CARGO_AUDIT_VERSION }} --locked
 
       - name: Run cargo audit
         run: cargo audit --deny warnings

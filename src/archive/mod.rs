@@ -1,5 +1,5 @@
 use crate::{
-    crypt::{decode_xts_keys, encode_xts_keys},
+    crypt::{decode_optional_key_pair, encode_optional_key_pair},
     Result,
 };
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,8 @@ pub struct ArchiveMetadata {
     /// Optional encrypted keys used for encrypting the archived data.
     #[serde(
         default,
-        deserialize_with = "decode_xts_keys",
-        serialize_with = "encode_xts_keys"
+        deserialize_with = "decode_optional_key_pair",
+        serialize_with = "encode_optional_key_pair"
     )]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
 }

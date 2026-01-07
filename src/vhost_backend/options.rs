@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::crypt::{decode_psk_key, decode_xts_keys};
+use crate::crypt::{decode_optional_key, decode_optional_key_pair};
 use serde::{Deserialize, Deserializer, Serialize};
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 
@@ -97,13 +97,13 @@ pub struct Options {
     #[serde(default = "default_autofetch")]
     pub autofetch: bool,
 
-    #[serde(default, deserialize_with = "decode_xts_keys")]
+    #[serde(default, deserialize_with = "decode_optional_key_pair")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
 
     #[serde(default)]
     pub psk_identity: Option<String>,
 
-    #[serde(default, deserialize_with = "decode_psk_key")]
+    #[serde(default, deserialize_with = "decode_optional_key")]
     pub psk_secret: Option<Vec<u8>>,
 
     #[serde(

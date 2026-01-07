@@ -5,4 +5,6 @@ mod block;
 pub use block::XtsBlockCipher;
 
 mod key_serialization;
-pub use key_serialization::{decode_psk_key, decode_xts_keys, encode_xts_keys, OptKey, OptKeyPair};
+pub use key_serialization::{
+    decode_optional_key, decode_optional_key_pair, encode_optional_key_pair,
+};

@@ -17,27 +17,15 @@ mod tests {
     fn default_options(path: String) -> Options {
         Options {
             path,
-            image_path: None,
-            remote_image: None,
-            metadata_path: None,
-            io_debug_path: None,
-            rpc_socket_path: None,
             socket: "sock".to_string(),
-            cpus: None,
             num_queues: 1,
             queue_size: 32,
             seg_size_max: 65536,
             seg_count_max: 4,
-            poll_queue_timeout_us: 1000,
-            copy_on_read: false,
-            track_written: false,
             write_through: true,
-            autofetch: false,
-            encryption_key: None,
-            psk_identity: None,
-            psk_secret: None,
             device_id: "ubiblk".to_string(),
             io_engine: crate::vhost_backend::IoEngine::IoUring,
+            ..Default::default()
         }
     }
 

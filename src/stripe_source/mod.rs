@@ -10,6 +10,8 @@ pub trait StripeSource {
     fn busy(&self) -> bool;
     /// Get the sector count of the stripe source.
     fn sector_count(&self) -> u64;
+    /// Does the stripe source have the given stripe?
+    fn has_stripe(&self, stripe_id: usize) -> bool;
 }
 
 mod archive;

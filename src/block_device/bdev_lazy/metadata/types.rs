@@ -1,4 +1,4 @@
-use crate::vhost_backend::SECTOR_SIZE;
+use crate::{stripe_source::StripeSource, vhost_backend::SECTOR_SIZE};
 
 pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
@@ -85,24 +85,17 @@ impl UbiMetadata {
         })
     }
 
-    pub fn new_from_remote(
+    pub fn new_from_stripe_source(
         stripe_sector_count_shift: u8,
         base_stripe_count: usize,
-        remote_metadata: &UbiMetadata,
+        stripe_source: &dyn StripeSource,
     ) -> Box<Self> {
         let headers = (0..base_stripe_count)
             .map(|i| {
-                // The number of stripe headers in remote_metadata represents the stripe count
-                // of the remote image. Each header corresponds to one stripe in the remote device.
-                if i < remote_metadata.stripe_headers.len() {
-                    // Check if stripe is written on remote
-                    if remote_metadata.stripe_headers[i] & METADATA_STRIPE_WRITTEN_BITMASK != 0 {
-                        0 // Has source (written on remote)
-                    } else {
-                        METADATA_STRIPE_NO_SOURCE_BITMASK // No source (unwritten on remote)
-                    }
+                if stripe_source.has_stripe(i) {
+                    0
                 } else {
-                    METADATA_STRIPE_NO_SOURCE_BITMASK // Beyond remote image size
+                    METADATA_STRIPE_NO_SOURCE_BITMASK
                 }
             })
             .collect::<Vec<_>>();
@@ -223,61 +216,50 @@ mod tests {
     }
 
     #[test]
-    fn new_from_remote_marks_unwritten_stripes_as_no_source() {
-        // Create a remote metadata with some stripes written
-        let mut remote_metadata = UbiMetadata::new(9, 8, 8);
-        // Mark stripes 0, 2, 4 as written
-        remote_metadata.set_stripe_header(0, METADATA_STRIPE_WRITTEN_BITMASK);
-        remote_metadata.set_stripe_header(2, METADATA_STRIPE_WRITTEN_BITMASK);
-        remote_metadata.set_stripe_header(4, METADATA_STRIPE_WRITTEN_BITMASK);
+    fn new_from_stripe_source_marks_stripes_correctly() {
+        struct TestStripeSource {
+            available_stripes: Vec<usize>,
+        }
 
-        // Create new metadata from remote with 10 total stripes
-        let metadata = UbiMetadata::new_from_remote(9, 10, &remote_metadata);
+        impl StripeSource for TestStripeSource {
+            fn request(
+                &mut self,
+                _stripe_id: usize,
+                _buffer: crate::block_device::SharedBuffer,
+            ) -> crate::Result<()> {
+                unimplemented!()
+            }
 
-        // Written stripes should have source (header = 0)
-        assert_eq!(
-            metadata.stripe_header(0),
-            0,
-            "Written stripe 0 should have source"
-        );
-        assert_eq!(
-            metadata.stripe_header(2),
-            0,
-            "Written stripe 2 should have source"
-        );
-        assert_eq!(
-            metadata.stripe_header(4),
-            0,
-            "Written stripe 4 should have source"
-        );
+            fn poll(&mut self) -> Vec<(usize, bool)> {
+                unimplemented!()
+            }
 
-        // Unwritten stripes should be marked as no source (bit 2 set)
-        assert_eq!(
-            metadata.stripe_header(1),
-            METADATA_STRIPE_NO_SOURCE_BITMASK,
-            "Unwritten stripe 1 should have no source"
-        );
-        assert_eq!(
-            metadata.stripe_header(3),
-            METADATA_STRIPE_NO_SOURCE_BITMASK,
-            "Unwritten stripe 3 should have no source"
-        );
-        assert_eq!(
-            metadata.stripe_header(5),
-            METADATA_STRIPE_NO_SOURCE_BITMASK,
-            "Unwritten stripe 5 should have no source"
-        );
+            fn busy(&self) -> bool {
+                unimplemented!()
+            }
 
-        // Stripes beyond remote image should be marked as no source
-        assert_eq!(
-            metadata.stripe_header(8),
-            METADATA_STRIPE_NO_SOURCE_BITMASK,
-            "Stripe 8 beyond remote should have no source"
-        );
-        assert_eq!(
-            metadata.stripe_header(9),
-            METADATA_STRIPE_NO_SOURCE_BITMASK,
-            "Stripe 9 beyond remote should have no source"
-        );
+            fn sector_count(&self) -> u64 {
+                unimplemented!()
+            }
+
+            fn has_stripe(&self, stripe_id: usize) -> bool {
+                self.available_stripes.contains(&stripe_id)
+            }
+        }
+
+        let stripe_source = TestStripeSource {
+            available_stripes: vec![0, 2, 3, 6, 8],
+        };
+
+        let metadata = UbiMetadata::new_from_stripe_source(9, 10, &stripe_source);
+
+        for i in 0..10 {
+            let expected = if stripe_source.has_stripe(i) {
+                0
+            } else {
+                METADATA_STRIPE_NO_SOURCE_BITMASK
+            };
+            assert_eq!(metadata.stripe_header(i), expected);
+        }
     }
 }

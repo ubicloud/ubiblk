@@ -171,6 +171,10 @@ impl StripeSource for ArchiveStripeSource {
             (self.max_stripe_id + 1) as u64 * self.stripe_sector_count
         }
     }
+
+    fn has_stripe(&self, stripe_id: usize) -> bool {
+        self.stripe_object_names.contains_key(&stripe_id)
+    }
 }
 
 #[cfg(test)]

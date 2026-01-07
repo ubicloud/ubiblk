@@ -1,7 +1,6 @@
 use crate::{
-    block_device::NullBlockDevice,
     stripe_server::{connect_to_stripe_server, PskCredentials, StripeServerClient},
-    vhost_backend::{build_block_device, Options},
+    vhost_backend::{build_source_device, Options},
     KeyEncryptionCipher, Result,
 };
 
@@ -30,11 +29,7 @@ impl StripeSourceBuilder {
             return Ok(Box::new(stripe_source));
         }
 
-        let block_device = if let Some(image_path) = &self.options.image_path {
-            build_block_device(image_path, &self.options, self.kek.clone(), true)?
-        } else {
-            NullBlockDevice::new()
-        };
+        let block_device = build_source_device(&self.options)?;
 
         let stripe_source = BlockDeviceStripeSource::new(block_device, self.stripe_sector_count)?;
         Ok(Box::new(stripe_source))

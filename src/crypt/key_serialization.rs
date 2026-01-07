@@ -1,10 +1,10 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Deserializer, Serializer};
 
-pub type OptKeyPair = Option<(Vec<u8>, Vec<u8>)>;
-pub type OptKey = Option<Vec<u8>>;
+type OptKeyPair = Option<(Vec<u8>, Vec<u8>)>;
+type OptKey = Option<Vec<u8>>;
 
-pub fn decode_xts_keys<'de, D>(deserializer: D) -> Result<OptKeyPair, D::Error>
+pub fn decode_optional_key_pair<'de, D>(deserializer: D) -> Result<OptKeyPair, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -17,7 +17,7 @@ where
         .transpose()
 }
 
-pub fn encode_xts_keys<S>(keys: &OptKeyPair, serializer: S) -> Result<S::Ok, S::Error>
+pub fn encode_optional_key_pair<S>(keys: &OptKeyPair, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
@@ -31,7 +31,7 @@ where
     }
 }
 
-pub fn decode_psk_key<'de, D>(deserializer: D) -> std::result::Result<OptKey, D::Error>
+pub fn decode_optional_key<'de, D>(deserializer: D) -> std::result::Result<OptKey, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -46,42 +46,42 @@ mod tests {
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-    struct WrapXts {
+    struct WrapOptionalKeyPair {
         #[serde(
             default,
-            deserialize_with = "decode_xts_keys",
-            serialize_with = "encode_xts_keys"
+            deserialize_with = "decode_optional_key_pair",
+            serialize_with = "encode_optional_key_pair"
         )]
-        xts: OptKeyPair,
+        keys: OptKeyPair,
     }
 
     #[derive(Debug, Deserialize, PartialEq, Eq)]
-    struct WrapPsk {
-        #[serde(default, deserialize_with = "decode_psk_key")]
-        psk: OptKey,
+    struct WrapOptionalKey {
+        #[serde(default, deserialize_with = "decode_optional_key")]
+        key: OptKey,
     }
 
     #[test]
-    fn xts_none_roundtrips_as_null() {
-        let w = WrapXts { xts: None };
+    fn test_optional_key_pair_none_roundtrips_as_null() {
+        let w = WrapOptionalKeyPair { keys: None };
         let yaml = serde_yaml::to_string(&w).unwrap();
-        assert_eq!(yaml, "xts: null\n");
+        assert_eq!(yaml, "keys: null\n");
 
-        let back: WrapXts = serde_yaml::from_str(&yaml).unwrap();
+        let back: WrapOptionalKeyPair = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(back, w);
     }
 
     #[test]
-    fn xts_some_roundtrips() {
-        let w = WrapXts {
-            xts: Some((vec![0, 1, 2, 3, 4, 5], vec![250, 251, 252, 253])),
+    fn test_optional_key_pair_some_roundtrips() {
+        let w = WrapOptionalKeyPair {
+            keys: Some((vec![0, 1, 2, 3, 4, 5], vec![250, 251, 252, 253])),
         };
 
         let yaml = serde_yaml::to_string(&w).unwrap();
 
         // Ensure it serializes to base64 strings.
         let v: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        let arr = v.get("xts").unwrap().as_sequence().unwrap();
+        let arr = v.get("keys").unwrap().as_sequence().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(
             arr[0].as_str().unwrap(),
@@ -93,29 +93,32 @@ mod tests {
         );
 
         // And round-trip.
-        let back: WrapXts = serde_yaml::from_str(&yaml).unwrap();
+        let back: WrapOptionalKeyPair = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(back, w);
     }
 
     #[test]
-    fn xts_missing_field_defaults_to_none() {
-        let back: WrapXts = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(back.xts, None);
+    fn test_optional_key_pair_missing_field_defaults_to_none() {
+        let back: WrapOptionalKeyPair = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(back.keys, None);
     }
 
     #[test]
-    fn xts_invalid_base64_errors() {
-        let err1 = serde_yaml::from_str::<WrapXts>(r#"xts: ["%%%","AQID"]"#).unwrap_err();
+    fn test_optional_key_pair_invalid_base64_errors() {
+        let err1 =
+            serde_yaml::from_str::<WrapOptionalKeyPair>(r#"keys: ["%%%","AQID"]"#).unwrap_err();
         assert_eq!(err1.to_string(), "Invalid symbol 37, offset 0.");
 
-        let err2 = serde_yaml::from_str::<WrapXts>(r#"xts: ["AQID","%%%"]"#).unwrap_err();
+        let err2 =
+            serde_yaml::from_str::<WrapOptionalKeyPair>(r#"keys: ["AQID","%%%"]"#).unwrap_err();
         assert_eq!(err2.to_string(), "Invalid symbol 37, offset 0.");
     }
 
     #[test]
-    fn xts_wrong_shape_errors() {
+    fn test_optional_key_pair_wrong_shape_errors() {
         // object instead of array/tuple
-        let result = serde_json::from_str::<WrapXts>(r#"{"xts":{"a":"AA==","b":"AA=="}}"#);
+        let result =
+            serde_json::from_str::<WrapOptionalKeyPair>(r#"{"keys":{"a":"AA==","b":"AA=="}}"#);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -123,14 +126,14 @@ mod tests {
             .contains("invalid type: map"));
 
         // wrong arity
-        let result = serde_yaml::from_str::<WrapXts>(r#"xts: ["AA=="]"#);
+        let result = serde_yaml::from_str::<WrapOptionalKeyPair>(r#"keys: ["AA=="]"#);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("invalid length 1, expected a tuple of size 2"));
 
-        let result = serde_yaml::from_str::<WrapXts>(r#"xts: ["AA==","AA==","AA=="]"#);
+        let result = serde_yaml::from_str::<WrapOptionalKeyPair>(r#"keys: ["AA==","AA==","AA=="]"#);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -139,31 +142,31 @@ mod tests {
     }
 
     #[test]
-    fn psk_none_when_null_or_missing() {
-        let a: WrapPsk = serde_json::from_str(r#"{"psk":null}"#).unwrap();
-        assert_eq!(a.psk, None);
+    fn test_optional_key_none_when_null_or_missing() {
+        let a: WrapOptionalKey = serde_json::from_str(r#"{"key":null}"#).unwrap();
+        assert_eq!(a.key, None);
 
-        let b: WrapPsk = serde_json::from_str(r#"{}"#).unwrap();
-        assert_eq!(b.psk, None);
+        let b: WrapOptionalKey = serde_json::from_str(r#"{}"#).unwrap();
+        assert_eq!(b.key, None);
     }
 
     #[test]
-    fn psk_decodes_base64() {
-        let yaml = r#"psk: "AQIDBAU=""#;
-        let w: WrapPsk = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(w.psk, Some(vec![1, 2, 3, 4, 5]));
+    fn test_optional_key_decodes_base64() {
+        let yaml = r#"key: "AQIDBAU=""#;
+        let w: WrapOptionalKey = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(w.key, Some(vec![1, 2, 3, 4, 5]));
     }
 
     #[test]
-    fn psk_invalid_base64_errors() {
-        let err = serde_yaml::from_str::<WrapPsk>(r#"psk: "%%%""#).unwrap_err();
+    fn test_optional_key_invalid_base64_errors() {
+        let err = serde_yaml::from_str::<WrapOptionalKey>(r#"key: "%%%""#).unwrap_err();
         assert_eq!(err.to_string(), "Invalid symbol 37, offset 0.");
     }
 
     #[test]
-    fn psk_wrong_type_errors() {
+    fn test_optional_key_wrong_type_errors() {
         // number instead of string/null
-        let err = serde_json::from_str::<WrapPsk>(r#"{"psk":123}"#).unwrap_err();
+        let err = serde_json::from_str::<WrapOptionalKey>(r#"{"key":123}"#).unwrap_err();
         assert!(err.to_string().contains("invalid type: integer"));
     }
 }

@@ -57,6 +57,10 @@ mod tests {
         fn sector_count(&self) -> u64 {
             0
         }
+
+        fn has_stripe(&self, _stripe_id: usize) -> bool {
+            true
+        }
     }
 
     #[test]

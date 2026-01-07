@@ -325,70 +325,17 @@ pub fn init_metadata(
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;
     let base_stripe_count = base_bdev.stripe_count(stripe_sector_count);
 
-    let metadata = if let Some(ref remote_image) = config.remote_image {
-        // For remote images, connect to server and get its metadata
-        let psk =
-            crate::stripe_server::PskCredentials::from_options(config, &kek).map_err(|e| {
-                UbiblkError::InvalidParameter {
-                    description: format!(
-                        "Failed to create PSK credentials for remote image {}: {}",
-                        remote_image, e
-                    ),
-                }
-            })?;
-        let client = crate::stripe_server::connect_to_stripe_server(remote_image, psk.as_ref())
-            .map_err(|e| UbiblkError::InvalidParameter {
-                description: format!(
-                    "Failed to connect to remote stripe server at {} during metadata initialization: {}",
-                    remote_image, e
-                ),
-            })?;
-        let remote_metadata =
-            client
-                .metadata
-                .as_ref()
-                .ok_or_else(|| UbiblkError::MetadataError {
-                    description: format!(
-                        "Failed to fetch metadata from remote server at {}",
-                        remote_image
-                    ),
-                })?;
-
-        // Verify stripe sizes match
-        if remote_metadata.stripe_sector_count_shift != stripe_sector_count_shift {
-            return Err(UbiblkError::InvalidParameter {
-                description: format!(
-                    "Remote stripe sector count shift ({}) does not match local ({})",
-                    remote_metadata.stripe_sector_count_shift, stripe_sector_count_shift
-                ),
-            });
-        }
-
-        UbiMetadata::new_from_remote(
-            stripe_sector_count_shift,
-            base_stripe_count,
-            remote_metadata,
-        )
-    } else if let Some(ref image_path) = config.image_path {
-        // For local images, calculate stripe count from file size
-        let readonly = true;
-        let image_bdev: Box<dyn BlockDevice> = create_io_engine_device(
-            config.io_engine.clone(),
-            PathBuf::from(image_path),
-            64,
-            readonly,
-            true,
-            config.write_through,
-        )?;
-        let image_stripe_count = image_bdev.stripe_count(stripe_sector_count);
-        UbiMetadata::new(
-            stripe_sector_count_shift,
-            base_stripe_count,
-            image_stripe_count,
-        )
-    } else {
+    let metadata = if config.image_path.is_none() && config.remote_image.is_none() {
         // No image source
         UbiMetadata::new(stripe_sector_count_shift, base_stripe_count, 0)
+    } else {
+        let stripe_source =
+            StripeSourceBuilder::new(config.clone(), kek.clone(), stripe_sector_count).build()?;
+        UbiMetadata::new_from_stripe_source(
+            stripe_sector_count_shift,
+            base_stripe_count,
+            stripe_source.as_ref(),
+        )
     };
 
     let metadata_bdev = build_block_device(metadata_path, config, kek.clone(), false)?;

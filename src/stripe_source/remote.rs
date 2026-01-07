@@ -2,7 +2,13 @@ use std::collections::VecDeque;
 
 use log::{error, warn};
 
-use crate::{block_device::SharedBuffer, stripe_server::RemoteStripeProvider, Result, UbiblkError};
+use crate::{
+    block_device::{
+        SharedBuffer, METADATA_STRIPE_NO_SOURCE_BITMASK, METADATA_STRIPE_WRITTEN_BITMASK,
+    },
+    stripe_server::RemoteStripeProvider,
+    Result, UbiblkError,
+};
 
 use super::StripeSource;
 
@@ -10,6 +16,7 @@ pub struct RemoteStripeSource {
     client: Box<dyn RemoteStripeProvider>,
     source_sector_count: u64,
     pending_requests: VecDeque<(usize, SharedBuffer)>,
+    remote_headers: Vec<u8>,
 }
 
 impl RemoteStripeSource {
@@ -19,6 +26,7 @@ impl RemoteStripeSource {
             .ok_or_else(|| UbiblkError::MetadataError {
                 description: "metadata not fetched from remote server".to_string(),
             })?;
+        let remote_headers = metadata.stripe_headers.clone();
 
         let remote_stripe_sector_count = metadata.stripe_sector_count();
         if remote_stripe_sector_count != stripe_sector_count {
@@ -40,6 +48,7 @@ impl RemoteStripeSource {
             client,
             source_sector_count,
             pending_requests: VecDeque::new(),
+            remote_headers,
         })
     }
 }
@@ -101,6 +110,17 @@ impl StripeSource for RemoteStripeSource {
 
     fn sector_count(&self) -> u64 {
         self.source_sector_count
+    }
+
+    fn has_stripe(&self, stripe_id: usize) -> bool {
+        if stripe_id >= self.remote_headers.len() {
+            return false;
+        }
+        let written_on_remote =
+            self.remote_headers[stripe_id] & METADATA_STRIPE_WRITTEN_BITMASK != 0;
+        let exists_on_remote_s_base_image =
+            self.remote_headers[stripe_id] & METADATA_STRIPE_NO_SOURCE_BITMASK == 0;
+        written_on_remote || exists_on_remote_s_base_image
     }
 }
 

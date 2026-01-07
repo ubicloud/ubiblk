@@ -53,4 +53,9 @@ impl StripeSource for BlockDeviceStripeSource {
     fn sector_count(&self) -> u64 {
         self.source_sector_count
     }
+
+    fn has_stripe(&self, stripe_id: usize) -> bool {
+        let stripe_sector_offset = stripe_id as u64 * self.stripe_sector_count;
+        stripe_sector_offset < self.source_sector_count
+    }
 }

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::crypt::{decode_key, decode_optional_key, decode_optional_key_pair};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -60,10 +60,10 @@ where
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct Options {
     pub path: String,
+    #[deprecated(note = "use stripe_source with source: raw and path field instead")]
     pub image_path: Option<String>,
-    pub remote_image: Option<String>,
     #[serde(default)]
-    pub archive_stripe_source: Option<ArchiveStripeSourceConfig>,
+    pub stripe_source: Option<StripeSourceConfig>,
     pub metadata_path: Option<String>,
     pub io_debug_path: Option<String>,
     pub rpc_socket_path: Option<String>,
@@ -102,12 +102,6 @@ pub struct Options {
     #[serde(default, deserialize_with = "decode_optional_key_pair")]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
 
-    #[serde(default)]
-    pub psk_identity: Option<String>,
-
-    #[serde(default, deserialize_with = "decode_optional_key")]
-    pub psk_secret: Option<Vec<u8>>,
-
     #[serde(
         default = "default_device_id",
         deserialize_with = "deserialize_device_id"
@@ -119,29 +113,50 @@ pub struct Options {
 }
 
 impl Options {
+    #[allow(deprecated)]
     fn validate(&self) -> crate::Result<()> {
-        let stripe_sources = [
-            self.image_path.is_some(),
-            self.remote_image.is_some(),
-            self.archive_stripe_source.is_some(),
-        ];
-
-        if stripe_sources.iter().filter(|b| **b).count() > 1 {
+        if self.image_path.is_some() && self.stripe_source.is_some() {
             return Err(crate::UbiblkError::InvalidParameter {
                 description: "Only one stripe source may be specified".to_string(),
             });
         }
 
-        if self.remote_image.is_some() && !self.copy_on_read {
-            return Err(crate::UbiblkError::InvalidParameter {
-                description: "copy_on_read must be enabled when using remote_image stripe source."
-                    .to_string(),
-            });
+        if let Some(stripe_source) = &self.stripe_source {
+            match stripe_source {
+                StripeSourceConfig::Remote {
+                    address: _,
+                    psk_identity,
+                    psk_secret,
+                } => {
+                    if !self.copy_on_read {
+                        return Err(crate::UbiblkError::InvalidParameter {
+                            description:
+                                "copy_on_read must be enabled when using remote stripe source."
+                                    .to_string(),
+                        });
+                    }
+                    if psk_identity.is_some() ^ psk_secret.is_some() {
+                        return Err(crate::UbiblkError::InvalidParameter {
+                            description:
+                                "Both psk_identity and psk_secret must be specified together."
+                                    .to_string(),
+                        });
+                    }
+                }
+                StripeSourceConfig::Archive { .. } if !self.copy_on_read => {
+                    return Err(crate::UbiblkError::InvalidParameter {
+                        description:
+                            "copy_on_read must be enabled when using archive stripe source."
+                                .to_string(),
+                    });
+                }
+                _ => {}
+            }
         }
 
-        if self.archive_stripe_source.is_some() && !self.copy_on_read {
+        if self.resolved_stripe_source().is_some() && self.metadata_path.is_none() {
             return Err(crate::UbiblkError::InvalidParameter {
-                description: "copy_on_read must be enabled when using archive_stripe_source."
+                description: "metadata_path must be specified when using a stripe source."
                     .to_string(),
             });
         }
@@ -166,10 +181,28 @@ impl Options {
         Self::load_from_str(&contents)
     }
 
+    #[allow(deprecated)]
     pub fn has_stripe_source(&self) -> bool {
-        self.image_path.is_some()
-            || self.remote_image.is_some()
-            || self.archive_stripe_source.is_some()
+        self.stripe_source.is_some() || self.image_path.is_some()
+    }
+
+    #[allow(deprecated)]
+    pub fn resolved_stripe_source(&self) -> Option<StripeSourceConfig> {
+        self.stripe_source.clone().or_else(|| {
+            self.image_path
+                .as_ref()
+                .map(|path| StripeSourceConfig::Raw {
+                    path: PathBuf::from(path),
+                })
+        })
+    }
+
+    #[allow(deprecated)]
+    pub fn raw_image_path(&self) -> Option<PathBuf> {
+        match self.stripe_source.as_ref() {
+            Some(StripeSourceConfig::Raw { path }) => Some(path.clone()),
+            _ => self.image_path.as_ref().map(PathBuf::from),
+        }
     }
 }
 
@@ -180,6 +213,28 @@ pub struct AwsCredentials {
     pub access_key_id: Vec<u8>,
     #[serde(deserialize_with = "decode_key")]
     pub secret_access_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case", tag = "source")]
+pub enum StripeSourceConfig {
+    /// Use a raw image file as the stripe source.
+    Raw { path: PathBuf },
+
+    /// Use a remote stripe server (identified by address or URL).
+    Remote {
+        address: String,
+        #[serde(default)]
+        psk_identity: Option<String>,
+        #[serde(default, deserialize_with = "decode_optional_key")]
+        psk_secret: Option<Vec<u8>>,
+    },
+
+    /// Use an archive store (e.g. directory or S3 bucket) as the stripe source.
+    Archive {
+        #[serde(flatten)]
+        config: ArchiveStripeSourceConfig,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -253,7 +308,7 @@ mod tests {
     #[test]
     fn test_decode_encryption_keys() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         encryption_key:
           - "aISq7jbeNWO8U+VHOb09K4K5Sj1DsMGLf289oO4vOG9SI1WpGdUM7WmuWQBtGhky"
@@ -282,7 +337,7 @@ mod tests {
     #[test]
     fn test_missing_encryption_key() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         "#;
         let options = Options::load_from_str(yaml).unwrap();
@@ -292,25 +347,81 @@ mod tests {
     #[test]
     fn test_psk_fields() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
-        psk_identity: client1
-        psk_secret: "MDEyMzQ1Njc4OUFCQ0RFRg=="
+        metadata_path: "/path/to/metadata"
+        copy_on_read: true
+        stripe_source:
+          source: remote
+          address: "1.2.3.4:4567"
+          psk_identity: client1
+          psk_secret: "MDEyMzQ1Njc4OUFCQ0RFRg=="
         "#;
 
         let options = Options::load_from_str(yaml).unwrap();
+        assert!(matches!(
+            options.resolved_stripe_source(),
+            Some(StripeSourceConfig::Remote { .. })
+        ));
+        assert_eq!(options.raw_image_path(), None);
 
-        assert_eq!(options.psk_identity.as_deref(), Some("client1"));
-        assert_eq!(
-            options.psk_secret.as_deref(),
-            Some(b"0123456789ABCDEF".as_ref())
-        );
+        let stripe_source = options.stripe_source.expect("stripe_source to be set");
+        match stripe_source {
+            StripeSourceConfig::Remote {
+                psk_identity,
+                psk_secret,
+                ..
+            } => {
+                assert_eq!(psk_identity.as_deref(), Some("client1"));
+                assert_eq!(psk_secret.as_deref(), Some(b"0123456789ABCDEF".as_ref()));
+            }
+            other => panic!("Unexpected stripe source: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_psk_fields_missing_pair() {
+        let yaml_secret_only = r#"
+        path: "/path/to/disk"
+        socket: "/path/to/socket"
+        copy_on_read: true
+        metadata_path: "/path/to/metadata"
+        stripe_source:
+          source: remote
+          address: "1.2.3.4:4567"
+          psk_secret: "MDEyMzQ1Njc4OUFCQ0RFRg=="
+        "#;
+        let result = Options::load_from_str(yaml_secret_only);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Both psk_identity and psk_secret must be specified together."));
+
+        let yaml_identity_only = r#"
+        path: "/path/to/disk"
+        socket: "/path/to/socket"
+        copy_on_read: true
+        metadata_path: "/path/to/metadata"
+        stripe_source:
+          source: remote
+          address: "1.2.3.4:4567"
+          psk_identity: client1
+        "#;
+        let result = Options::load_from_str(yaml_identity_only);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Both psk_identity and psk_secret must be specified together."));
     }
 
     #[test]
     fn test_default_values() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         "#;
         let options = Options::load_from_str(yaml).unwrap();
@@ -326,7 +437,7 @@ mod tests {
     #[test]
     fn test_device_id_length() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         device_id: "12345678901234567890"
         "#;
@@ -334,7 +445,7 @@ mod tests {
         assert_eq!(options.device_id, "12345678901234567890".to_string());
 
         let yaml_too_long = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         device_id: "123456789012345678901"
         "#;
@@ -344,7 +455,7 @@ mod tests {
     #[test]
     fn test_write_through_enabled() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         write_through: true
         "#;
@@ -355,7 +466,7 @@ mod tests {
     #[test]
     fn test_cpus_parsing() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         num_queues: 2
         cpus:
@@ -369,7 +480,7 @@ mod tests {
     #[test]
     fn test_io_engine_parsing() {
         let yaml_uring = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         io_engine: io_uring
         "#;
@@ -377,7 +488,7 @@ mod tests {
         assert_eq!(options_uring.io_engine, IoEngine::IoUring);
 
         let yaml_sync = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         io_engine: sync
         "#;
@@ -388,10 +499,12 @@ mod tests {
     #[test]
     fn test_error_on_two_stripe_sources() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
         image_path: "/path/to/image_path"
-        remote_image: "1.2.3.4:4567"
+        stripe_source:
+          source: remote
+          address: "1.2.3.4:4567"
         "#;
         let result = Options::load_from_str(yaml);
         assert!(result.is_err());
@@ -400,9 +513,11 @@ mod tests {
     #[test]
     fn test_error_on_remote_image_without_copy_on_read() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
-        remote_image: "1.2.3.4:4567"
+        stripe_source:
+          source: remote
+          address: "1.2.3.4:4567"
         "#;
         let result = Options::load_from_str(yaml);
         assert!(result.is_err());
@@ -411,22 +526,33 @@ mod tests {
     #[test]
     fn test_valid_remote_image_with_copy_on_read() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
-        remote_image: "1.2.3.4:4567"
+        metadata_path: "/path/to/metadata"
+        stripe_source:
+          source: remote
+          address: "1.2.3.4:4567"
         copy_on_read: true
         "#;
         let result = Options::load_from_str(yaml);
         assert!(result.is_ok());
+        let options = result.unwrap();
+        assert!(matches!(
+            options.resolved_stripe_source(),
+            Some(StripeSourceConfig::Remote { .. })
+        ));
+        assert_eq!(options.raw_image_path(), None);
     }
 
     #[test]
     fn test_filesystem_archive_source_parsing() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
+        metadata_path: "/path/to/metadata"
         copy_on_read: true
-        archive_stripe_source:
+        stripe_source:
+          source: archive
           type: filesystem
           path: "/path/to/archive"
         "#;
@@ -434,20 +560,30 @@ mod tests {
         let options = Options::load_from_str(yaml).unwrap();
 
         assert_eq!(
-            options.archive_stripe_source,
-            Some(ArchiveStripeSourceConfig::Filesystem {
-                path: "/path/to/archive".to_string()
+            options.stripe_source,
+            Some(StripeSourceConfig::Archive {
+                config: ArchiveStripeSourceConfig::Filesystem {
+                    path: "/path/to/archive".to_string()
+                }
             })
         );
+
+        assert!(matches!(
+            options.resolved_stripe_source(),
+            Some(StripeSourceConfig::Archive { .. })
+        ));
+        assert_eq!(options.raw_image_path(), None);
     }
 
     #[test]
     fn test_s3_archive_source_parsing() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
+        metadata_path: "/path/to/metadata"
         copy_on_read: true
-        archive_stripe_source:
+        stripe_source:
+          source: archive
           type: s3
           bucket: backups
           prefix: images
@@ -461,18 +597,26 @@ mod tests {
 
         let options = Options::load_from_str(yaml).unwrap();
 
+        assert!(matches!(
+            options.resolved_stripe_source(),
+            Some(StripeSourceConfig::Archive { .. })
+        ));
+        assert_eq!(options.raw_image_path(), None);
+
         assert_eq!(
-            options.archive_stripe_source,
-            Some(ArchiveStripeSourceConfig::S3 {
-                bucket: "backups".to_string(),
-                prefix: Some("images".to_string()),
-                endpoint: Some("https://account.r2.cloudflarestorage.com".to_string()),
-                profile: Some("r2".to_string()),
-                region: Some("auto".to_string()),
-                credentials: Some(AwsCredentials {
-                    access_key_id: b"AKIAIAAAAAAAA".to_vec(),
-                    secret_access_key: b"secretKey123456".to_vec(),
-                }),
+            options.stripe_source,
+            Some(StripeSourceConfig::Archive {
+                config: ArchiveStripeSourceConfig::S3 {
+                    bucket: "backups".to_string(),
+                    prefix: Some("images".to_string()),
+                    endpoint: Some("https://account.r2.cloudflarestorage.com".to_string()),
+                    profile: Some("r2".to_string()),
+                    region: Some("auto".to_string()),
+                    credentials: Some(AwsCredentials {
+                        access_key_id: b"AKIAIAAAAAAAA".to_vec(),
+                        secret_access_key: b"secretKey123456".to_vec(),
+                    }),
+                }
             })
         );
     }
@@ -480,10 +624,12 @@ mod tests {
     #[test]
     fn test_error_on_archive_and_not_copy_on_read() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
+        metadata_path: "/path/to/metadata"
         copy_on_read: false
-        archive_stripe_source:
+        stripe_source:
+          source: archive
           type: filesystem
           path: "/path/to/archive"
         "#;
@@ -493,36 +639,18 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("copy_on_read must be enabled when using archive_stripe_source"));
-    }
-
-    #[test]
-    fn test_error_on_archive_and_remote() {
-        let yaml = r#"
-        path: "/path/to/image"
-        socket: "/path/to/socket"
-        copy_on_read: true
-        archive_stripe_source:
-          type: filesystem
-          path: "/path/to/archive"
-        remote_image: "1.2.3.4:4567"
-        "#;
-
-        let result = Options::load_from_str(yaml);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Only one stripe source may be specified"));
+            .contains("copy_on_read must be enabled when using archive stripe source"));
     }
 
     #[test]
     fn test_error_on_archive_and_image_path() {
         let yaml = r#"
-        path: "/path/to/image"
+        path: "/path/to/disk"
         socket: "/path/to/socket"
+        metadata_path: "/path/to/metadata"
         copy_on_read: true
-        archive_stripe_source:
+        stripe_source:
+          source: archive
           type: filesystem
           path: "/path/to/archive"
         image_path: "/path/to/image_path"
@@ -533,5 +661,68 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Only one stripe source may be specified"));
+    }
+
+    #[test]
+    fn test_raw_image_path_old_style() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        socket: "/path/to/socket"
+        metadata_path: "/path/to/metadata"
+        image_path: "/path/to/image"
+        "#;
+        let options = Options::load_from_str(yaml).unwrap();
+        assert_eq!(
+            options.resolved_stripe_source(),
+            Some(StripeSourceConfig::Raw {
+                path: PathBuf::from("/path/to/image")
+            })
+        );
+        assert_eq!(
+            options.raw_image_path(),
+            Some(PathBuf::from("/path/to/image"))
+        );
+    }
+
+    #[test]
+    fn test_raw_image_path_new_style() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        socket: "/path/to/socket"
+        metadata_path: "/path/to/metadata"
+        stripe_source:
+            source: raw
+            path: "/path/to/image"
+        "#;
+        let options = Options::load_from_str(yaml).unwrap();
+        assert_eq!(
+            options.resolved_stripe_source(),
+            Some(StripeSourceConfig::Raw {
+                path: PathBuf::from("/path/to/image")
+            })
+        );
+        assert_eq!(
+            options.raw_image_path(),
+            Some(PathBuf::from("/path/to/image"))
+        );
+    }
+
+    #[test]
+    fn test_stripe_source_requires_metadata_path() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        socket: "/path/to/socket"
+        copy_on_read: true
+        stripe_source:
+          source: raw
+          path: "/path/to/image"
+        "#;
+
+        let result = Options::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("metadata_path must be specified when using a stripe source"));
     }
 }

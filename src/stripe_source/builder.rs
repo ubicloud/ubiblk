@@ -2,7 +2,9 @@ use crate::{
     archive::{ArchiveStore, FileSystemStore, S3Store},
     stripe_server::{connect_to_stripe_server, PskCredentials, StripeServerClient},
     utils::s3::{build_s3_client, create_runtime},
-    vhost_backend::{build_source_device, ArchiveStripeSourceConfig, AwsCredentials, Options},
+    vhost_backend::{
+        build_source_device, ArchiveStripeSourceConfig, AwsCredentials, Options, StripeSourceConfig,
+    },
     KeyEncryptionCipher, Result,
 };
 
@@ -24,17 +26,30 @@ impl StripeSourceBuilder {
     }
 
     pub fn build(&self) -> Result<Box<dyn StripeSource>> {
-        if let Some(archive_source) = &self.options.archive_stripe_source {
-            let store = Self::build_archive_store(archive_source, &self.kek)?;
-            let stripe_source = ArchiveStripeSource::new(store, self.kek.clone())?;
-            return Ok(Box::new(stripe_source));
-        }
-
-        if let Some(remote_image) = &self.options.remote_image {
-            let client = Self::build_remote_client(&self.options, &self.kek, remote_image)?;
-            let stripe_source =
-                RemoteStripeSource::new(Box::new(client), self.stripe_sector_count)?;
-            return Ok(Box::new(stripe_source));
+        if let Some(stripe_source) = self.options.resolved_stripe_source() {
+            match stripe_source {
+                StripeSourceConfig::Archive { config } => {
+                    let store = Self::build_archive_store(&config, &self.kek)?;
+                    let stripe_source = ArchiveStripeSource::new(store, self.kek.clone())?;
+                    return Ok(Box::new(stripe_source));
+                }
+                StripeSourceConfig::Remote {
+                    address,
+                    psk_identity,
+                    psk_secret,
+                } => {
+                    let client = Self::build_remote_client(
+                        &self.kek,
+                        address.as_str(),
+                        psk_identity.as_deref(),
+                        psk_secret,
+                    )?;
+                    let stripe_source =
+                        RemoteStripeSource::new(Box::new(client), self.stripe_sector_count)?;
+                    return Ok(Box::new(stripe_source));
+                }
+                StripeSourceConfig::Raw { .. } => {}
+            }
         }
 
         let block_device = build_source_device(&self.options)?;
@@ -43,12 +58,18 @@ impl StripeSourceBuilder {
         Ok(Box::new(stripe_source))
     }
 
-    fn build_remote_client(
-        options: &Options,
+    pub fn build_remote_client(
         kek: &KeyEncryptionCipher,
         server_addr: &str,
+        psk_identity: Option<&str>,
+        psk_secret: Option<Vec<u8>>,
     ) -> Result<StripeServerClient> {
-        let psk = PskCredentials::from_options(options, kek)?;
+        let psk = if let (Some(identity), Some(secret_encrypted)) = (psk_identity, psk_secret) {
+            let secret = kek.decrypt_psk_secret(secret_encrypted)?;
+            Some(PskCredentials::new(identity.to_string(), secret)?)
+        } else {
+            None
+        };
         connect_to_stripe_server(server_addr, psk.as_ref())
     }
 
@@ -116,9 +137,18 @@ mod tests {
     use tempfile::tempdir;
 
     fn create_test_options(remote: Option<String>, path: Option<PathBuf>) -> Options {
+        let stripe_source = if let Some(path) = path {
+            Some(StripeSourceConfig::Raw { path })
+        } else {
+            remote.map(|remote| StripeSourceConfig::Remote {
+                address: remote,
+                psk_identity: None,
+                psk_secret: None,
+            })
+        };
+
         Options {
-            remote_image: remote,
-            image_path: path.map(|p| p.to_string_lossy().to_string()),
+            stripe_source,
             queue_size: 64,
             ..Default::default()
         }

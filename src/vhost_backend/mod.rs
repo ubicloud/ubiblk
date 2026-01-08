@@ -7,7 +7,9 @@ mod rpc;
 pub use backend_loop::{
     block_backend_loop, build_block_device, build_source_device, init_metadata,
 };
-pub use options::{ArchiveStripeSourceConfig, AwsCredentials, IoEngine, Options};
+pub use options::{
+    ArchiveStripeSourceConfig, AwsCredentials, IoEngine, Options, StripeSourceConfig,
+};
 mod backend_thread;
 
 pub const SECTOR_SIZE: usize = 512;

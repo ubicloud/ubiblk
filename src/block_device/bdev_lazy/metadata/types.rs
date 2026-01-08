@@ -2,6 +2,8 @@ use crate::{stripe_source::StripeSource, vhost_backend::SECTOR_SIZE};
 
 pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
+pub const METADATA_VERSION_MAJOR: u16 = 1;
+pub const METADATA_VERSION_MINOR: u16 = 0;
 
 /// Flags used in stripe headers within UbiMetadata
 pub mod metadata_flags {
@@ -52,6 +54,14 @@ impl UbiMetadata {
         self.stripe_headers.len() as u64
     }
 
+    pub fn version_major_u16(&self) -> u16 {
+        u16::from_le_bytes(self.version_major)
+    }
+
+    pub fn version_minor_u16(&self) -> u16 {
+        u16::from_le_bytes(self.version_minor)
+    }
+
     #[cfg(test)]
     pub fn stripe_headers_offset(&self, stripe_id: usize) -> usize {
         SECTOR_SIZE + stripe_id
@@ -87,8 +97,8 @@ impl UbiMetadata {
 
         Box::new(UbiMetadata {
             magic,
-            version_major: [0; 2],
-            version_minor: [0; 2],
+            version_major: METADATA_VERSION_MAJOR.to_le_bytes(),
+            version_minor: METADATA_VERSION_MINOR.to_le_bytes(),
             stripe_sector_count_shift,
             stripe_headers: headers,
         })
@@ -114,8 +124,8 @@ impl UbiMetadata {
 
         Box::new(UbiMetadata {
             magic,
-            version_major: [0; 2],
-            version_minor: [0; 2],
+            version_major: METADATA_VERSION_MAJOR.to_le_bytes(),
+            version_minor: METADATA_VERSION_MINOR.to_le_bytes(),
             stripe_sector_count_shift,
             stripe_headers: headers,
         })

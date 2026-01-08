@@ -1,7 +1,7 @@
 use crate::{
     block_device::{
-        bdev_lazy::metadata::types::UBI_MAGIC, shared_buffer, wait_for_completion, BlockDevice,
-        UbiMetadata,
+        bdev_lazy::metadata::types::{METADATA_VERSION_MAJOR, METADATA_VERSION_MINOR, UBI_MAGIC},
+        shared_buffer, wait_for_completion, BlockDevice, UbiMetadata,
     },
     vhost_backend::SECTOR_SIZE,
     Result, UbiblkError,
@@ -39,6 +39,21 @@ impl UbiMetadata {
                 description: format!(
                     "Metadata magic mismatch! Expected: {:?}, Found: {:?}",
                     UBI_MAGIC, metadata.magic
+                ),
+            });
+        }
+
+        let version_major = metadata.version_major_u16();
+        let version_minor = metadata.version_minor_u16();
+        if version_major != METADATA_VERSION_MAJOR || version_minor != METADATA_VERSION_MINOR {
+            error!(
+                "Metadata version mismatch: expected {}.{}, found {}.{}",
+                METADATA_VERSION_MAJOR, METADATA_VERSION_MINOR, version_major, version_minor
+            );
+            return Err(UbiblkError::MetadataError {
+                description: format!(
+                    "Metadata version mismatch! Expected: {}.{}, Found: {}.{}",
+                    METADATA_VERSION_MAJOR, METADATA_VERSION_MINOR, version_major, version_minor
                 ),
             });
         }
@@ -91,6 +106,23 @@ mod tests {
                     .unwrap_err()
                     .to_string()
                     .contains("Metadata magic mismatch")
+        );
+    }
+
+    #[test]
+    fn test_invalid_version() {
+        let device = TestBlockDevice::new(1024 * 1024);
+        let mut metadata = UbiMetadata::new(11, 16, 16);
+        metadata.version_minor = (METADATA_VERSION_MINOR + 1).to_le_bytes();
+        metadata.save_to_bdev(&device).expect("save metadata");
+
+        let result = UbiMetadata::load_from_bdev(&device);
+        assert!(
+            result.is_err()
+                && result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Metadata version mismatch")
         );
     }
 }

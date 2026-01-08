@@ -116,6 +116,11 @@ fn main() -> Result<()> {
     let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
 
     let stripe_size = metadata.stripe_size();
+    let metadata_version = format!(
+        "{}.{}",
+        metadata.version_major_u16(),
+        metadata.version_minor_u16()
+    );
     let fetched: Vec<usize> = metadata
         .stripe_headers
         .iter()
@@ -137,6 +142,7 @@ fn main() -> Result<()> {
 
     println!("data file: {} ({} bytes)", options.path, data_size);
     println!("base image file: {image_path_display} ({image_size} bytes)");
+    println!("metadata version: {metadata_version}");
     println!("stripe size: {stripe_size} bytes");
     println!("fetched stripes: {}", format_list(&fetched));
     println!("written stripes: {}", format_list(&written));

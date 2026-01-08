@@ -1,13 +1,12 @@
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use clap::Parser;
-
-use aws_config::BehaviorVersion;
 
 use ubiblk::{
     archive::{ArchiveStore, FileSystemStore, S3Store, StripeArchiver},
     block_device::UbiMetadata,
     stripe_source::StripeSourceBuilder,
+    utils::s3::{build_s3_client, create_runtime},
     vhost_backend::*,
     KeyEncryptionCipher, Result, UbiblkError,
 };
@@ -122,7 +121,12 @@ fn build_store(args: &Args) -> Result<Box<dyn ArchiveStore>> {
         ArchiveTarget::FileSystem(path) => Ok(Box::new(FileSystemStore::new(path)?)),
         ArchiveTarget::S3 { bucket, prefix } => {
             let runtime = create_runtime()?;
-            let client = build_s3_client(args, runtime.clone())?;
+            let client = build_s3_client(
+                &runtime,
+                args.s3_profile.as_deref(),
+                args.s3_endpoint.as_deref(),
+                None,
+            )?;
             Ok(Box::new(S3Store::new(client, bucket, prefix, runtime)?))
         }
     }
@@ -147,37 +151,4 @@ fn parse_archive_target(target: &str) -> Result<ArchiveTarget> {
     } else {
         Ok(ArchiveTarget::FileSystem(PathBuf::from(target)))
     }
-}
-
-fn create_runtime() -> Result<Arc<tokio::runtime::Runtime>> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map(Arc::new)
-        .map_err(|err| UbiblkError::ArchiveError {
-            description: format!("Failed to create Tokio runtime for S3 operations: {err}"),
-        })
-}
-
-fn build_s3_client(
-    args: &Args,
-    runtime: Arc<tokio::runtime::Runtime>,
-) -> Result<aws_sdk_s3::Client> {
-    let config = runtime.block_on(async {
-        let mut loader = aws_config::defaults(BehaviorVersion::latest());
-
-        if let Some(profile) = &args.s3_profile {
-            loader = loader.profile_name(profile);
-        }
-
-        loader.load().await
-    });
-
-    let mut builder = aws_sdk_s3::config::Builder::from(&config);
-
-    if let Some(endpoint) = &args.s3_endpoint {
-        builder = builder.endpoint_url(endpoint);
-    }
-
-    Ok(aws_sdk_s3::Client::from_conf(builder.build()))
 }

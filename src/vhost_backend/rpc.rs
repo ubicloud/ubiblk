@@ -327,7 +327,7 @@ mod tests {
         assert!(status.get("stripes").is_some());
         let stripes = &status["stripes"];
         assert_eq!(stripes["fetched"], 2);
-        assert_eq!(stripes["no_source"], 48);
+        assert_eq!(stripes["source"], 16);
         assert_eq!(stripes["total"], 64);
     }
 

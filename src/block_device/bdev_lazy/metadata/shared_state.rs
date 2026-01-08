@@ -10,7 +10,7 @@ pub struct SharedMetadataState {
     stripe_write_states: Arc<Vec<AtomicU8>>,
     stripe_sector_count_shift: u8,
     fetched_stripes_count: Arc<AtomicU64>,
-    no_source_stripes_count: Arc<AtomicU64>,
+    source_stripes_count: Arc<AtomicU64>,
 }
 
 pub const NotFetched: u8 = 0;
@@ -24,7 +24,7 @@ pub const Written: u8 = 1;
 impl SharedMetadataState {
     pub fn new(metadata: &UbiMetadata) -> Self {
         let (mut stripe_fetch_states, mut stripe_write_states) = (Vec::new(), Vec::new());
-        let (mut fetched_stripes_count, mut no_source_stripes_count) = (0, 0);
+        let (mut fetched_stripes_count, mut source_stripes_count) = (0, 0);
         for header in metadata.stripe_headers.iter() {
             let (mut fetch_state, mut write_state) = (NotFetched, NotWritten);
             if header & metadata_flags::FETCHED != 0 {
@@ -34,9 +34,10 @@ impl SharedMetadataState {
             if header & metadata_flags::WRITTEN != 0 {
                 write_state = Written;
             }
-            if header & metadata_flags::HAS_SOURCE == 0 {
+            if header & metadata_flags::HAS_SOURCE != 0 {
+                source_stripes_count += 1;
+            } else {
                 fetch_state = NoSource;
-                no_source_stripes_count += 1;
             }
             stripe_fetch_states.push(AtomicU8::new(fetch_state));
             stripe_write_states.push(AtomicU8::new(write_state));
@@ -47,7 +48,7 @@ impl SharedMetadataState {
             stripe_write_states: Arc::new(stripe_write_states),
             stripe_sector_count_shift: metadata.stripe_sector_count_shift,
             fetched_stripes_count: Arc::new(AtomicU64::new(fetched_stripes_count)),
-            no_source_stripes_count: Arc::new(AtomicU64::new(no_source_stripes_count)),
+            source_stripes_count: Arc::new(AtomicU64::new(source_stripes_count)),
         }
     }
 
@@ -102,8 +103,8 @@ impl SharedMetadataState {
         self.fetched_stripes_count.load(Ordering::Acquire)
     }
 
-    pub fn no_source_stripes(&self) -> u64 {
-        self.no_source_stripes_count.load(Ordering::Acquire)
+    pub fn source_stripes(&self) -> u64 {
+        self.source_stripes_count.load(Ordering::Acquire)
     }
 }
 
@@ -114,7 +115,7 @@ mod tests {
     #[test]
     fn test_shared_metadata_state_initialization() {
         let stripe_sector_count_shift = 0;
-        let base_stripe_count = 10;
+        let base_stripe_count = 11;
         let image_stripe_count = 5;
 
         let mut metadata = UbiMetadata::new(
@@ -147,7 +148,7 @@ mod tests {
 
         assert_eq!(state.fetched_stripes(), 2);
 
-        assert_eq!(state.no_source_stripes(), 5);
+        assert_eq!(state.source_stripes(), 5);
     }
 
     #[test]

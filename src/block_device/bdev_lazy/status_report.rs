@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 struct StripesRecord {
     total: u64,
-    no_source: u64,
+    source: u64,
     fetched: u64,
 }
 
@@ -14,11 +14,11 @@ pub struct StatusReport {
 }
 
 impl StatusReport {
-    pub fn new(total: u64, no_source: u64, fetched: u64) -> Self {
+    pub fn new(total: u64, source: u64, fetched: u64) -> Self {
         StatusReport {
             stripes: StripesRecord {
                 total,
-                no_source,
+                source,
                 fetched,
             },
         }
@@ -44,7 +44,7 @@ impl StatusReporter {
         let total_stripes = self.target_sector_count.div_ceil(stripe_sector_count);
         StatusReport::new(
             total_stripes,
-            self.shared_state.no_source_stripes(),
+            self.shared_state.source_stripes(),
             self.shared_state.fetched_stripes(),
         )
     }

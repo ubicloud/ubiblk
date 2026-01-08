@@ -165,6 +165,12 @@ impl Options {
             })?;
         Self::load_from_str(&contents)
     }
+
+    pub fn has_stripe_source(&self) -> bool {
+        self.image_path.is_some()
+            || self.remote_image.is_some()
+            || self.archive_stripe_source.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

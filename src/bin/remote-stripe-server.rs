@@ -1,5 +1,6 @@
 use std::{net::TcpListener, path::PathBuf, sync::Arc, thread};
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::Parser;
 use log::{error, info};
 
@@ -30,6 +31,14 @@ struct Args {
     /// Unlink the key encryption key file after use.
     #[arg(short = 'u', long = "unlink-kek", default_value_t = false)]
     unlink_kek: bool,
+
+    /// PSK identity (required if --psk-secret is set).
+    #[arg(long = "psk-identity")]
+    psk_identity: Option<String>,
+
+    /// Base64-encoded PSK secret encrypted with the KEK (required if --psk-identity is set).
+    #[arg(long = "psk-secret")]
+    psk_secret: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -46,19 +55,22 @@ fn run(args: Args) -> Result<()> {
         config,
         kek,
         unlink_kek,
+        psk_identity,
+        psk_secret,
     } = args;
 
     let options = Options::load_from_file(&config)?;
-    if options.image_path.is_some() {
+    if options.has_stripe_source() {
         return Err(Error::InvalidParameter {
-            description: "config must not specify image_path when used with remote-stripe-server"
-                .to_string(),
+            description:
+                "config must not specify a stripe source when used with remote-stripe-server"
+                    .to_string(),
         });
     }
 
     let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
     let stripe_server = prepare_stripe_server(&options, kek.clone())?;
-    let psk = PskCredentials::from_options(&options, &kek)?;
+    let psk = parse_psk_credentials(psk_identity, psk_secret, &kek)?;
 
     let listener = TcpListener::bind(&bind)?;
     info!("listening on {}", listener.local_addr()?);
@@ -85,5 +97,29 @@ fn run(args: Args) -> Result<()> {
                 Err(err) => error!("client {addr}: {err}"),
             }
         });
+    }
+}
+
+fn parse_psk_credentials(
+    identity: Option<String>,
+    secret: Option<String>,
+    kek: &KeyEncryptionCipher,
+) -> Result<Option<PskCredentials>> {
+    match (identity, secret) {
+        (Some(identity), Some(secret)) => {
+            let encrypted_secret =
+                STANDARD
+                    .decode(secret)
+                    .map_err(|e| Error::InvalidParameter {
+                        description: format!("Failed to decode psk_secret: {e}"),
+                    })?;
+            let decrypted_secret = kek.decrypt_psk_secret(encrypted_secret)?;
+            Ok(Some(PskCredentials::new(identity, decrypted_secret)?))
+        }
+        (None, None) => Ok(None),
+        _ => Err(Error::InvalidParameter {
+            description: "psk_secret and psk_identity must both be set or both be unset"
+                .to_string(),
+        }),
     }
 }

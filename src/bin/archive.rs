@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::Parser;
 
 use ubiblk::{
@@ -39,7 +40,7 @@ Examples:
   aws configure --profile r2
 
   # Archive to Cloudflare R2
-  archive -f config.yaml -t s3://my-r2-bucket/ubiblk --s3-profile r2 --s3-endpoint https://<account>.r2.cloudflarestorage.com"#
+  archive -f config.yaml -t s3://my-r2-bucket/ubiblk --profile r2 --endpoint https://<account>.r2.cloudflarestorage.com"#
 )]
 struct Args {
     /// Path to the configuration YAML file.
@@ -63,13 +64,26 @@ struct Args {
     target: String,
 
     /// Custom S3 endpoint URL (e.g. https://<account>.r2.cloudflarestorage.com).
-    #[arg(long = "s3-endpoint")]
+    #[arg(long = "endpoint")]
     s3_endpoint: Option<String>,
 
+    /// Base64-encoded (possibly encrypted) S3 access key ID.
+    #[arg(long = "access-key-id")]
+    s3_access_key_id: Option<String>,
+
+    /// Base64-encoded (possibly encrypted) S3 secret access key.
+    #[arg(long = "secret-access-key")]
+    s3_secret_access_key: Option<String>,
+
+    /// S3 region (e.g. auto).
+    #[arg(long = "region")]
+    s3_region: Option<String>,
+
     /// Use a specific AWS profile when creating the S3 client.
-    #[arg(long = "s3-profile")]
+    #[arg(long = "profile")]
     s3_profile: Option<String>,
 
+    /// Encrypt archived stripes.
     #[arg(short = 'e', long = "encrypt", default_value_t = false)]
     encrypt: bool,
 }
@@ -100,7 +114,7 @@ fn main() -> Result<()> {
     let stripe_source =
         StripeSourceBuilder::new(options.clone(), kek.clone(), stripe_sector_count).build()?;
 
-    let store = build_store(&args)?;
+    let store = build_store(&args, &kek)?;
 
     let mut archiver = StripeArchiver::new(
         stripe_source,
@@ -116,21 +130,58 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_store(args: &Args) -> Result<Box<dyn ArchiveStore>> {
+fn build_store(args: &Args, kek: &KeyEncryptionCipher) -> Result<Box<dyn ArchiveStore>> {
     match parse_archive_target(&args.target)? {
         ArchiveTarget::FileSystem(path) => Ok(Box::new(FileSystemStore::new(path)?)),
         ArchiveTarget::S3 { bucket, prefix } => {
             let runtime = create_runtime()?;
+            let decrypted_credentials = decrypt_s3_credentials(args, kek)?;
             let client = build_s3_client(
                 &runtime,
                 args.s3_profile.as_deref(),
                 args.s3_endpoint.as_deref(),
-                None,
-                None,
+                args.s3_region.as_deref(),
+                decrypted_credentials,
             )?;
             Ok(Box::new(S3Store::new(client, bucket, prefix, runtime)?))
         }
     }
+}
+
+fn decrypt_s3_credentials(
+    args: &Args,
+    kek: &KeyEncryptionCipher,
+) -> Result<Option<aws_sdk_s3::config::Credentials>> {
+    match (&args.s3_access_key_id, &args.s3_secret_access_key) {
+        (Some(access_key_id), Some(secret_access_key)) => {
+            let access_key_id =
+                kek.decrypt_aws_credential(decode_credential("access-key-id", access_key_id)?)?;
+            let secret_access_key = kek.decrypt_aws_credential(decode_credential(
+                "secret-access-key",
+                secret_access_key,
+            )?)?;
+            Ok(Some(
+                aws_sdk_s3::config::Credentials::builder()
+                    .access_key_id(access_key_id)
+                    .secret_access_key(secret_access_key)
+                    .provider_name("ubiblk_archive")
+                    .build(),
+            ))
+        }
+        (None, None) => Ok(None),
+        _ => Err(UbiblkError::InvalidParameter {
+            description: "access-key-id and secret-access-key must both be set or both be unset"
+                .to_string(),
+        }),
+    }
+}
+
+fn decode_credential(field: &str, value: &str) -> Result<Vec<u8>> {
+    STANDARD
+        .decode(value)
+        .map_err(|e| UbiblkError::InvalidParameter {
+            description: format!("Failed to decode {field}: {e}"),
+        })
 }
 
 fn parse_archive_target(target: &str) -> Result<ArchiveTarget> {

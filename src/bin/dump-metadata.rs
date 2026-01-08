@@ -92,7 +92,7 @@ fn main() -> Result<()> {
     let data_size = base_dev.sector_count() * SECTOR_SIZE as u64;
 
     // image device if provided
-    let (image_path_display, image_size) = if let Some(ref image_path) = options.image_path {
+    let (image_path_display, image_size) = if let Some(ref image_path) = options.raw_image_path() {
         let dev = block_device::UringBlockDevice::new(
             PathBuf::from(image_path),
             options.queue_size,
@@ -100,7 +100,10 @@ fn main() -> Result<()> {
             true,
             options.write_through,
         )?;
-        (image_path.clone(), dev.sector_count() * SECTOR_SIZE as u64)
+        (
+            image_path.to_string_lossy().to_string(),
+            dev.sector_count() * SECTOR_SIZE as u64,
+        )
     } else {
         (String::from("None"), 0)
     };

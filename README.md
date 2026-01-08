@@ -48,8 +48,9 @@ vhost-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek]
 **Configuration:**
 The configuration YAML must define:
 - `path`: Base disk image path.
-- `image_path`: (Optional) Image path for lazy stripe fetch.
-- `metadata_path`: (Optional) Metadata file path used for lazy fetch. Required when `image_path` is set.
+- `stripe_source`: (Optional) Stripe source configuration (local image, remote server, or archive).
+- `image_path`: (Optional, deprecated) Image path for lazy stripe fetch.
+- `metadata_path`: (Optional) Metadata file path used for lazy fetch. Required when a local stripe source (or legacy `image_path`) is set.
 - `rpc_socket_path`: (Optional) Path to a Unix domain socket for runtime RPC commands.
 - `socket`: vhost-user socket path.
 - `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
@@ -100,7 +101,9 @@ The backend configuration YAML must match the `Options` struct fields:
 
 ```yaml
 path: "/path/to/block-device.raw"        # String: base disk image path
-image_path: "/path/to/ubi-image.raw"     # Optional String: UBI image for lazy fetch
+stripe_source:                           # Optional: stripe source configuration
+  source: raw                            # raw | remote | archive
+  path: "/path/to/ubi-image.raw"         # Local stripe source path
 metadata_path: "/path/to/metadata"       # Optional: metadata path for lazy fetch
 rpc_socket_path: "/tmp/ubiblk-rpc.sock"  # Optional: RPC Unix socket path
 socket: "/tmp/vhost.sock"                # String: vhost‐user socket path
@@ -122,9 +125,46 @@ encryption_key:                          # Optional: AES‐XTS keys (base64 enco
   - "TJn65Jb//AYqu/a8zlpb0IlXC4vwFQ5DtbQkMTeliEAwafr0DEH+5hNro8FuVzQ+"
 ```
 
+To use a remote stripe server:
+
+```yaml
+stripe_source:
+  source: remote
+  address: "1.2.3.4:4555"
+  psk_identity: "client1"               # Optional: must be set together with psk_secret
+  psk_secret: "BASE64-ENCODED-SECRET"   # Optional: KEK-encrypted PSK secret
+```
+
+To use an archive stripe source from the local filesystem:
+
+```yaml
+stripe_source:
+  source: archive
+  type: filesystem
+  path: "/path/to/archive"
+```
+
+To use an archive stripe source from an S3-compatible object store:
+
+```yaml
+stripe_source:
+  source: archive
+  type: s3
+  bucket: "my-bucket"
+  prefix: "path/inside/bucket"        # Optional: prefix inside the bucket
+  endpoint: "https://s3.example.com"  # Optional: custom S3 endpoint
+  region: "auto"                      # Optional: AWS region
+  profile: "r2"                       # Optional: aws-cli profile name
+  credentials:                        # Optional: KEK-encrypted credentials
+    access_key_id: "BASE64-ENCODED-ACCESS-KEY-ID"
+    secret_access_key: "BASE64-ENCODED-SECRET-ACCESS-KEY"
+```
+
+The legacy `image_path` option is still accepted for backward compatibility, but it is deprecated.
+
 ## Lazy Stripe Fetching
 
-When `image_path` and `metadata_path` are provided, the backend copies data
+When a stripe source and `metadata_path` are provided, the backend copies data
 from the image to the base device in units called *stripes*. The size of a
 stripe is `2^stripe-sector-count-shift` sectors and the status of every stripe
 is recorded in the metadata file.

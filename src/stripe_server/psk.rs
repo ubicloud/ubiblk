@@ -4,7 +4,7 @@ use openssl::{
     ssl::{Ssl, SslContext, SslContextBuilder, SslMethod, SslOptions, SslStream, SslVerifyMode},
 };
 
-use crate::{vhost_backend::Options, KeyEncryptionCipher, Result, UbiblkError};
+use crate::{KeyEncryptionCipher, Result, UbiblkError};
 
 use super::DynStream;
 
@@ -21,27 +21,6 @@ impl PskCredentials {
         Self::validate_identity(&identity)?;
         Self::validate_secret(&secret)?;
         Ok(Self { identity, secret })
-    }
-
-    pub fn from_options(options: &Options, kek: &KeyEncryptionCipher) -> Result<Option<Self>> {
-        match (&options.psk_identity, &options.psk_secret) {
-            (Some(id), Some(sec)) => {
-                Self::validate_identity(id)?;
-
-                let secret = kek.decrypt_psk_secret(sec.clone())?;
-                Self::validate_secret(&secret)?;
-
-                Ok(Some(Self {
-                    identity: id.clone(),
-                    secret,
-                }))
-            }
-            (None, None) => Ok(None),
-            _ => Err(UbiblkError::InvalidParameter {
-                description: "psk_secret and psk_identity must both be set or both be unset"
-                    .to_string(),
-            }),
-        }
     }
 
     fn validate_identity(identity: &str) -> Result<()> {
@@ -172,86 +151,6 @@ fn to_tls_error<E: ToString>(err: E) -> UbiblkError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_options(identity: Option<&str>, secret: Option<Vec<u8>>) -> Options {
-        Options {
-            psk_identity: identity.map(|s| s.to_string()),
-            psk_secret: secret,
-            ..Default::default()
-        }
-    }
-
-    fn valid_secret() -> Vec<u8> {
-        vec![0xAA; 32]
-    }
-
-    #[test]
-    fn test_credentials_success_plain() {
-        let kek = KeyEncryptionCipher::default(); // Method::None
-        let opts = make_options(Some("user"), Some(valid_secret()));
-
-        let creds = PskCredentials::from_options(&opts, &kek)
-            .expect("Should parse valid options")
-            .expect("Should be Some credentials");
-
-        assert_eq!(creds.identity, "user");
-        assert_eq!(creds.secret, valid_secret());
-    }
-
-    #[test]
-    fn test_credentials_none_when_empty() {
-        let kek = KeyEncryptionCipher::default();
-        let opts = make_options(None, None);
-
-        let creds = PskCredentials::from_options(&opts, &kek).expect("Should succeed");
-        assert!(creds.is_none());
-    }
-
-    #[test]
-    fn test_error_missing_secret() {
-        let kek = KeyEncryptionCipher::default();
-        let opts = make_options(Some("user"), None); // Identity but no secret
-
-        let err = PskCredentials::from_options(&opts, &kek).unwrap_err();
-        assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
-    }
-
-    #[test]
-    fn test_error_missing_identity() {
-        let kek = KeyEncryptionCipher::default();
-        let opts = make_options(None, Some(valid_secret())); // Secret but no identity
-
-        let err = PskCredentials::from_options(&opts, &kek).unwrap_err();
-        assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
-    }
-
-    #[test]
-    fn test_error_empty_identity_string() {
-        let kek = KeyEncryptionCipher::default();
-        let opts = make_options(Some(""), Some(valid_secret()));
-
-        let err = PskCredentials::from_options(&opts, &kek).unwrap_err();
-        // Check description contains "empty"
-        if let UbiblkError::InvalidParameter { description } = err {
-            assert!(description.contains("empty"));
-        } else {
-            panic!("Wrong error type");
-        }
-    }
-
-    #[test]
-    fn test_error_secret_too_short() {
-        let kek = KeyEncryptionCipher::default();
-        let short_secret = vec![0u8; 15]; // 15 bytes < 16 bytes required
-        let opts = make_options(Some("user"), Some(short_secret));
-
-        let err = PskCredentials::from_options(&opts, &kek).unwrap_err();
-        if let UbiblkError::InvalidParameter { description } = err {
-            assert!(description.contains("at least 16 bytes"));
-        } else {
-            panic!("Wrong error type");
-        }
-    }
 
     #[test]
     fn test_parse_psk_credentials_success() {

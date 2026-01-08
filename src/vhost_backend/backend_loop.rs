@@ -50,8 +50,6 @@ struct BackendEnv {
 
 impl BackendEnv {
     fn build(options: &Options, kek: KeyEncryptionCipher) -> Result<Self> {
-        Self::validate_metadata_requirements(options)?;
-
         let base_device = build_block_device(&options.path, options, kek.clone(), false)?;
         let alignment = Self::determine_alignment(&options.path)?;
 
@@ -76,16 +74,6 @@ impl BackendEnv {
             status_reporter,
             io_trackers,
         })
-    }
-
-    fn validate_metadata_requirements(options: &Options) -> Result<()> {
-        if options.image_path.is_some() && options.metadata_path.is_none() {
-            return Err(UbiblkError::InvalidParameter {
-                description: "metadata_path is required when image_path is provided".to_string(),
-            });
-        }
-
-        Ok(())
     }
 
     fn determine_alignment(path: &str) -> Result<usize> {
@@ -325,10 +313,7 @@ pub fn init_metadata(
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;
     let base_stripe_count = base_bdev.stripe_count(stripe_sector_count);
 
-    let metadata = if config.image_path.is_none()
-        && config.remote_image.is_none()
-        && config.archive_stripe_source.is_none()
-    {
+    let metadata = if !config.has_stripe_source() {
         // No image source
         UbiMetadata::new(stripe_sector_count_shift, base_stripe_count, 0)
     } else {
@@ -378,11 +363,11 @@ fn create_io_engine_device(
 }
 
 pub fn build_source_device(options: &Options) -> Result<Box<dyn BlockDevice>> {
-    let source: Box<dyn BlockDevice> = if let Some(ref path) = options.image_path {
+    let source: Box<dyn BlockDevice> = if let Some(path) = options.raw_image_path() {
         let readonly = true;
         create_io_engine_device(
             options.io_engine.clone(),
-            PathBuf::from(path),
+            path,
             64,
             readonly,
             true,
@@ -424,6 +409,7 @@ pub fn build_block_device(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vhost_backend::StripeSourceConfig;
 
     #[test]
     fn build_backend_env_no_metadata() {
@@ -467,7 +453,9 @@ mod tests {
 
         let options = Options {
             path: disk_file.path().to_str().unwrap().to_string(),
-            image_path: Some(image_file.path().to_str().unwrap().to_string()),
+            stripe_source: Some(StripeSourceConfig::Raw {
+                path: image_file.path().to_path_buf(),
+            }),
             metadata_path: Some(metadata_path.path().to_str().unwrap().to_string()),
             socket: "/tmp/ubiblk-test.sock".to_string(),
             queue_size: 128,

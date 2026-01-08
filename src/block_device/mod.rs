@@ -53,10 +53,7 @@ pub use bdev_lazy::{
     metadata::{
         save::DEFAULT_STRIPE_SECTOR_COUNT_SHIFT,
         shared_state::SharedMetadataState,
-        types::{
-            UbiMetadata, METADATA_STRIPE_FETCHED_BITMASK, METADATA_STRIPE_NO_SOURCE_BITMASK,
-            METADATA_STRIPE_WRITTEN_BITMASK,
-        },
+        types::{metadata_flags, UbiMetadata},
     },
     status_report::{StatusReport, StatusReporter},
 };

@@ -1,8 +1,5 @@
 use crate::{
-    block_device::{
-        BlockDevice, IoChannel, SharedMetadataState, UbiMetadata, METADATA_STRIPE_FETCHED_BITMASK,
-        METADATA_STRIPE_WRITTEN_BITMASK,
-    },
+    block_device::{metadata_flags, BlockDevice, IoChannel, SharedMetadataState, UbiMetadata},
     utils::AlignedBufferPool,
     vhost_backend::SECTOR_SIZE,
     Result, UbiblkError,
@@ -156,8 +153,8 @@ impl MetadataFlusher {
             self.queued_requests.pop_front();
 
             let requested_bitmask = match req.kind {
-                MetadataFlusherRequestKind::SetFetched => METADATA_STRIPE_FETCHED_BITMASK,
-                MetadataFlusherRequestKind::SetWritten => METADATA_STRIPE_WRITTEN_BITMASK,
+                MetadataFlusherRequestKind::SetFetched => metadata_flags::FETCHED,
+                MetadataFlusherRequestKind::SetWritten => metadata_flags::WRITTEN,
             };
 
             if self.metadata.stripe_headers[req.stripe_id] & requested_bitmask != 0 {

@@ -6,8 +6,7 @@ use super::ArchiveStore;
 use crate::{
     archive::ArchiveMetadata,
     block_device::{
-        shared_buffer, BlockDevice, IoChannel, SharedBuffer, UbiMetadata,
-        METADATA_STRIPE_NO_SOURCE_BITMASK, METADATA_STRIPE_WRITTEN_BITMASK,
+        metadata_flags, shared_buffer, BlockDevice, IoChannel, SharedBuffer, UbiMetadata,
     },
     crypt::XtsBlockCipher,
     stripe_source::StripeSource,
@@ -100,12 +99,12 @@ impl StripeArchiver {
 
     fn stripe_written(&self, stripe_id: usize) -> bool {
         let header = self.metadata.stripe_headers[stripe_id];
-        header & METADATA_STRIPE_WRITTEN_BITMASK != 0
+        header & metadata_flags::WRITTEN != 0
     }
 
     fn stripe_exists_in_source(&self, stripe_id: usize) -> bool {
         let header = self.metadata.stripe_headers[stripe_id];
-        header & METADATA_STRIPE_NO_SOURCE_BITMASK == 0
+        header & metadata_flags::HAS_SOURCE != 0
     }
 
     fn fetch_stripe_from_source(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
@@ -229,7 +228,7 @@ mod tests {
     #[test]
     fn test_stripe_should_be_archived() {
         let mut archiver = prep(16, 4, false);
-        archiver.metadata.stripe_headers[8] |= METADATA_STRIPE_WRITTEN_BITMASK;
+        archiver.metadata.stripe_headers[8] |= metadata_flags::WRITTEN;
 
         for stripe_id in 0..16 {
             let should_archive = archiver.stripe_should_be_archived(stripe_id);
@@ -244,8 +243,8 @@ mod tests {
     #[test]
     fn test_archive_all_no_image_stripes() {
         let mut archiver = prep(16, 0, false);
-        archiver.metadata.stripe_headers[2] |= METADATA_STRIPE_WRITTEN_BITMASK;
-        archiver.metadata.stripe_headers[5] |= METADATA_STRIPE_WRITTEN_BITMASK;
+        archiver.metadata.stripe_headers[2] |= metadata_flags::WRITTEN;
+        archiver.metadata.stripe_headers[5] |= metadata_flags::WRITTEN;
 
         archiver.archive_all().unwrap();
 
@@ -261,9 +260,9 @@ mod tests {
     #[test]
     fn test_archive_all_with_image_stripes() {
         let mut archiver = prep(16, 4, false);
-        archiver.metadata.stripe_headers[2] |= METADATA_STRIPE_NO_SOURCE_BITMASK;
-        archiver.metadata.stripe_headers[10] |= METADATA_STRIPE_WRITTEN_BITMASK;
-        archiver.metadata.stripe_headers[12] |= METADATA_STRIPE_WRITTEN_BITMASK;
+        archiver.metadata.stripe_headers[2] &= !metadata_flags::HAS_SOURCE;
+        archiver.metadata.stripe_headers[10] |= metadata_flags::WRITTEN;
+        archiver.metadata.stripe_headers[12] |= metadata_flags::WRITTEN;
 
         archiver.archive_all().unwrap();
         let mut stored_objects = archiver.archive_store.list_objects().unwrap();

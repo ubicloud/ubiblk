@@ -146,7 +146,7 @@ mod tests {
     use std::{os::unix::net::UnixStream, sync::Arc, thread};
 
     use crate::block_device::{
-        bdev_test::TestBlockDevice, BlockDevice, UbiMetadata, METADATA_STRIPE_WRITTEN_BITMASK,
+        bdev_test::TestBlockDevice, metadata_flags, BlockDevice, UbiMetadata,
     };
     use crate::stripe_server::StripeServer;
     use crate::vhost_backend::SECTOR_SIZE;
@@ -197,7 +197,7 @@ mod tests {
 
     fn written_unwritten_metadata(stripe_count: usize) -> Arc<UbiMetadata> {
         let mut metadata = UbiMetadata::new(0, stripe_count, stripe_count);
-        metadata.stripe_headers[0] |= METADATA_STRIPE_WRITTEN_BITMASK;
+        metadata.stripe_headers[0] |= metadata_flags::WRITTEN;
         Arc::from(metadata)
     }
 
@@ -219,11 +219,11 @@ mod tests {
 
         assert_eq!(fetched_metadata.stripe_headers.len(), stripe_count);
         assert_ne!(
-            fetched_metadata.stripe_headers[0] & METADATA_STRIPE_WRITTEN_BITMASK,
+            fetched_metadata.stripe_headers[0] & metadata_flags::WRITTEN,
             0
         );
         assert_eq!(
-            fetched_metadata.stripe_headers[1] & METADATA_STRIPE_WRITTEN_BITMASK,
+            fetched_metadata.stripe_headers[1] & metadata_flags::WRITTEN,
             0
         );
     }

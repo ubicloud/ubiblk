@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use ubiblk::block_device::{self, BlockDevice, UbiMetadata};
+use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
 use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
 use ubiblk::{Error, KeyEncryptionCipher, Result};
 
@@ -120,19 +120,19 @@ fn main() -> Result<()> {
         .stripe_headers
         .iter()
         .enumerate()
-        .filter_map(|(i, h)| if h & 1 != 0 { Some(i) } else { None })
+        .filter_map(|(i, h)| (h & metadata_flags::FETCHED != 0).then_some(i))
         .collect();
     let written: Vec<usize> = metadata
         .stripe_headers
         .iter()
         .enumerate()
-        .filter_map(|(i, h)| if h & 2 != 0 { Some(i) } else { None })
+        .filter_map(|(i, h)| (h & metadata_flags::WRITTEN != 0).then_some(i))
         .collect();
-    let no_source: Vec<usize> = metadata
+    let has_source: Vec<usize> = metadata
         .stripe_headers
         .iter()
         .enumerate()
-        .filter_map(|(i, h)| if h & 4 != 0 { Some(i) } else { None })
+        .filter_map(|(i, h)| (h & metadata_flags::HAS_SOURCE != 0).then_some(i))
         .collect();
 
     println!("data file: {} ({} bytes)", options.path, data_size);
@@ -140,7 +140,7 @@ fn main() -> Result<()> {
     println!("stripe size: {stripe_size} bytes");
     println!("fetched stripes: {}", format_list(&fetched));
     println!("written stripes: {}", format_list(&written));
-    println!("no-source-data stripes: {}", format_list(&no_source));
+    println!("has-source stripes: {}", format_list(&has_source));
 
     Ok(())
 }

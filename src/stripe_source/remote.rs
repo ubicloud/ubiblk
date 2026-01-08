@@ -3,9 +3,7 @@ use std::collections::VecDeque;
 use log::{error, warn};
 
 use crate::{
-    block_device::{
-        SharedBuffer, METADATA_STRIPE_NO_SOURCE_BITMASK, METADATA_STRIPE_WRITTEN_BITMASK,
-    },
+    block_device::{metadata_flags, SharedBuffer},
     stripe_server::RemoteStripeProvider,
     Result, UbiblkError,
 };
@@ -116,11 +114,10 @@ impl StripeSource for RemoteStripeSource {
         if stripe_id >= self.remote_headers.len() {
             return false;
         }
-        let written_on_remote =
-            self.remote_headers[stripe_id] & METADATA_STRIPE_WRITTEN_BITMASK != 0;
-        let exists_on_remote_s_base_image =
-            self.remote_headers[stripe_id] & METADATA_STRIPE_NO_SOURCE_BITMASK == 0;
-        written_on_remote || exists_on_remote_s_base_image
+        let written_on_remote = self.remote_headers[stripe_id] & metadata_flags::WRITTEN != 0;
+        let exists_on_remote_base_image =
+            self.remote_headers[stripe_id] & metadata_flags::HAS_SOURCE != 0;
+        written_on_remote || exists_on_remote_base_image
     }
 }
 

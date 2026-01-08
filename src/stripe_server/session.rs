@@ -3,9 +3,7 @@ use std::io::ErrorKind;
 use log::{error, info};
 
 use crate::{
-    block_device::{
-        shared_buffer, wait_for_completion, SharedBuffer, METADATA_STRIPE_WRITTEN_BITMASK,
-    },
+    block_device::{metadata_flags, shared_buffer, wait_for_completion, SharedBuffer},
     UbiblkError,
 };
 
@@ -92,7 +90,7 @@ impl StripeServerSession {
         }
 
         let stripe_header = self.metadata.stripe_headers[stripe_id as usize];
-        if stripe_header & METADATA_STRIPE_WRITTEN_BITMASK == 0 {
+        if stripe_header & metadata_flags::WRITTEN == 0 {
             info!("Stripe {} is not written, notifying client", stripe_id);
             self.stream.write_all(&[STATUS_UNWRITTEN])?;
             self.stream.flush()?;

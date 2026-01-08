@@ -181,8 +181,7 @@ impl StripeSource for ArchiveStripeSource {
 mod tests {
     use crate::{
         block_device::{
-            bdev_test::TestBlockDevice, shared_buffer, BlockDevice, UbiMetadata,
-            METADATA_STRIPE_WRITTEN_BITMASK,
+            bdev_test::TestBlockDevice, metadata_flags, shared_buffer, BlockDevice, UbiMetadata,
         },
         stripe_source::BlockDeviceStripeSource,
         vhost_backend::SECTOR_SIZE,
@@ -214,7 +213,7 @@ mod tests {
             image_stripe_count,
         );
         for &stripe_id in written_stripes {
-            metadata.stripe_headers[stripe_id] |= METADATA_STRIPE_WRITTEN_BITMASK;
+            metadata.stripe_headers[stripe_id] |= metadata_flags::WRITTEN;
         }
 
         let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * SECTOR_SIZE) as u64;

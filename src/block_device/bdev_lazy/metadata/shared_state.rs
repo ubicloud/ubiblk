@@ -1,7 +1,4 @@
-use crate::block_device::{
-    UbiMetadata, METADATA_STRIPE_FETCHED_BITMASK, METADATA_STRIPE_NO_SOURCE_BITMASK,
-    METADATA_STRIPE_WRITTEN_BITMASK,
-};
+use crate::block_device::{metadata_flags, UbiMetadata};
 use std::sync::{
     atomic::{AtomicU64, AtomicU8, Ordering},
     Arc,
@@ -30,14 +27,14 @@ impl SharedMetadataState {
         let (mut fetched_stripes_count, mut no_source_stripes_count) = (0, 0);
         for header in metadata.stripe_headers.iter() {
             let (mut fetch_state, mut write_state) = (NotFetched, NotWritten);
-            if header & METADATA_STRIPE_FETCHED_BITMASK != 0 {
+            if header & metadata_flags::FETCHED != 0 {
                 fetch_state = Fetched;
                 fetched_stripes_count += 1;
             }
-            if header & METADATA_STRIPE_WRITTEN_BITMASK != 0 {
+            if header & metadata_flags::WRITTEN != 0 {
                 write_state = Written;
             }
-            if header & METADATA_STRIPE_NO_SOURCE_BITMASK != 0 {
+            if header & metadata_flags::HAS_SOURCE == 0 {
                 fetch_state = NoSource;
                 no_source_stripes_count += 1;
             }
@@ -81,13 +78,13 @@ impl SharedMetadataState {
     }
 
     pub fn set_stripe_header(&self, stripe_id: usize, header: u8) {
-        if header & METADATA_STRIPE_FETCHED_BITMASK != 0 {
+        if header & metadata_flags::FETCHED != 0 {
             let prev = self.stripe_fetch_states[stripe_id].swap(Fetched, Ordering::AcqRel);
             if prev != Fetched && prev != NoSource {
                 self.fetched_stripes_count.fetch_add(1, Ordering::AcqRel);
             }
         }
-        if header & METADATA_STRIPE_WRITTEN_BITMASK != 0 {
+        if header & metadata_flags::WRITTEN != 0 {
             self.stripe_write_states[stripe_id].store(Written, Ordering::Release)
         }
     }
@@ -126,11 +123,11 @@ mod tests {
             image_stripe_count,
         );
 
-        metadata.set_stripe_header(0, METADATA_STRIPE_FETCHED_BITMASK);
-        metadata.set_stripe_header(1, METADATA_STRIPE_WRITTEN_BITMASK);
+        metadata.set_stripe_header(0, metadata_flags::FETCHED | metadata_flags::HAS_SOURCE);
+        metadata.set_stripe_header(1, metadata_flags::WRITTEN | metadata_flags::HAS_SOURCE);
         metadata.set_stripe_header(
             2,
-            METADATA_STRIPE_FETCHED_BITMASK | METADATA_STRIPE_WRITTEN_BITMASK,
+            metadata_flags::FETCHED | metadata_flags::WRITTEN | metadata_flags::HAS_SOURCE,
         );
         let state = SharedMetadataState::new(&metadata);
 
@@ -164,21 +161,21 @@ mod tests {
         assert!(!state.stripe_written(stripe_id));
         assert_eq!(state.fetched_stripes(), 0);
 
-        state.set_stripe_header(stripe_id, METADATA_STRIPE_FETCHED_BITMASK);
+        state.set_stripe_header(stripe_id, metadata_flags::FETCHED);
         assert_eq!(state.stripe_fetch_state(stripe_id), Fetched);
         assert_eq!(state.fetched_stripes(), 1);
 
-        state.set_stripe_header(stripe_id, METADATA_STRIPE_WRITTEN_BITMASK);
+        state.set_stripe_header(stripe_id, metadata_flags::WRITTEN);
         assert!(state.stripe_written(stripe_id));
 
-        state.set_stripe_header(stripe_id, METADATA_STRIPE_FETCHED_BITMASK);
+        state.set_stripe_header(stripe_id, metadata_flags::FETCHED);
         assert_eq!(state.fetched_stripes(), 1);
     }
 
     #[test]
     fn test_stripe_fetched_if_needed() {
         let mut metadata = UbiMetadata::new(0, 10, 5);
-        metadata.set_stripe_header(0, METADATA_STRIPE_FETCHED_BITMASK);
+        metadata.set_stripe_header(0, metadata_flags::FETCHED | metadata_flags::HAS_SOURCE);
         let state = SharedMetadataState::new(&metadata);
         assert!(state.stripe_fetched_if_needed(0));
         assert!(!state.stripe_fetched_if_needed(1));

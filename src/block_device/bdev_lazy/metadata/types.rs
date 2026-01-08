@@ -2,9 +2,18 @@ use crate::{stripe_source::StripeSource, vhost_backend::SECTOR_SIZE};
 
 pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
-pub const METADATA_STRIPE_FETCHED_BITMASK: u8 = 1 << 0;
-pub const METADATA_STRIPE_WRITTEN_BITMASK: u8 = 1 << 1;
-pub const METADATA_STRIPE_NO_SOURCE_BITMASK: u8 = 1 << 2;
+
+/// Flags used in stripe headers within UbiMetadata
+pub mod metadata_flags {
+    /// Stripe data has been fetched from the stripe source and is present in
+    /// the disk device.
+    pub const FETCHED: u8 = 1 << 0;
+    /// Stripe has been written to the disk device.
+    pub const WRITTEN: u8 = 1 << 1;
+    /// Stripe exists in the base source. Such a stripe might have been fetched
+    /// already, or not yet.
+    pub const HAS_SOURCE: u8 = 1 << 2;
+}
 
 #[repr(C)]
 #[derive(Debug, Clone)]
@@ -19,7 +28,7 @@ pub struct UbiMetadata {
 
     // bit 0: fetched or not
     // bit 1: written or not
-    // bit 2: no source data
+    // bit 2: exists in source
     // bits 3-7: reserved
     pub stripe_headers: Vec<u8>,
 }
@@ -66,9 +75,9 @@ impl UbiMetadata {
         let headers = (0..base_stripe_count)
             .map(|i| {
                 if i < image_stripe_count {
-                    0
+                    metadata_flags::HAS_SOURCE
                 } else {
-                    METADATA_STRIPE_NO_SOURCE_BITMASK
+                    0
                 }
             })
             .collect::<Vec<_>>();
@@ -93,9 +102,9 @@ impl UbiMetadata {
         let headers = (0..base_stripe_count)
             .map(|i| {
                 if stripe_source.has_stripe(i) {
-                    0
+                    metadata_flags::HAS_SOURCE
                 } else {
-                    METADATA_STRIPE_NO_SOURCE_BITMASK
+                    0
                 }
             })
             .collect::<Vec<_>>();
@@ -205,13 +214,13 @@ mod tests {
     }
 
     #[test]
-    fn new_marks_stripes_past_image_as_no_source() {
+    fn new_marks_stripes_past_image_as_not_in_source() {
         let metadata = UbiMetadata::new(9, 10, 4);
         for i in 0..4 {
-            assert_eq!(metadata.stripe_header(i), 0);
+            assert_eq!(metadata.stripe_header(i), metadata_flags::HAS_SOURCE);
         }
         for i in 4..10 {
-            assert_eq!(metadata.stripe_header(i), METADATA_STRIPE_NO_SOURCE_BITMASK);
+            assert_eq!(metadata.stripe_header(i), 0);
         }
     }
 
@@ -255,9 +264,9 @@ mod tests {
 
         for i in 0..10 {
             let expected = if stripe_source.has_stripe(i) {
-                0
+                metadata_flags::HAS_SOURCE
             } else {
-                METADATA_STRIPE_NO_SOURCE_BITMASK
+                0
             };
             assert_eq!(metadata.stripe_header(i), expected);
         }

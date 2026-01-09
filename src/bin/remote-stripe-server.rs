@@ -1,11 +1,12 @@
 use std::{net::TcpListener, path::PathBuf, sync::Arc, thread};
 
-use base64::{engine::general_purpose::STANDARD, Engine};
 use clap::Parser;
 use log::{error, info};
 
 use ubiblk::{
-    stripe_server::{prepare_stripe_server, wrap_psk_server_stream, DynStream, PskCredentials},
+    stripe_server::{
+        parse_psk_credentials, prepare_stripe_server, wrap_psk_server_stream, DynStream,
+    },
     vhost_backend::Options,
     Error, KeyEncryptionCipher, Result,
 };
@@ -97,29 +98,5 @@ fn run(args: Args) -> Result<()> {
                 Err(err) => error!("client {addr}: {err}"),
             }
         });
-    }
-}
-
-fn parse_psk_credentials(
-    identity: Option<String>,
-    secret: Option<String>,
-    kek: &KeyEncryptionCipher,
-) -> Result<Option<PskCredentials>> {
-    match (identity, secret) {
-        (Some(identity), Some(secret)) => {
-            let encrypted_secret =
-                STANDARD
-                    .decode(secret)
-                    .map_err(|e| Error::InvalidParameter {
-                        description: format!("Failed to decode psk_secret: {e}"),
-                    })?;
-            let decrypted_secret = kek.decrypt_psk_secret(encrypted_secret)?;
-            Ok(Some(PskCredentials::new(identity, decrypted_secret)?))
-        }
-        (None, None) => Ok(None),
-        _ => Err(Error::InvalidParameter {
-            description: "psk_secret and psk_identity must both be set or both be unset"
-                .to_string(),
-        }),
     }
 }

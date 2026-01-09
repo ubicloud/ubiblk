@@ -43,6 +43,7 @@ mod bdev_lazy;
 mod bdev_null;
 mod bdev_sync;
 mod bdev_uring;
+mod wait_for_completion;
 
 #[cfg(test)]
 pub(crate) mod bdev_test;
@@ -62,34 +63,4 @@ pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_null::NullBlockDevice;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;
-
-pub fn wait_for_completion(
-    channel: &mut dyn IoChannel,
-    request_id: usize,
-    timeout: std::time::Duration,
-) -> Result<()> {
-    let start = std::time::Instant::now();
-    while start.elapsed() < timeout {
-        let completions = channel.poll();
-        for (id, success) in completions.into_iter() {
-            if id != request_id {
-                continue;
-            }
-            if !success {
-                return Err(UbiblkError::IoError {
-                    source: std::io::Error::other(format!("Failed request ID: {request_id}")),
-                });
-            }
-            return Ok(());
-        }
-        if !channel.busy() {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
-    }
-    Err(UbiblkError::IoError {
-        source: std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("Timeout while waiting for request ID {request_id}"),
-        ),
-    })
-}
+pub use wait_for_completion::wait_for_completion;

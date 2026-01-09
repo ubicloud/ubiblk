@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{atomic::AtomicBool, Arc, RwLock};
 
 use crate::vhost_backend::SECTOR_SIZE;
 
@@ -12,12 +12,21 @@ pub struct TestDeviceMetrics {
 
 struct TestIoChannel {
     mem: Arc<RwLock<Vec<u8>>>,
+    fail_next: Arc<AtomicBool>,
     finished_requests: Vec<(usize, bool)>,
     metrics: Arc<RwLock<TestDeviceMetrics>>,
 }
 
 impl IoChannel for TestIoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, _buf: SharedBuffer, _id: usize) {
+        if self
+            .fail_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.finished_requests.push((_id, false));
+            return;
+        }
+
         let mem = self.mem.read().unwrap();
         let mut buf = _buf.borrow_mut();
         let len = sector_count as usize * SECTOR_SIZE;
@@ -34,6 +43,14 @@ impl IoChannel for TestIoChannel {
     }
 
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, _buf: SharedBuffer, _id: usize) {
+        if self
+            .fail_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.finished_requests.push((_id, false));
+            return;
+        }
+
         let mut mem = self.mem.write().unwrap();
         let buf = _buf.borrow();
         let len = sector_count as usize * SECTOR_SIZE;
@@ -50,6 +67,14 @@ impl IoChannel for TestIoChannel {
     }
 
     fn add_flush(&mut self, _id: usize) {
+        if self
+            .fail_next
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.finished_requests.push((_id, false));
+            return;
+        }
+
         self.finished_requests.push((_id, true));
         self.metrics.write().unwrap().flushes += 1;
     }
@@ -71,6 +96,7 @@ pub struct TestBlockDevice {
     sector_count: u64,
     pub mem: Arc<RwLock<Vec<u8>>>,
     pub metrics: Arc<RwLock<TestDeviceMetrics>>,
+    pub fail_next: Arc<AtomicBool>,
 }
 
 impl TestBlockDevice {
@@ -81,6 +107,7 @@ impl TestBlockDevice {
         );
         let sector_count = size / SECTOR_SIZE as u64;
         let mem = Arc::new(RwLock::new(vec![0u8; size as usize]));
+        let fail_next = Arc::new(AtomicBool::new(false));
         TestBlockDevice {
             sector_count,
             mem,
@@ -89,6 +116,7 @@ impl TestBlockDevice {
                 writes: 0,
                 flushes: 0,
             })),
+            fail_next,
         }
     }
 
@@ -117,6 +145,7 @@ impl BlockDevice for TestBlockDevice {
             mem: self.mem.clone(),
             finished_requests: Vec::new(),
             metrics: self.metrics.clone(),
+            fail_next: self.fail_next.clone(),
         }))
     }
 
@@ -129,6 +158,7 @@ impl BlockDevice for TestBlockDevice {
             sector_count: self.sector_count,
             mem: self.mem.clone(),
             metrics: self.metrics.clone(),
+            fail_next: self.fail_next.clone(),
         })
     }
 }

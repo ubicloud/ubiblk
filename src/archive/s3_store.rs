@@ -1,18 +1,50 @@
-use std::sync::Arc;
+use std::{sync::Arc, thread::JoinHandle, time::Duration};
 
-use log::debug;
+use log::{debug, error};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use super::ArchiveStore;
 use crate::{Result, UbiblkError};
+use s3_store_workers::spawn_workers;
 
 type S3Client = aws_sdk_s3::Client;
 type S3ByteStream = aws_sdk_s3::primitives::ByteStream;
 
+mod s3_store_workers;
+
+enum S3Request {
+    Put {
+        name: String,
+        key: String,
+        data: Vec<u8>,
+    },
+    Get {
+        name: String,
+        key: String,
+    },
+    List {
+        respond_to: Sender<Result<Vec<String>>>,
+    },
+}
+
+enum S3Result {
+    Put {
+        name: String,
+        result: Result<()>,
+    },
+    Get {
+        name: String,
+        result: Result<Vec<u8>>,
+    },
+}
+
 pub struct S3Store {
-    client: S3Client,
-    bucket: String,
     prefix: Option<String>,
-    runtime: Arc<tokio::runtime::Runtime>,
+    request_tx: Option<Sender<S3Request>>,
+    result_rx: Receiver<S3Result>,
+    finished_puts: Vec<(String, Result<()>)>,
+    finished_gets: Vec<(String, Result<Vec<u8>>)>,
+    workers: Vec<JoinHandle<()>>,
 }
 
 impl S3Store {
@@ -20,7 +52,7 @@ impl S3Store {
         client: S3Client,
         bucket: String,
         prefix: Option<String>,
-        runtime: Arc<tokio::runtime::Runtime>,
+        worker_threads: usize,
     ) -> Result<Self> {
         let normalized_prefix = prefix.and_then(|p| {
             let p = p.trim_matches('/');
@@ -31,28 +63,26 @@ impl S3Store {
             }
         });
 
-        Ok(Self {
+        let (request_tx, request_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let bucket = Arc::new(bucket);
+        let workers = spawn_workers(
             client,
-            bucket,
+            Arc::clone(&bucket),
+            normalized_prefix.clone(),
+            worker_threads,
+            Arc::new(std::sync::Mutex::new(request_rx)),
+            result_tx,
+        )?;
+
+        Ok(Self {
             prefix: normalized_prefix,
-            runtime,
+            request_tx: Some(request_tx),
+            result_rx,
+            finished_puts: Vec::new(),
+            finished_gets: Vec::new(),
+            workers,
         })
-    }
-
-    fn key_with_prefix(&self, name: &str) -> String {
-        if let Some(prefix) = &self.prefix {
-            format!("{}{}", prefix, name)
-        } else {
-            name.to_string()
-        }
-    }
-
-    fn strip_prefix<'a>(&self, key: &'a str) -> &'a str {
-        if let Some(prefix) = &self.prefix {
-            key.strip_prefix(prefix).unwrap_or(key)
-        } else {
-            key
-        }
     }
 
     fn validate_key_name(name: &str) -> Result<()> {
@@ -76,107 +106,129 @@ impl S3Store {
         Ok(())
     }
 
-    fn list_objects_page(
-        &self,
-        continuation_token: Option<String>,
-    ) -> Result<(Vec<String>, Option<String>, bool)> {
-        let resp = self
-            .runtime
-            .block_on(async {
-                self.client
-                    .list_objects_v2()
-                    .bucket(&self.bucket)
-                    .set_prefix(self.prefix.clone())
-                    .set_continuation_token(continuation_token)
-                    .send()
-                    .await
-            })
-            .map_err(|e| UbiblkError::ArchiveError {
-                description: format!("Failed to list objects in S3: {e}"),
-            })?;
+    fn drain_results(&mut self) {
+        for result in self.result_rx.try_iter() {
+            match result {
+                S3Result::Put { name, result } => {
+                    self.finished_puts.push((name.clone(), result));
+                }
+                S3Result::Get { name, result } => {
+                    self.finished_gets.push((name.clone(), result));
+                }
+            }
+        }
+    }
+}
 
-        let page_keys = resp
-            .contents()
-            .iter()
-            .filter_map(|o| o.key())
-            .map(|k| self.strip_prefix(k).to_string())
-            .collect::<Vec<_>>();
-
-        let truncated = resp.is_truncated().unwrap_or(false);
-        let next = resp.next_continuation_token().map(|s| s.to_string());
-
-        Ok((page_keys, next, truncated))
+impl Drop for S3Store {
+    fn drop(&mut self) {
+        let _ = self.request_tx.take();
+        for worker in self.workers.drain(..) {
+            if let Err(e) = worker.join() {
+                error!("Failed to join S3 worker thread: {:?}", e);
+            }
+        }
+        self.drain_results();
     }
 }
 
 impl ArchiveStore for S3Store {
-    fn put_object(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        debug!("Uploading object to S3: {}", name);
-        Self::validate_key_name(name)?;
-        let key = self.key_with_prefix(name);
-
-        self.runtime
-            .block_on(async {
-                self.client
-                    .put_object()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .body(S3ByteStream::from(data.to_vec()))
-                    .send()
-                    .await
-            })
-            .map_err(|err| UbiblkError::ArchiveError {
-                description: format!("Failed to upload object to S3: {err}"),
-            })?;
-
-        Ok(())
+    fn start_put_object(&mut self, name: &str, data: &[u8]) {
+        debug!("Queueing S3 put object: {}", name);
+        if let Err(err) = Self::validate_key_name(name) {
+            self.finished_puts.push((name.to_string(), Err(err)));
+            return;
+        }
+        let key = key_with_prefix(&self.prefix, name);
+        let request = S3Request::Put {
+            name: name.to_string(),
+            key,
+            data: data.to_vec(),
+        };
+        if let Some(sender) = self.request_tx.as_ref() {
+            if let Err(err) = sender.send(request) {
+                self.finished_puts.push((
+                    name.to_string(),
+                    Err(UbiblkError::ArchiveError {
+                        description: format!("Failed to enqueue S3 put request: {err}"),
+                    }),
+                ));
+            }
+        } else {
+            self.finished_puts.push((
+                name.to_string(),
+                Err(UbiblkError::ArchiveError {
+                    description: "S3 worker queue is unavailable".to_string(),
+                }),
+            ));
+        }
     }
 
-    fn get_object(&self, name: &str) -> Result<Vec<u8>> {
-        debug!("Fetching object from S3: {}", name);
-        Self::validate_key_name(name)?;
-        let key = self.key_with_prefix(name);
+    fn start_get_object(&mut self, name: &str) {
+        debug!("Queueing S3 get object: {}", name);
+        if let Err(err) = Self::validate_key_name(name) {
+            self.finished_gets.push((name.to_string(), Err(err)));
+            return;
+        }
+        let key = key_with_prefix(&self.prefix, name);
+        let request = S3Request::Get {
+            name: name.to_string(),
+            key,
+        };
+        if let Some(sender) = self.request_tx.as_ref() {
+            if let Err(err) = sender.send(request) {
+                self.finished_gets.push((
+                    name.to_string(),
+                    Err(UbiblkError::ArchiveError {
+                        description: format!("Failed to enqueue S3 get request: {err}"),
+                    }),
+                ));
+            }
+        } else {
+            self.finished_gets.push((
+                name.to_string(),
+                Err(UbiblkError::ArchiveError {
+                    description: "S3 worker queue is unavailable".to_string(),
+                }),
+            ));
+        }
+    }
 
-        let output = self
-            .runtime
-            .block_on(async {
-                self.client
-                    .get_object()
-                    .bucket(&self.bucket)
-                    .key(key)
-                    .send()
-                    .await
-            })
-            .map_err(|err| UbiblkError::ArchiveError {
-                description: format!("Failed to fetch object from S3: {err}"),
-            })?;
+    fn poll_puts(&mut self) -> Vec<(String, Result<()>)> {
+        self.drain_results();
+        std::mem::take(&mut self.finished_puts)
+    }
 
-        let bytes = self
-            .runtime
-            .block_on(async { output.body.collect().await })
-            .map_err(|err| UbiblkError::ArchiveError {
-                description: format!("Failed to read object body: {err}"),
-            })?;
-
-        Ok(bytes.to_vec())
+    fn poll_gets(&mut self) -> Vec<(String, Result<Vec<u8>>)> {
+        self.drain_results();
+        std::mem::take(&mut self.finished_gets)
     }
 
     fn list_objects(&self) -> Result<Vec<String>> {
-        let mut out = Vec::new();
-        let mut continuation_token = None;
+        let (response_tx, response_rx) = mpsc::channel();
+        let sender = self.request_tx.as_ref().ok_or(UbiblkError::ArchiveError {
+            description: "S3 worker queue is unavailable".to_string(),
+        })?;
+        sender
+            .send(S3Request::List {
+                respond_to: response_tx,
+            })
+            .map_err(|err| UbiblkError::ArchiveError {
+                description: format!("Failed to enqueue S3 list request: {err}"),
+            })?;
+        response_rx
+            .recv_timeout(Duration::from_secs(60))
+            .map_err(|err| UbiblkError::ArchiveError {
+                description: format!("Failed to receive S3 list response: {err}"),
+            })?
+    }
+}
 
-        loop {
-            let (page, next_continuation_token, truncated) =
-                self.list_objects_page(continuation_token)?;
-            out.extend(page);
-
-            if !truncated {
-                break;
-            }
-            continuation_token = next_continuation_token;
-        }
-
-        Ok(out)
+fn key_with_prefix(prefix: &Option<String>, name: &str) -> String {
+    if let Some(prefix) = prefix {
+        format!("{}{}", prefix, name)
+    } else {
+        name.to_string()
     }
 }
 
@@ -193,22 +245,12 @@ mod tests {
 
     use super::*;
 
-    fn rt() -> Arc<tokio::runtime::Runtime> {
-        Arc::new(
-            tokio::runtime::Builder::new_current_thread()
-                .enable_io()
-                .enable_time()
-                .build()
-                .unwrap(),
-        )
-    }
-
     fn prepare_s3_store(bucket: &str, prefix: Option<&str>, rules: &[Rule]) -> S3Store {
         S3Store::new(
             mock_client!(aws_sdk_s3, rules),
             bucket.to_string(),
             prefix.map(|p| p.to_string()),
-            rt(),
+            2,
         )
         .unwrap()
     }
@@ -232,7 +274,7 @@ mod tests {
                 .build()
         });
 
-        let store = prepare_s3_store("test-bucket", Some("test-prefix"), &[get_rule]);
+        let mut store = prepare_s3_store("test-bucket", Some("test-prefix"), &[get_rule]);
 
         let result = store.get_object("test-object");
         assert!(result.is_ok());

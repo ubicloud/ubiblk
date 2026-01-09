@@ -107,6 +107,7 @@ impl StripeSourceBuilder {
                 endpoint,
                 profile,
                 credentials,
+                connections,
             } => {
                 let decrypted_credentials = Self::decrypt_aws_credentials(credentials, kek)?;
                 let runtime = create_runtime()?;
@@ -122,7 +123,7 @@ impl StripeSourceBuilder {
                     client,
                     bucket.to_string(),
                     prefix.clone(),
-                    runtime,
+                    *connections,
                 )?))
             }
         }
@@ -276,6 +277,7 @@ mod tests {
             region: Some("auto".to_string()),
             profile: Some("profile1".to_string()),
             credentials: Some(aws_creds),
+            connections: 4,
         };
         let store =
             StripeSourceBuilder::build_archive_store(&config, &KeyEncryptionCipher::default());

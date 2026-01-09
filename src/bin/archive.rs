@@ -83,6 +83,10 @@ struct Args {
     #[arg(long = "profile")]
     s3_profile: Option<String>,
 
+    /// Number of concurrent S3 connections.
+    #[arg(long = "concurrency", default_value_t = 4)]
+    s3_connections: usize,
+
     /// Encrypt archived stripes.
     #[arg(short = 'e', long = "encrypt", default_value_t = false)]
     encrypt: bool,
@@ -143,7 +147,13 @@ fn build_store(args: &Args, kek: &KeyEncryptionCipher) -> Result<Box<dyn Archive
                 args.s3_region.as_deref(),
                 decrypted_credentials,
             )?;
-            Ok(Box::new(S3Store::new(client, bucket, prefix, runtime)?))
+            let worker_threads = args.s3_connections;
+            Ok(Box::new(S3Store::new(
+                client,
+                bucket,
+                prefix,
+                worker_threads,
+            )?))
         }
     }
 }

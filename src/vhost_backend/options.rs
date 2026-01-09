@@ -44,6 +44,10 @@ fn default_device_id() -> String {
     "ubiblk".to_string()
 }
 
+fn default_s3_connections() -> usize {
+    4
+}
+
 fn deserialize_device_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
@@ -255,6 +259,8 @@ pub enum ArchiveStripeSourceConfig {
         profile: Option<String>,
         #[serde(default)]
         credentials: Option<AwsCredentials>,
+        #[serde(default = "default_s3_connections")]
+        connections: usize,
     },
 }
 
@@ -616,6 +622,7 @@ mod tests {
                         access_key_id: b"AKIAIAAAAAAAA".to_vec(),
                         secret_access_key: b"secretKey123456".to_vec(),
                     }),
+                    connections: 4,
                 }
             })
         );

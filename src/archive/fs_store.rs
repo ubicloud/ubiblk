@@ -4,12 +4,18 @@ use std::{fs, path::PathBuf};
 
 pub struct FileSystemStore {
     base_path: PathBuf,
+    finished_puts: Vec<(String, Result<()>)>,
+    finished_gets: Vec<(String, Result<Vec<u8>>)>,
 }
 
 impl FileSystemStore {
     pub fn new(base_path: PathBuf) -> Result<Self> {
         fs::create_dir_all(&base_path)?;
-        Ok(Self { base_path })
+        Ok(Self {
+            base_path,
+            finished_puts: Vec::new(),
+            finished_gets: Vec::new(),
+        })
     }
 
     fn validate_path(&self, path: &PathBuf) -> Result<()> {
@@ -27,10 +33,8 @@ impl FileSystemStore {
         }
         Ok(())
     }
-}
 
-impl ArchiveStore for FileSystemStore {
-    fn put_object(&mut self, name: &str, data: &[u8]) -> Result<()> {
+    fn try_put_object(&mut self, name: &str, data: &[u8]) -> Result<()> {
         let mut path = self.base_path.clone();
         path.push(name);
         self.validate_path(&path)?;
@@ -38,12 +42,32 @@ impl ArchiveStore for FileSystemStore {
         Ok(())
     }
 
-    fn get_object(&self, name: &str) -> Result<Vec<u8>> {
+    fn try_get_object(&self, name: &str) -> Result<Vec<u8>> {
         let mut path = self.base_path.clone();
         path.push(name);
         self.validate_path(&path)?;
         let data = fs::read(path)?;
         Ok(data)
+    }
+}
+
+impl ArchiveStore for FileSystemStore {
+    fn start_put_object(&mut self, name: &str, data: &[u8]) {
+        let result = self.try_put_object(name, data);
+        self.finished_puts.push((name.to_string(), result));
+    }
+
+    fn start_get_object(&mut self, name: &str) {
+        let result = self.try_get_object(name);
+        self.finished_gets.push((name.to_string(), result));
+    }
+
+    fn poll_puts(&mut self) -> Vec<(String, Result<()>)> {
+        std::mem::take(&mut self.finished_puts)
+    }
+
+    fn poll_gets(&mut self) -> Vec<(String, Result<Vec<u8>>)> {
+        std::mem::take(&mut self.finished_gets)
     }
 
     fn list_objects(&self) -> Result<Vec<String>> {

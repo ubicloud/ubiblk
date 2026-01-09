@@ -20,8 +20,8 @@ pub struct ArchiveStripeSource {
 }
 
 impl ArchiveStripeSource {
-    pub fn new(store: Box<dyn ArchiveStore>, kek: KeyEncryptionCipher) -> Result<Self> {
-        let metadata: ArchiveMetadata = Self::fetch_metadata(store.as_ref())?;
+    pub fn new(mut store: Box<dyn ArchiveStore>, kek: KeyEncryptionCipher) -> Result<Self> {
+        let metadata: ArchiveMetadata = Self::fetch_metadata(store.as_mut())?;
         let stripe_object_names = Self::fetch_stripe_info(store.as_ref())?;
         let max_stripe_id = stripe_object_names.keys().max().cloned().unwrap_or(0);
         let stripe_sector_count = metadata.stripe_sector_count;
@@ -40,7 +40,7 @@ impl ArchiveStripeSource {
         })
     }
 
-    fn fetch_metadata(store: &dyn ArchiveStore) -> Result<ArchiveMetadata> {
+    fn fetch_metadata(store: &mut dyn ArchiveStore) -> Result<ArchiveMetadata> {
         let bytes = store.get_object("metadata.yaml")?;
         let metadata: ArchiveMetadata =
             serde_yaml::from_slice(&bytes).map_err(|e| UbiblkError::MetadataError {
@@ -179,6 +179,8 @@ impl StripeSource for ArchiveStripeSource {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use crate::{
         block_device::{
             bdev_test::TestBlockDevice, metadata_flags, shared_buffer, BlockDevice, UbiMetadata,
@@ -198,6 +200,10 @@ mod tests {
         disk_bdev: Box<TestBlockDevice>,
         image_bdev: Box<TestBlockDevice>,
         archiver: StripeArchiver,
+    }
+
+    fn clone_memstore(store: &MemStore) -> Box<MemStore> {
+        Box::new(MemStore::new_with_objects(Rc::clone(&store.objects)))
     }
 
     fn prep(
@@ -230,7 +236,7 @@ mod tests {
             Box::new(stripe_source),
             disk_bdev.as_ref(),
             metadata,
-            store.clone(),
+            clone_memstore(store.as_ref()),
             encrypted,
             kek,
         )
@@ -280,7 +286,7 @@ mod tests {
         }
 
         setup.archiver.archive_all().unwrap();
-        let mut source = ArchiveStripeSource::new(setup.store.clone(), kek).unwrap();
+        let mut source = ArchiveStripeSource::new(clone_memstore(&setup.store), kek).unwrap();
 
         assert_eq!(
             source.sector_count(),
@@ -363,7 +369,7 @@ mod tests {
         let mut setup = prep(4, 2, false, &[0, 1], kek.clone());
         setup.archiver.archive_all().unwrap();
         setup.store.put_object("unexpected_item", b"data").unwrap();
-        let result = ArchiveStripeSource::new(setup.store.clone(), kek);
+        let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);
         assert!(
             result.is_err()
                 && result
@@ -385,7 +391,7 @@ mod tests {
             .store
             .put_object("stripe_0000000002_invalidhash", b"corrupted data")
             .unwrap();
-        let result = ArchiveStripeSource::new(setup.store.clone(), kek);
+        let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);
         assert!(result.is_ok());
 
         let mut source = result.unwrap();
@@ -418,7 +424,7 @@ mod tests {
             .put_object("stripe_0000000001_somehash", b"some data")
             .unwrap();
 
-        let result = ArchiveStripeSource::new(setup.store.clone(), kek);
+        let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);
         assert!(result.is_err());
         assert!(result
             .err()

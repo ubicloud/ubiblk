@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use openssl::{
     error::ErrorStack,
     ssl::{Ssl, SslContext, SslContextBuilder, SslMethod, SslOptions, SslStream, SslVerifyMode},
@@ -59,6 +60,33 @@ impl PskCredentials {
             });
         }
         Ok(())
+    }
+}
+
+/// Parse PSK credentials from optional identity and base64-encoded secret.
+/// This is used in command-line tools where the secret is provided as a
+/// base64-encoded string.
+pub fn parse_psk_credentials(
+    identity: Option<String>,
+    secret_b64: Option<String>,
+    kek: &KeyEncryptionCipher,
+) -> Result<Option<PskCredentials>> {
+    match (identity, secret_b64) {
+        (Some(identity), Some(secret_b64)) => {
+            let encrypted_secret =
+                STANDARD
+                    .decode(secret_b64)
+                    .map_err(|e| UbiblkError::InvalidParameter {
+                        description: format!("Failed to decode psk_secret: {e}"),
+                    })?;
+            let decrypted_secret = kek.decrypt_psk_secret(encrypted_secret)?;
+            Ok(Some(PskCredentials::new(identity, decrypted_secret)?))
+        }
+        (None, None) => Ok(None),
+        _ => Err(UbiblkError::InvalidParameter {
+            description: "psk_secret and psk_identity must both be set or both be unset"
+                .to_string(),
+        }),
     }
 }
 
@@ -222,6 +250,50 @@ mod tests {
             assert!(description.contains("at least 16 bytes"));
         } else {
             panic!("Wrong error type");
+        }
+    }
+
+    #[test]
+    fn test_parse_psk_credentials_success() {
+        let kek = KeyEncryptionCipher::default();
+        let secret = vec![0xBB; 32];
+        let secret_b64 = STANDARD.encode(&secret);
+        let creds =
+            parse_psk_credentials(Some("test_identity".to_string()), Some(secret_b64), &kek)
+                .expect("Should parse PSK credentials")
+                .expect("Should be Some credentials");
+
+        assert_eq!(creds.identity, "test_identity");
+        assert_eq!(creds.secret, secret);
+    }
+
+    #[test]
+    fn test_parse_psk_credentials_mismatched_args() {
+        let kek = KeyEncryptionCipher::default();
+
+        // Identity, no secret
+        let err = parse_psk_credentials(Some("test".to_string()), None, &kek).unwrap_err();
+        assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
+
+        // Secret, no identity
+        let err = parse_psk_credentials(None, Some("c2VjcmV0".to_string()), &kek).unwrap_err();
+        assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
+    }
+
+    #[test]
+    fn test_parse_psk_credentials_invalid_b64() {
+        let kek = KeyEncryptionCipher::default();
+        let err = parse_psk_credentials(
+            Some("test".to_string()),
+            Some("not-base64".to_string()),
+            &kek,
+        )
+        .unwrap_err();
+
+        if let UbiblkError::InvalidParameter { description } = err {
+            assert!(description.contains("Failed to decode psk_secret"));
+        } else {
+            panic!("Wrong error type, got {:?}", err);
         }
     }
 }

@@ -68,4 +68,6 @@ mod session;
 
 pub use client::connect_to_stripe_server;
 pub use prepare::prepare_stripe_server;
-pub use psk::{wrap_psk_client_stream, wrap_psk_server_stream, PskCredentials};
+pub use psk::{
+    parse_psk_credentials, wrap_psk_client_stream, wrap_psk_server_stream, PskCredentials,
+};

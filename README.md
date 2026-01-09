@@ -30,6 +30,11 @@ cargo build --release
 cargo test
 ```
 
+## Documentation
+
+- [Remote stripe server, shell, and protocol](docs/remote-stripe.md)
+- [Archive binary and archive format](docs/archive.md)
+
 ## vhost-backend
 
 The `vhost-backend` utility launches a vhost-user-blk backend based on a YAML

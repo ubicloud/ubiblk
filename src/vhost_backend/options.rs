@@ -69,7 +69,6 @@ pub struct Options {
     #[serde(default)]
     pub stripe_source: Option<StripeSourceConfig>,
     pub metadata_path: Option<String>,
-    pub io_debug_path: Option<String>,
     pub rpc_socket_path: Option<String>,
     pub socket: String,
 

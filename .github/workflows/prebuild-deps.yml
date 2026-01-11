@@ -286,7 +286,12 @@ jobs:
           cd artifacts
 
           # Combine all SHA256SUMS files
-          cat prebuild-deps-*/SHA256SUMS-*.txt > SHA256SUMS
+          if ls prebuild-deps-*/SHA256SUMS-*.txt 1> /dev/null 2>&1; then
+            cat prebuild-deps-*/SHA256SUMS-*.txt > SHA256SUMS
+          else
+            echo "Error: No SHA256SUMS files found"
+            exit 1
+          fi
 
           echo "=== Combined SHA256SUMS ==="
           cat SHA256SUMS
@@ -303,7 +308,13 @@ jobs:
           MANIFESTEOF
 
           first=true
+          found=false
           for file in prebuild-deps-*/*.tar.zst; do
+            # Check if glob matched any files
+            if [ ! -e "$file" ]; then
+              continue
+            fi
+            found=true
             if [ "$first" = true ]; then
               first=false
             else
@@ -314,6 +325,11 @@ jobs:
             size=$(stat -c%s "$file")
             echo "    {\"filename\": \"$filename\", \"sha256\": \"$sha256\", \"size\": $size}" >> manifest.json
           done
+
+          if [ "$found" = false ]; then
+            echo "Error: No .tar.zst artifacts found"
+            exit 1
+          fi
 
           cat >> manifest.json << 'MANIFESTEOF'
             ]

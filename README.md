@@ -34,7 +34,6 @@ cargo test
 
 - [Remote stripe server, shell, and protocol](docs/remote-stripe.md)
 - [Archive binary and archive format](docs/archive.md)
-- [Prebuilt dependencies for CI/CD](docs/deps-prebuilt.md)
 
 ## vhost-backend
 

@@ -70,7 +70,7 @@ impl ArchiveStripeSource {
         Ok(stripe_object_names)
     }
 
-    fn parse_stripe_object_name(object_name: &str) -> Result<(usize, String)> {
+    pub fn parse_stripe_object_name(object_name: &str) -> Result<(usize, String)> {
         let parts: Vec<&str> = object_name.split('_').collect();
         if parts.len() != 3 || parts[0] != "stripe" {
             return Err(UbiblkError::ArchiveError {
@@ -239,6 +239,7 @@ mod tests {
             clone_memstore(store.as_ref()),
             encrypted,
             kek,
+            1,
         )
         .unwrap();
 

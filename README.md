@@ -259,8 +259,9 @@ xts --config config.yaml [--kek kek.yaml] [--start <SECTOR>] [--len <SECTORS>] \
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 or
-later (AGPL-3.0-or-later), unless otherwise stated.
+This project is licensed under the GNU Affero General Public License v3.0
+(**AGPL-3.0-only**), unless otherwise stated.
 
 Some portions of the code are derived from third-party projects, and retain
-their original licenses. See comments in source files for details.
+their original licenses. See comments in source files and the `LICENSES`
+directory for details.

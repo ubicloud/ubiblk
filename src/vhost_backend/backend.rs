@@ -123,6 +123,8 @@ impl UbiBlkBackend {
 //
 // You can find CloudHypervisor's code at
 // https://github.com/cloud-hypervisor/cloud-hypervisor
+//
+// and the full text of the licenses in the LICENSES directory.
 impl VhostUserBackend for UbiBlkBackend {
     type Bitmap = BitmapMmapRegion;
     type Vring = VringRwLock<GuestMemoryAtomic<GuestMemoryMmap>>;

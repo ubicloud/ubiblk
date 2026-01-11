@@ -1,0 +1,60 @@
+name: Prebuild CI Dependencies
+on:
+  workflow_dispatch:
+
+env:
+  ISA_L_CRYPTO_VERSION: "v2.25.0"
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      matrix:
+        include:
+          - runner: ubicloud-standard-4
+            arch: x86_64
+            cflags: "-O2 -pipe -fPIC -march=x86-64 -mtune=generic -fcf-protection=none"
+          - runner: ubicloud-standard-4-arm
+            arch: aarch64
+            cflags: "-O2 -pipe -fPIC -march=armv8-a"
+    
+    steps:
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf libtool nasm clang build-essential
+
+      - name: Clone and build isa-l_crypto
+        run: |
+          set -euo pipefail
+
+          git clone --depth 1 --branch $ISA_L_CRYPTO_VERSION https://github.com/intel/isa-l_crypto
+          cd isa-l_crypto
+          ./autogen.sh
+
+          export CFLAGS="${{ matrix.cflags }}"
+          export CXXFLAGS="${{ matrix.cflags }}"
+          export LDFLAGS=""
+
+          ./configure --prefix=/usr \
+            --enable-static  \
+            --enable-shared \
+            --disable-dependency-tracking
+          make -j$(nproc)
+
+          make install DESTDIR="${{ github.workspace }}/isa-l_crypto-stage"
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -C "${{ github.workspace }}/isa-l_crypto-stage" -czf "isa-l_crypto-${{ matrix.arch }}.tar.gz" \
+            --owner=0 --group=0 --numeric-owner .
+      
+      - uses: ncipollo/release-action@v1
+        with:
+          artifacts: isa-l_crypto-*.tar.gz
+          name: prebuilt-ci-deps
+          allowUpdates: true
+          tag: prebuilt-ci-deps

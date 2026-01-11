@@ -64,7 +64,6 @@ The configuration YAML must define:
 - `write_through`: (Optional) Enable the write-through mode.
 - `autofetch`: (Optional) Automatically fetch stripes from the image in the background.
 - `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
-- `io_debug_path`: (Optional) Path for I/O debug log.
 - `device_id`: (Optional) Identifier returned to the guest for GET_ID.
 - `io_engine`: (Optional) I/O engine to use for file operations. Allowed values: `io_uring` (default), `sync`.
 - `cpus`: (Optional) List of CPU indices to pin backend threads to. When
@@ -118,7 +117,6 @@ queue_size: 256                          # Integer: size of each virtqueue
 seg_size_max: 4096                       # Integer: max IO segment size (bytes)
 seg_count_max: 1                         # Integer: max segments per IO
 poll_queue_timeout_us: 500               # Integer: poll timeout in microseconds
-io_debug_path: "/tmp/io_debug.log"       # Optional: path for I/O debug log
 copy_on_read: false                      # Optional: copy stripes on first read
 track_written: false                     # Optional: track written stripes
 write_through: false                     # Optional: enable write-through mode
@@ -234,15 +232,6 @@ working with encrypted metadata.
 
 ```bash
 dump-metadata --config config.yaml [--kek kek.yaml]
-```
-
-#### replay-log
-
-`replay-log` replays READ and WRITE operations stored in an I/O debug log onto a
-disk image. The log is produced by the backend when `io_debug_path` is set.
-
-```bash
-replay-log --log io_debug.log --disk disk.img
 ```
 
 #### xts

@@ -1,7 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use ubiblk::{vhost_backend::*, KeyEncryptionCipher};
-use ubiblk::{Error, Result};
+use ubiblk::{vhost_backend::*, KeyEncryptionCipher, Result};
 
 #[derive(Parser)]
 #[command(
@@ -31,12 +30,6 @@ fn main() -> Result<()> {
 
     let config_path = &args.config;
     let options = Options::load_from_file(&PathBuf::from(config_path))?;
-
-    if options.num_queues > 1 && options.io_debug_path.is_some() {
-        return Err(Error::InvalidParameter {
-            description: "I/O debug path is not supported with multiple queues.".to_string(),
-        });
-    }
 
     let kek_path = args.kek.as_ref().map(PathBuf::from);
     let kek = KeyEncryptionCipher::load(kek_path.as_ref(), args.unlink_kek)?;

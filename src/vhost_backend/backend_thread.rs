@@ -1,6 +1,4 @@
 use std::cell::RefCell;
-use std::fs;
-use std::io::Write;
 use std::rc::Rc;
 use std::{ops::Deref, sync::RwLockWriteGuard};
 
@@ -49,7 +47,6 @@ pub struct UbiBlkBackendThread {
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
     io_channel: Box<dyn IoChannel>,
     request_slots: Vec<RequestSlot>,
-    io_debug_file: Option<fs::File>,
     device_id: String,
     alignment: usize,
     pinned: bool,
@@ -97,29 +94,12 @@ impl UbiBlkBackendThread {
             UbiblkError::ThreadCreation { source: e }
         })?;
 
-        let io_debug_file = match options.io_debug_path {
-            Some(ref path) => {
-                let file = fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open(path)
-                    .map_err(|e| {
-                        error!("failed to open io debug file: {e:?}");
-                        UbiblkError::IoError { source: e }
-                    })?;
-                Some(file)
-            }
-            None => None,
-        };
-
         Ok(UbiBlkBackendThread {
             event_idx: false,
             kill_evt,
             mem,
             io_channel,
             request_slots,
-            io_debug_file,
             device_id: options.device_id.clone(),
             alignment,
             pinned: false,
@@ -252,26 +232,6 @@ impl UbiBlkBackendThread {
             self.complete_io(vring, &desc_chain, req.status_addr, status);
             self.put_request_slot(request_id);
         }
-
-        if let Some(file) = self.io_debug_file.as_mut() {
-            for request_id in finished_reads {
-                let req = &self.request_slots[request_id];
-                let borrow = req.buffer.borrow();
-                let buf = borrow.as_slice();
-                file.write_fmt(format_args!(
-                    "READ\n{}\n{}\n{}\n",
-                    req.request_sector,
-                    req.request_len,
-                    crate::utils::debug::encode_hex(buf, req.request_len)
-                ))
-                .unwrap_or_else(|e| {
-                    error!("failed to write to io debug file: {e:?}");
-                });
-                file.flush().unwrap_or_else(|e| {
-                    error!("failed to flush io debug file: {e:?}");
-                });
-            }
-        }
     }
 
     pub(crate) fn request_len(&self, request: &Request) -> usize {
@@ -346,23 +306,6 @@ impl UbiBlkBackendThread {
             );
             self.put_request_slot(id);
             return;
-        }
-
-        if let Some(file) = self.io_debug_file.as_mut() {
-            let borrow = self.request_slots[id].buffer.borrow();
-            let buf = borrow.as_slice();
-            file.write_fmt(format_args!(
-                "WRITE\n{}\n{}\n{}\n",
-                request.sector,
-                len,
-                crate::utils::debug::encode_hex(buf, len)
-            ))
-            .unwrap_or_else(|e| {
-                error!("failed to write to io debug file: {e:?}");
-            });
-            file.flush().unwrap_or_else(|e| {
-                error!("failed to flush io debug file: {e:?}");
-            });
         }
 
         let sector_count = (len / SECTOR_SIZE) as u32;

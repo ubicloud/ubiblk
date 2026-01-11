@@ -3,8 +3,10 @@ name: Prebuild Dependencies
 on:
   workflow_dispatch:
     inputs:
+      # Note: ubuntu_base is provided for documentation purposes.
+      # Builds always use Ubuntu 22.04 containers to ensure forward compatibility with 24.04.
       ubuntu_base:
-        description: 'Ubuntu base version (container will use 22.04 for compatibility)'
+        description: 'Ubuntu base version (builds always use 22.04 for compatibility)'
         required: false
         default: '22.04'
         type: choice
@@ -285,11 +287,17 @@ jobs:
         run: |
           cd artifacts
 
-          # Combine all SHA256SUMS files
-          if ls prebuild-deps-*/SHA256SUMS-*.txt 1> /dev/null 2>&1; then
-            cat prebuild-deps-*/SHA256SUMS-*.txt > SHA256SUMS
-          else
-            echo "Error: No SHA256SUMS files found"
+          # Combine all SHA256SUMS files using find for robustness
+          echo "=== Finding SHA256SUMS files ==="
+          find . -name 'SHA256SUMS-*.txt' -type f
+          
+          if ! find . -name 'SHA256SUMS-*.txt' -type f -exec cat {} + > SHA256SUMS; then
+            echo "Error: Failed to combine SHA256SUMS files"
+            exit 1
+          fi
+          
+          if [ ! -s SHA256SUMS ]; then
+            echo "Error: No SHA256SUMS files found or combined file is empty"
             exit 1
           fi
 
@@ -307,13 +315,13 @@ jobs:
             "artifacts": [
           MANIFESTEOF
 
+          # Find all .tar.zst files using find for robustness
+          echo "=== Finding artifact files ==="
+          find . -name '*.tar.zst' -type f
+          
           first=true
           found=false
-          for file in prebuild-deps-*/*.tar.zst; do
-            # Check if glob matched any files
-            if [ ! -e "$file" ]; then
-              continue
-            fi
+          while IFS= read -r file; do
             found=true
             if [ "$first" = true ]; then
               first=false
@@ -324,7 +332,7 @@ jobs:
             sha256=$(sha256sum "$file" | cut -d' ' -f1)
             size=$(stat -c%s "$file")
             echo "    {\"filename\": \"$filename\", \"sha256\": \"$sha256\", \"size\": $size}" >> manifest.json
-          done
+          done < <(find . -name '*.tar.zst' -type f | sort)
 
           if [ "$found" = false ]; then
             echo "Error: No .tar.zst artifacts found"

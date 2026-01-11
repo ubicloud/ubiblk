@@ -64,6 +64,19 @@ jobs:
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
           echo "build_host=$(uname -a)" >> $GITHUB_OUTPUT
       
+      - name: Validate inputs
+        run: |
+          # Basic validation of git refs to prevent injection
+          # Allow alphanumeric, dots, hyphens, underscores, and forward slashes
+          if ! echo "${{ inputs.isal_ref }}" | grep -qE '^[a-zA-Z0-9._/-]+$'; then
+            echo "Error: Invalid isal_ref format"
+            exit 1
+          fi
+          if ! echo "${{ inputs.blkio_ref }}" | grep -qE '^[a-zA-Z0-9._/-]+$'; then
+            echo "Error: Invalid blkio_ref format"
+            exit 1
+          fi
+
       - name: Create build script
         run: |
           cat > /tmp/build-deps.sh << 'BUILDSCRIPT'
@@ -289,9 +302,9 @@ jobs:
 
           # Combine all SHA256SUMS files using find for robustness
           echo "=== Finding SHA256SUMS files ==="
-          find . -name 'SHA256SUMS-*.txt' -type f
+          find . -name 'SHA256SUMS-*.txt' -type f | sort
           
-          if ! find . -name 'SHA256SUMS-*.txt' -type f -exec cat {} + > SHA256SUMS; then
+          if ! find . -name 'SHA256SUMS-*.txt' -type f | sort | xargs cat > SHA256SUMS; then
             echo "Error: Failed to combine SHA256SUMS files"
             exit 1
           fi

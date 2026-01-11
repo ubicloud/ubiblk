@@ -30,7 +30,10 @@ env:
 jobs:
   build:
     runs-on: ${{ matrix.runner }}
-    
+
+    outputs:
+      build_date: ${{ steps.buildinfo.outputs.build_date }}
+
     strategy:
       matrix:
         include:
@@ -42,11 +45,17 @@ jobs:
             arch: arm64
             docker_platform: linux/arm64
             cflags_arch: "-march=armv8-a"
-    
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-      
+
+      - name: Set up QEMU (for cross-platform builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Set up build environment info
         id: buildinfo
         run: |
@@ -275,15 +284,15 @@ jobs:
       - name: Combine checksums and create manifest
         run: |
           cd artifacts
-          
+
           # Combine all SHA256SUMS files
           cat prebuild-deps-*/SHA256SUMS-*.txt > SHA256SUMS
-          
+
           echo "=== Combined SHA256SUMS ==="
           cat SHA256SUMS
-          
+
           # Create manifest JSON
-          cat > manifest.json << 'MANIFESTEOF'
+          cat > manifest.json << MANIFESTEOF
           {
             "build_date": "${{ needs.build.outputs.build_date }}",
             "isal_ref": "${{ inputs.isal_ref }}",
@@ -292,7 +301,7 @@ jobs:
             "architectures": ["x86_64", "arm64"],
             "artifacts": [
           MANIFESTEOF
-          
+
           first=true
           for file in prebuild-deps-*/*.tar.zst; do
             if [ "$first" = true ]; then
@@ -305,12 +314,12 @@ jobs:
             size=$(stat -c%s "$file")
             echo "    {\"filename\": \"$filename\", \"sha256\": \"$sha256\", \"size\": $size}" >> manifest.json
           done
-          
+
           cat >> manifest.json << 'MANIFESTEOF'
             ]
           }
           MANIFESTEOF
-          
+
           echo ""
           echo "=== Manifest ==="
           cat manifest.json

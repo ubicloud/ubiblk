@@ -1,10 +1,9 @@
 use std::{
-    sync::{
-        mpsc::{self, Sender},
-        Arc, Mutex,
-    },
+    sync::Arc,
     thread::{self, JoinHandle},
 };
+
+use crossbeam_channel::{Receiver, Sender};
 
 use log::{debug, error, warn};
 
@@ -21,7 +20,7 @@ pub(super) fn spawn_workers(
     bucket: Arc<String>,
     prefix: Option<String>,
     mut worker_threads: usize,
-    request_rx: Arc<Mutex<mpsc::Receiver<S3Request>>>,
+    request_rx: Receiver<S3Request>,
     result_tx: Sender<S3Result>,
 ) -> Result<Vec<JoinHandle<()>>> {
     let client_config = client.config().clone();
@@ -43,7 +42,7 @@ pub(super) fn spawn_workers(
             bucket: Arc::clone(&bucket),
             prefix: prefix.clone(),
         };
-        let rx = Arc::clone(&request_rx);
+        let rx = request_rx.clone();
         let tx = result_tx.clone();
 
         let handle = thread::spawn(move || run_worker_loop(ctx, rx, tx));
@@ -53,11 +52,7 @@ pub(super) fn spawn_workers(
     Ok(workers)
 }
 
-fn run_worker_loop(
-    ctx: WorkerContext,
-    rx: Arc<Mutex<mpsc::Receiver<S3Request>>>,
-    tx: Sender<S3Result>,
-) {
+fn run_worker_loop(ctx: WorkerContext, rx: Receiver<S3Request>, tx: Sender<S3Result>) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -69,26 +64,10 @@ fn run_worker_loop(
         }
     };
 
-    loop {
-        let request = {
-            let receiver = match rx.lock() {
-                Ok(guard) => guard,
-                Err(poisoned_err) => {
-                    error!("Critical: S3 request mutex is poisoned: {poisoned_err}");
-                    break;
-                }
-            };
-            receiver.recv()
-        };
-
-        match request {
-            Ok(req) => {
-                runtime.block_on(async {
-                    process_request(&ctx, req, &tx).await;
-                });
-            }
-            Err(_) => break, // Channel closed
-        }
+    while let Ok(req) = rx.recv() {
+        runtime.block_on(async {
+            process_request(&ctx, req, &tx).await;
+        });
     }
 }
 
@@ -222,7 +201,6 @@ fn strip_prefix<'a>(prefix: &Option<String>, key: &'a str) -> &'a str {
 
 #[cfg(test)]
 mod tests {
-    use mpsc;
     use std::time::Duration;
 
     use aws_sdk_s3::{
@@ -233,24 +211,21 @@ mod tests {
         types::Object,
     };
     use aws_smithy_mocks::{mock, mock_client, Rule};
+    use crossbeam_channel::unbounded;
 
     use super::*;
 
     fn spawn_test_workers(
         rules: &[Rule],
-    ) -> (
-        mpsc::Sender<S3Request>,
-        mpsc::Receiver<S3Result>,
-        Vec<JoinHandle<()>>,
-    ) {
-        let (request_tx, request_rx) = mpsc::channel();
-        let (result_tx, result_rx) = mpsc::channel();
+    ) -> (Sender<S3Request>, Receiver<S3Result>, Vec<JoinHandle<()>>) {
+        let (request_tx, request_rx) = unbounded();
+        let (result_tx, result_rx) = unbounded();
         let workers = spawn_workers(
             mock_client!(aws_sdk_s3, rules),
             Arc::new("test-bucket".to_string()),
             Some("prefix/".to_string()),
             1,
-            Arc::new(Mutex::new(request_rx)),
+            request_rx,
             result_tx,
         )
         .expect("failed to spawn workers");
@@ -333,7 +308,7 @@ mod tests {
         });
 
         let (request_tx, _result_rx, workers) = spawn_test_workers(&[list_rule]);
-        let (response_tx, response_rx) = mpsc::channel();
+        let (response_tx, response_rx) = unbounded();
 
         request_tx
             .send(S3Request::List {

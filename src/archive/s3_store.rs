@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread::JoinHandle, time::Duration};
 
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{debug, error};
-use std::sync::mpsc::{self, Receiver, Sender};
 
 use super::ArchiveStore;
 use crate::{Result, UbiblkError};
@@ -63,15 +63,15 @@ impl S3Store {
             }
         });
 
-        let (request_tx, request_rx) = mpsc::channel();
-        let (result_tx, result_rx) = mpsc::channel();
+        let (request_tx, request_rx) = unbounded();
+        let (result_tx, result_rx) = unbounded();
         let bucket = Arc::new(bucket);
         let workers = spawn_workers(
             client,
             Arc::clone(&bucket),
             normalized_prefix.clone(),
             worker_threads,
-            Arc::new(std::sync::Mutex::new(request_rx)),
+            request_rx,
             result_tx,
         )?;
 
@@ -205,7 +205,7 @@ impl ArchiveStore for S3Store {
     }
 
     fn list_objects(&self) -> Result<Vec<String>> {
-        let (response_tx, response_rx) = mpsc::channel();
+        let (response_tx, response_rx) = unbounded();
         let sender = self.request_tx.as_ref().ok_or(UbiblkError::ArchiveError {
             description: "S3 worker queue is unavailable".to_string(),
         })?;

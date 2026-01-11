@@ -1,24 +1,22 @@
-use std::time::Duration;
+use std::collections::HashMap;
 
 use log::{debug, info};
 
 use super::ArchiveStore;
 use crate::{
     archive::ArchiveMetadata,
-    block_device::{
-        metadata_flags, shared_buffer, BlockDevice, IoChannel, SharedBuffer, UbiMetadata,
-    },
+    block_device::{metadata_flags, BlockDevice, IoChannel, SharedBuffer, UbiMetadata},
     crypt::XtsBlockCipher,
-    stripe_source::StripeSource,
-    utils::hash::sha256_hex,
+    stripe_source::{ArchiveStripeSource, StripeSource},
+    utils::{aligned_buffer::BUFFER_ALIGNMENT, hash::sha256_hex, AlignedBufferPool},
     vhost_backend::SECTOR_SIZE,
-    KeyEncryptionCipher, Result,
+    KeyEncryptionCipher, Result, UbiblkError,
 };
 
-// Timeout used for both fetching stripes from the stripe source and
-// reading/writing them on the underlying block device. 30 seconds is chosen as
-// a conservative upper bound.
-const STRIPE_ARCHIVER_TIMEOUT: Duration = Duration::from_secs(30);
+struct StripeState {
+    buffer: SharedBuffer,
+    buffer_index: usize,
+}
 
 pub struct StripeArchiver {
     stripe_source: Box<dyn StripeSource>,
@@ -28,6 +26,8 @@ pub struct StripeArchiver {
     archive_store: Box<dyn ArchiveStore>,
     block_cipher: Option<XtsBlockCipher>,
     kek: KeyEncryptionCipher,
+    buffer_pool: AlignedBufferPool,
+    stripe_states: HashMap<usize, StripeState>,
 }
 
 impl StripeArchiver {
@@ -38,6 +38,7 @@ impl StripeArchiver {
         archive_store: Box<dyn ArchiveStore>,
         encrypt: bool,
         kek: KeyEncryptionCipher,
+        concurrency: usize,
     ) -> Result<Self> {
         let block_cipher = if encrypt {
             Some(XtsBlockCipher::random()?)
@@ -45,6 +46,11 @@ impl StripeArchiver {
             None
         };
         let stripe_count = bdev.stripe_count(metadata.stripe_sector_count());
+        let buffer_pool = AlignedBufferPool::new(
+            BUFFER_ALIGNMENT,
+            concurrency,
+            metadata.stripe_sector_count() as usize * SECTOR_SIZE,
+        );
         Ok(Self {
             stripe_source,
             io_channel: bdev.create_channel()?,
@@ -53,39 +59,132 @@ impl StripeArchiver {
             block_cipher,
             kek,
             stripe_count,
+            buffer_pool,
+            stripe_states: HashMap::new(),
         })
     }
 
     pub fn archive_all(&mut self) -> crate::Result<()> {
-        for stripe_id in 0..self.stripe_count {
-            if self.stripe_should_be_archived(stripe_id) {
-                self.archive_stripe(stripe_id)?;
+        let mut next_stripe_id = 0;
+        while next_stripe_id < self.stripe_count {
+            if !self.stripe_should_be_archived(next_stripe_id) {
+                next_stripe_id += 1;
+                continue;
             }
+
+            if self.maybe_start_next_stripe(next_stripe_id)? {
+                next_stripe_id += 1;
+            }
+
+            self.poll_fetches()?;
+            self.poll_uploads()?;
         }
+
+        // Drain all in-flight operations before putting metadata
+        while !self.stripe_states.is_empty() {
+            self.poll_fetches()?;
+            self.poll_uploads()?;
+        }
+
         self.put_metadata()?;
         Ok(())
     }
 
-    fn archive_stripe(&mut self, stripe_id: usize) -> crate::Result<()> {
-        info!("Archiving stripe {}", stripe_id);
+    fn maybe_start_next_stripe(&mut self, stripe_id: usize) -> Result<bool> {
+        if let Some((buffer, buffer_index)) = self.buffer_pool.get_buffer() {
+            info!("Archiving stripe {}", stripe_id);
+            let stripe_state = StripeState {
+                buffer: buffer.clone(),
+                buffer_index,
+            };
+            self.stripe_states.insert(stripe_id, stripe_state);
 
-        let stripe_data_rc = self.fetch_stripe(stripe_id)?;
-        let mut stripe_data = stripe_data_rc.borrow_mut();
+            self.start_fetch_stripe(stripe_id, buffer)?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
 
+    fn start_fetch_stripe(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
+        if self.stripe_written(stripe_id) {
+            debug!("Fetching stripe {} from block device", stripe_id,);
+            self.io_channel.add_read(
+                self.stripe_offset(stripe_id),
+                self.metadata.stripe_sector_count() as u32,
+                buffer,
+                stripe_id,
+            );
+            self.io_channel.submit()?;
+        } else {
+            debug!("Fetching stripe {} from image", stripe_id,);
+            self.stripe_source.request(stripe_id, buffer.clone())?;
+        }
+        Ok(())
+    }
+
+    fn poll_fetches(&mut self) -> Result<()> {
+        let mut completed = self.io_channel.poll();
+        completed.extend(self.stripe_source.poll());
+
+        for (stripe_id, success) in completed {
+            if !success {
+                return Err(crate::UbiblkError::ArchiveError {
+                    description: format!("I/O error while fetching stripe {}", stripe_id),
+                });
+            }
+
+            debug!("Completed fetching stripe {}", stripe_id,);
+            self.start_upload_stripe(stripe_id)?;
+        }
+        Ok(())
+    }
+
+    fn start_upload_stripe(&mut self, stripe_id: usize) -> Result<()> {
+        let stripe_state = self
+            .stripe_states
+            .get(&stripe_id)
+            .ok_or(UbiblkError::ArchiveError {
+                description: format!("Stripe state for stripe {} not found", stripe_id),
+            })?;
+
+        let mut buffer = stripe_state.buffer.borrow_mut();
         let sector_offset = self.stripe_offset(stripe_id);
         if let Some(block_cipher) = self.block_cipher.as_mut() {
             block_cipher.encrypt(
-                stripe_data.as_mut_slice(),
+                buffer.as_mut_slice(),
                 sector_offset,
                 self.metadata.stripe_sector_count(),
             );
         }
 
-        let object_key = self.stripe_object_key(stripe_id, stripe_data.as_mut_slice());
+        let object_key = self.stripe_object_key(stripe_id, buffer.as_slice());
         self.archive_store
-            .put_object(&object_key, stripe_data.as_mut_slice())?;
+            .start_put_object(&object_key, buffer.as_slice());
 
         Ok(())
+    }
+
+    fn poll_uploads(&mut self) -> Result<()> {
+        let results = self.archive_store.poll_puts();
+        for (obj_name, result) in results {
+            result?;
+            debug!("Completed uploading object {}", obj_name);
+            let stripe_id = self.extract_stripe_id_from_object_key(&obj_name)?;
+            let stripe_state =
+                self.stripe_states
+                    .remove(&stripe_id)
+                    .ok_or(UbiblkError::ArchiveError {
+                        description: format!("Stripe state for stripe {} not found", stripe_id),
+                    })?;
+            self.buffer_pool.return_buffer(stripe_state.buffer_index);
+        }
+        Ok(())
+    }
+
+    fn extract_stripe_id_from_object_key(&self, object_key: &str) -> Result<usize> {
+        let (stripe_id, _) = ArchiveStripeSource::parse_stripe_object_name(object_key)?;
+        Ok(stripe_id)
     }
 
     fn stripe_object_key(&self, stripe_id: usize, stripe_data: &[u8]) -> String {
@@ -105,45 +204,6 @@ impl StripeArchiver {
     fn stripe_exists_in_source(&self, stripe_id: usize) -> bool {
         let header = self.metadata.stripe_headers[stripe_id];
         header & metadata_flags::HAS_SOURCE != 0
-    }
-
-    fn fetch_stripe_from_source(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
-        self.stripe_source.request(stripe_id, buffer.clone())?;
-        self.stripe_source
-            .wait_for_stripe(stripe_id, STRIPE_ARCHIVER_TIMEOUT)?;
-        Ok(())
-    }
-
-    fn fetch_stripe(&mut self, stripe_id: usize) -> Result<SharedBuffer> {
-        let stripe_len_bytes = (self.metadata.stripe_sector_count() as usize) * SECTOR_SIZE;
-
-        let buffer = shared_buffer(stripe_len_bytes);
-
-        if self.stripe_written(stripe_id) {
-            debug!("Fetching stripe {} from block device", stripe_id,);
-            self.fetch_stripe_from_bdev(stripe_id, buffer.clone())?;
-        } else {
-            debug!("Fetching stripe {} from image", stripe_id,);
-            self.fetch_stripe_from_source(stripe_id, buffer.clone())?;
-        }
-
-        Ok(buffer)
-    }
-
-    fn fetch_stripe_from_bdev(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
-        self.io_channel.add_read(
-            self.stripe_offset(stripe_id),
-            self.metadata.stripe_sector_count() as u32,
-            buffer.clone(),
-            stripe_id,
-        );
-        self.io_channel.submit()?;
-        crate::block_device::wait_for_completion(
-            self.io_channel.as_mut(),
-            stripe_id,
-            STRIPE_ARCHIVER_TIMEOUT,
-        )?;
-        Ok(())
     }
 
     fn stripe_offset(&self, stripe_id: usize) -> u64 {
@@ -212,6 +272,7 @@ mod tests {
             store,
             encrypted,
             KeyEncryptionCipher::default(),
+            1,
         )
         .unwrap()
     }

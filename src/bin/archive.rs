@@ -84,7 +84,7 @@ struct Args {
     s3_profile: Option<String>,
 
     /// Number of concurrent S3 connections.
-    #[arg(long = "concurrency", default_value_t = 4)]
+    #[arg(long = "concurrency", default_value_t = 16)]
     s3_connections: usize,
 
     /// Encrypt archived stripes.
@@ -127,6 +127,7 @@ fn main() -> Result<()> {
         store,
         args.encrypt,
         kek.clone(),
+        args.s3_connections,
     )?;
 
     archiver.archive_all()?;

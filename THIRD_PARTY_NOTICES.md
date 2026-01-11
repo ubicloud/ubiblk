@@ -74,7 +74,7 @@ For the exact versions and licenses of Rust dependencies, refer to `Cargo.lock` 
 
 ## Prebuilt Binary Artifacts
 
-When using prebuilt binary artifacts (see [docs/deps-prebuilt.md](docs/deps-prebuilt.md)), the full license texts for isa-l_crypto and libblkio are included in each artifact under the `LICENSES/` directory.
+When using prebuilt binary artifacts from the `prebuild-deps` GitHub Actions workflow, the full license texts for isa-l_crypto and libblkio are included in each artifact under the `LICENSES/` directory.
 
 To extract and view licenses from an artifact:
 

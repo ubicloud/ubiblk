@@ -5,7 +5,7 @@
 // >
 // > Portions Copyright 2017 The Chromium OS Authors. All rights reserved.
 // > Use of this source code is governed by a BSD-style license that can be
-// > found in the LICENSE-BSD-3-Clause file.
+// > found in LICENSES/BSD-3-Clause.txt.
 // >
 // > Copyright © 2020 Intel Corporation
 // >
@@ -13,6 +13,8 @@
 //
 // You can find CloudHypervisor's code at
 // https://github.com/cloud-hypervisor/cloud-hypervisor
+//
+// and the full text of the licenses in the LICENSES directory.
 
 use std::result;
 

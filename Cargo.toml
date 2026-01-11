@@ -39,8 +39,8 @@ rustyline = "13.0.0"
 openssl = "0.10.75"
 sha2 = "0.10.9"
 aws-config = "1.8.12"
-aws-sdk-s3 = { version = "1.119.0", features = ["test-util"] }
-tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
+aws-sdk-s3 = { version = "1.119.0" }
+tokio = { version = "1.48.0", features = ["rt"] }
 crossbeam-channel = "0.5.15"
 
 [build-dependencies]
@@ -50,6 +50,7 @@ bindgen = "0.72.1"
 virtio-queue = { version = "0.16.0", features = ["test-utils"] }
 vm-memory = { version = "0.16.2", features = ["backend-mmap", "backend-atomic"] }
 aws-smithy-mocks = "0.2.2"
+aws-sdk-s3 = { version = "1.119.0", features = ["test-util"] }
 
 [features]
 default = []

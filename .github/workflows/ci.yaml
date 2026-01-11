@@ -9,6 +9,7 @@ on:
 env:
   CARGO_LLVM_COV_VERSION: "0.6.23"
   CARGO_AUDIT_VERSION: "0.22.0"
+  ISA_L_CRYPTO_VERSION: "v2.25.0"
 
 jobs:
   build:
@@ -42,14 +43,13 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.arch }}-stable-llvm-cov-${{ env.CARGO_LLVM_COV_VERSION }}
           cache-on-failure: true
 
-      - name: Clone and build isa-l_crypto
+      - name: Install prebuilt isa-l_crypto
         run: |
-          git clone --depth 1 --branch v2.25.0 https://github.com/intel/isa-l_crypto
-          cd isa-l_crypto
-          ./autogen.sh
-          ./configure --prefix=/usr --libdir=/usr/lib
-          make -j$(nproc)
-          sudo make install
+          set -euo pipefail
+          archive="isa-l_crypto-${ISA_L_CRYPTO_VERSION}-${{ matrix.arch }}.tar.gz"
+          url="https://github.com/ubicloud/ubiblk/releases/download/prebuilt-ci-deps/${archive}"
+          curl -fL -o "${archive}" "${url}"
+          sudo tar -xzf "${archive}" -C /
 
       - name: Check formatting (rust)
         run: cargo fmt --all -- --check
@@ -127,14 +127,14 @@ jobs:
           meson compile -C build
           sudo --preserve-env=PATH,RUSTUP_HOME,CARGO_HOME,HOME meson install -C build
 
-      - name: Clone and build isa-l_crypto
+      - name: Install prebuilt isa-l_crypto
         run: |
-          git clone --depth 1 --branch v2.25.0 https://github.com/intel/isa-l_crypto
-          cd isa-l_crypto
-          ./autogen.sh
-          ./configure --prefix=/usr --libdir=/usr/lib
-          make -j$(nproc)
-          sudo make install
+          set -euo pipefail
+          arch="$(uname -m)"
+          archive="isa-l_crypto-${ISA_L_CRYPTO_VERSION}-${arch}.tar.gz"
+          url="https://github.com/ubicloud/ubiblk/releases/download/prebuilt-ci-deps/${archive}"
+          curl -fL -o "${archive}" "${url}"
+          sudo tar -xzf "${archive}" -C /
 
       - name: Run e2e tests
         run: |

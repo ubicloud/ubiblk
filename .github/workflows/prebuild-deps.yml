@@ -1,0 +1,325 @@
+name: Prebuild Dependencies
+
+on:
+  workflow_dispatch:
+    inputs:
+      ubuntu_base:
+        description: 'Ubuntu base version (container will use 22.04 for compatibility)'
+        required: false
+        default: '22.04'
+        type: choice
+        options:
+          - '22.04'
+          - '24.04'
+      isal_ref:
+        description: 'isa-l_crypto git ref (tag/branch/commit)'
+        required: false
+        default: 'v2.25.0'
+        type: string
+      blkio_ref:
+        description: 'libblkio git ref (tag/branch/commit)'
+        required: false
+        default: 'main'
+        type: string
+
+env:
+  CONTAINER_IMAGE: ubuntu:22.04
+  ISAL_REPO: https://github.com/intel/isa-l_crypto
+  BLKIO_REPO: https://gitlab.com/libblkio/libblkio.git
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    
+    strategy:
+      matrix:
+        include:
+          - runner: ubicloud-standard-4
+            arch: x86_64
+            docker_platform: linux/amd64
+            cflags_arch: "-march=x86-64 -mtune=generic"
+          - runner: ubicloud-standard-4-arm
+            arch: arm64
+            docker_platform: linux/arm64
+            cflags_arch: "-march=armv8-a"
+    
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      
+      - name: Set up build environment info
+        id: buildinfo
+        run: |
+          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "build_host=$(uname -a)" >> $GITHUB_OUTPUT
+      
+      - name: Create build script
+        run: |
+          cat > /tmp/build-deps.sh << 'BUILDSCRIPT'
+          #!/bin/bash
+          set -euxo pipefail
+          
+          # Parse arguments
+          ARCH="$1"
+          CFLAGS_ARCH="$2"
+          ISAL_REF="$3"
+          BLKIO_REF="$4"
+          
+          # Set conservative compiler flags
+          export CFLAGS="-O2 -pipe -fPIC ${CFLAGS_ARCH}"
+          export CXXFLAGS="-O2 -pipe -fPIC ${CFLAGS_ARCH}"
+          export LDFLAGS=""
+          
+          # Update and install build dependencies
+          apt-get update
+          apt-get install -y \
+            autoconf \
+            automake \
+            libtool \
+            nasm \
+            clang \
+            gcc \
+            g++ \
+            make \
+            pkg-config \
+            git \
+            meson \
+            ninja-build \
+            python3-docutils \
+            ca-certificates \
+            zstd
+          
+          # Create workspace
+          WORKSPACE=/workspace
+          mkdir -p ${WORKSPACE}
+          cd ${WORKSPACE}
+          
+          # Print compiler info
+          echo "=== Build Environment ==="
+          gcc --version | head -1
+          clang --version | head -1
+          echo "CFLAGS: ${CFLAGS}"
+          echo "CXXFLAGS: ${CXXFLAGS}"
+          echo "LDFLAGS: ${LDFLAGS}"
+          echo "========================="
+          
+          # Build isa-l_crypto
+          echo "=== Building isa-l_crypto ==="
+          git clone --depth 1 --branch "${ISAL_REF}" "${ISAL_REPO}"
+          cd isa-l_crypto
+          ISAL_COMMIT=$(git rev-parse HEAD)
+          ./autogen.sh
+          
+          # Configure with conservative flags - install to prefix
+          ./configure \
+            --prefix=${WORKSPACE}/_install/isal \
+            --libdir=${WORKSPACE}/_install/isal/lib \
+            CFLAGS="${CFLAGS}" \
+            LDFLAGS="${LDFLAGS}"
+          
+          make -j$(nproc)
+          make install
+          
+          # Create BUILDINFO for isa-l_crypto
+          cat > ${WORKSPACE}/_install/isal/BUILDINFO.txt << EOFBUILDINFO
+          Project: isa-l_crypto
+          Repository: ${ISAL_REPO}
+          Git Ref: ${ISAL_REF}
+          Commit SHA: ${ISAL_COMMIT}
+          Build OS: ubuntu:22.04 (container)
+          Architecture: ${ARCH}
+          Build Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          Compiler (GCC): $(gcc --version | head -1)
+          Compiler (Clang): $(clang --version | head -1)
+          CFLAGS: ${CFLAGS}
+          CXXFLAGS: ${CXXFLAGS}
+          LDFLAGS: ${LDFLAGS}
+          Configure Args: --prefix=${WORKSPACE}/_install/isal --libdir=${WORKSPACE}/_install/isal/lib
+          EOFBUILDINFO
+          
+          # Copy license
+          mkdir -p ${WORKSPACE}/_install/isal/LICENSES
+          cp LICENSE ${WORKSPACE}/_install/isal/LICENSES/isa-l_crypto-LICENSE.txt
+          
+          cd ${WORKSPACE}
+          
+          # Build libblkio
+          echo "=== Building libblkio ==="
+          git clone "${BLKIO_REPO}"
+          cd libblkio
+          git checkout "${BLKIO_REF}"
+          BLKIO_COMMIT=$(git rev-parse HEAD)
+          
+          # Configure meson with conservative flags
+          meson setup build \
+            --prefix=${WORKSPACE}/_install/blkio \
+            --libdir=lib \
+            -Dbuildtype=release \
+            -Dc_args="${CFLAGS}" \
+            -Dcpp_args="${CXXFLAGS}" \
+            -Dc_link_args="${LDFLAGS}" \
+            -Dcpp_link_args="${LDFLAGS}"
+          
+          meson compile -C build
+          meson install -C build
+          
+          # Create BUILDINFO for libblkio
+          cat > ${WORKSPACE}/_install/blkio/BUILDINFO.txt << EOFBUILDINFO
+          Project: libblkio
+          Repository: ${BLKIO_REPO}
+          Git Ref: ${BLKIO_REF}
+          Commit SHA: ${BLKIO_COMMIT}
+          Build OS: ubuntu:22.04 (container)
+          Architecture: ${ARCH}
+          Build Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          Compiler (GCC): $(gcc --version | head -1)
+          Compiler (Clang): $(clang --version | head -1)
+          CFLAGS: ${CFLAGS}
+          CXXFLAGS: ${CXXFLAGS}
+          LDFLAGS: ${LDFLAGS}
+          Meson Args: --prefix=${WORKSPACE}/_install/blkio --libdir=lib -Dbuildtype=release
+          EOFBUILDINFO
+          
+          # Copy license
+          mkdir -p ${WORKSPACE}/_install/blkio/LICENSES
+          # libblkio uses different license files, copy all
+          if [ -f COPYING.LESSER ]; then
+            cp COPYING.LESSER ${WORKSPACE}/_install/blkio/LICENSES/libblkio-COPYING.LESSER.txt
+          fi
+          if [ -f COPYING ]; then
+            cp COPYING ${WORKSPACE}/_install/blkio/LICENSES/libblkio-COPYING.txt
+          fi
+          if [ -f LICENSE ]; then
+            cp LICENSE ${WORKSPACE}/_install/blkio/LICENSES/libblkio-LICENSE.txt
+          fi
+          
+          cd ${WORKSPACE}
+          
+          # Create archives
+          echo "=== Creating archives ==="
+          cd _install
+          
+          tar -cf - -C isal . | zstd -19 -T0 > /output/isa-l_crypto-${ISAL_REF}-ubuntu22.04-baseline-${ARCH}.tar.zst
+          tar -cf - -C blkio . | zstd -19 -T0 > /output/libblkio-${BLKIO_REF}-ubuntu22.04-baseline-${ARCH}.tar.zst
+          
+          # Generate SHA256 checksums
+          cd /output
+          sha256sum *.tar.zst > SHA256SUMS-${ARCH}.txt
+          
+          echo "=== Build completed successfully ==="
+          ls -lh /output/
+          BUILDSCRIPT
+          
+          chmod +x /tmp/build-deps.sh
+      
+      - name: Build dependencies in container
+        run: |
+          # Create output directory
+          mkdir -p ${{ github.workspace }}/artifacts
+          
+          # Run build in container
+          docker run --rm \
+            --platform ${{ matrix.docker_platform }} \
+            -v /tmp/build-deps.sh:/build-deps.sh:ro \
+            -v ${{ github.workspace }}/artifacts:/output \
+            ${{ env.CONTAINER_IMAGE }} \
+            /build-deps.sh \
+              "${{ matrix.arch }}" \
+              "${{ matrix.cflags_arch }}" \
+              "${{ inputs.isal_ref }}" \
+              "${{ inputs.blkio_ref }}"
+      
+      - name: Verify artifacts
+        run: |
+          cd ${{ github.workspace }}/artifacts
+          echo "=== Generated artifacts ==="
+          ls -lh
+          echo ""
+          echo "=== SHA256 checksums ==="
+          cat SHA256SUMS-${{ matrix.arch }}.txt
+          echo ""
+          echo "=== Verifying checksums ==="
+          sha256sum -c SHA256SUMS-${{ matrix.arch }}.txt
+      
+      - name: Extract and verify build info
+        run: |
+          cd ${{ github.workspace }}/artifacts
+          
+          echo "=== isa-l_crypto BUILDINFO ==="
+          tar -I zstd -xf isa-l_crypto-${{ inputs.isal_ref }}-ubuntu22.04-baseline-${{ matrix.arch }}.tar.zst BUILDINFO.txt -O
+          echo ""
+          
+          echo "=== libblkio BUILDINFO ==="
+          tar -I zstd -xf libblkio-${{ inputs.blkio_ref }}-ubuntu22.04-baseline-${{ matrix.arch }}.tar.zst BUILDINFO.txt -O
+          echo ""
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuild-deps-${{ matrix.arch }}
+          path: |
+            ${{ github.workspace }}/artifacts/*.tar.zst
+            ${{ github.workspace }}/artifacts/SHA256SUMS-*.txt
+          retention-days: 30
+  
+  combine-checksums:
+    needs: build
+    runs-on: ubicloud-standard-4
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Combine checksums and create manifest
+        run: |
+          cd artifacts
+          
+          # Combine all SHA256SUMS files
+          cat prebuild-deps-*/SHA256SUMS-*.txt > SHA256SUMS
+          
+          echo "=== Combined SHA256SUMS ==="
+          cat SHA256SUMS
+          
+          # Create manifest JSON
+          cat > manifest.json << 'MANIFESTEOF'
+          {
+            "build_date": "${{ needs.build.outputs.build_date }}",
+            "isal_ref": "${{ inputs.isal_ref }}",
+            "blkio_ref": "${{ inputs.blkio_ref }}",
+            "ubuntu_base": "22.04",
+            "architectures": ["x86_64", "arm64"],
+            "artifacts": [
+          MANIFESTEOF
+          
+          first=true
+          for file in prebuild-deps-*/*.tar.zst; do
+            if [ "$first" = true ]; then
+              first=false
+            else
+              echo "," >> manifest.json
+            fi
+            filename=$(basename "$file")
+            sha256=$(sha256sum "$file" | cut -d' ' -f1)
+            size=$(stat -c%s "$file")
+            echo "    {\"filename\": \"$filename\", \"sha256\": \"$sha256\", \"size\": $size}" >> manifest.json
+          done
+          
+          cat >> manifest.json << 'MANIFESTEOF'
+            ]
+          }
+          MANIFESTEOF
+          
+          echo ""
+          echo "=== Manifest ==="
+          cat manifest.json
+      
+      - name: Upload combined artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: prebuild-deps-combined
+          path: |
+            artifacts/SHA256SUMS
+            artifacts/manifest.json
+          retention-days: 30

@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
+use ubiblk::cli::CommonArgs;
 use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
 use ubiblk::{Error, KeyEncryptionCipher, Result};
 
@@ -12,13 +13,8 @@ use ubiblk::{Error, KeyEncryptionCipher, Result};
     about = "Dump metadata information"
 )]
 struct Args {
-    /// Path to the configuration YAML file
-    #[arg(short = 'f', long = "config")]
-    config: String,
-
-    /// Path to the key encryption key file
-    #[arg(short = 'k', long = "kek")]
-    kek: Option<String>,
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 fn build_block_device(
@@ -82,10 +78,9 @@ fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
     let args = Args::parse();
 
-    let options = Options::load_from_file(&PathBuf::from(&args.config))?;
+    let options = Options::load_from_file(&args.common.config)?;
 
-    let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;
+    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
 
     // base data device
     let base_dev = build_block_device(&options.path, &options, true, kek.clone())?;

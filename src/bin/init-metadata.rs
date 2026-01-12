@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::path::PathBuf;
+use ubiblk::cli::CommonArgs;
 use ubiblk::{vhost_backend::*, KeyEncryptionCipher};
 use ubiblk::{Error, Result};
 
@@ -14,17 +14,8 @@ const STRIPE_SECTOR_COUNT_SHIFT_MAX: u8 = 16;
     about = "Initialize metadata for a vhost-user-blk backend."
 )]
 struct Args {
-    /// Path to the configuration YAML file.
-    #[arg(short = 'f', long = "config")]
-    config: String,
-
-    /// Path to the key encryption key file.
-    #[arg(short = 'k', long = "kek")]
-    kek: Option<String>,
-
-    /// Unlink the key encryption key file after use.
-    #[arg(short = 'u', long = "unlink-kek", default_value_t = false)]
-    unlink_kek: bool,
+    #[command(flatten)]
+    common: CommonArgs,
 
     /// Stripe sector count shift.
     #[arg(short = 's', long = "stripe-sector-count-shift", default_value_t = 11)]
@@ -36,8 +27,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let config_path = &args.config;
-    let options = Options::load_from_file(&PathBuf::from(config_path))?;
+    let options = Options::load_from_file(&args.common.config)?;
 
     let stripe_sector_count_shift = args.stripe_sector_count_shift;
 
@@ -51,8 +41,7 @@ fn main() -> Result<()> {
         });
     }
 
-    let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), args.unlink_kek)?;
+    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
 
     init_metadata(&options, kek, stripe_sector_count_shift)
 }

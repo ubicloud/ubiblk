@@ -1,9 +1,10 @@
-use std::{net::TcpListener, path::PathBuf, sync::Arc, thread};
+use std::{net::TcpListener, sync::Arc, thread};
 
 use clap::Parser;
 use log::{error, info};
 
 use ubiblk::{
+    cli::CommonArgs,
     stripe_server::{
         parse_psk_credentials, prepare_stripe_server, wrap_psk_server_stream, DynStream,
     },
@@ -17,21 +18,12 @@ use ubiblk::{
     about = "Stripe server for remote block device access over TCP."
 )]
 struct Args {
+    #[command(flatten)]
+    common: CommonArgs,
+
     /// Address to listen on, e.g. 127.0.0.1:4555.
     #[arg(long, default_value = "127.0.0.1:4555")]
     bind: String,
-
-    /// Path to the configuration YAML file used to describe the block device.
-    #[arg(short = 'f', long = "config")]
-    config: PathBuf,
-
-    /// Path to the key encryption key file.
-    #[arg(short = 'k', long = "kek")]
-    kek: Option<PathBuf>,
-
-    /// Unlink the key encryption key file after use.
-    #[arg(short = 'u', long = "unlink-kek", default_value_t = false)]
-    unlink_kek: bool,
 
     /// PSK identity (required if --psk-secret is set).
     #[arg(long = "psk-identity")]
@@ -52,10 +44,12 @@ fn main() -> Result<()> {
 
 fn run(args: Args) -> Result<()> {
     let Args {
+        common: CommonArgs {
+            config,
+            kek,
+            unlink_kek,
+        },
         bind,
-        config,
-        kek,
-        unlink_kek,
         psk_identity,
         psk_secret,
     } = args;

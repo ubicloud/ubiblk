@@ -7,6 +7,8 @@ use super::{request::*, SECTOR_SIZE};
 use crate::block_device::IoChannel;
 use crate::block_device::SharedBuffer;
 use crate::utils::aligned_buffer::AlignedBuf;
+#[cfg(test)]
+use crate::vhost_backend::io_tracking::IoKind;
 use crate::vhost_backend::io_tracking::IoTracker;
 use crate::{Result, UbiblkError};
 
@@ -320,13 +322,18 @@ impl UbiBlkBackendThread {
             .add_write(id, request.sector, sector_count as u64);
     }
 
-    fn process_flush(&mut self, request: &Request, desc_chain: &DescChain, _vring: &mut Vring<'_>) {
+    pub(crate) fn process_flush(
+        &mut self,
+        request: &Request,
+        desc_chain: &DescChain,
+        _vring: &mut Vring<'_>,
+    ) {
         let id = self.get_request_slot(0, request, desc_chain);
         self.io_channel.add_flush(id);
         self.io_tracker.add_flush(id);
     }
 
-    fn process_get_device_id(
+    pub(crate) fn process_get_device_id(
         &mut self,
         request: &Request,
         desc_chain: DescChain,
@@ -356,6 +363,11 @@ impl UbiBlkBackendThread {
             VIRTIO_BLK_S_OK
         } as u8;
         self.complete_io(vring, &desc_chain, request.status_addr, status);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn io_tracker_snapshot(&self) -> Vec<(IoKind, u64, u64)> {
+        self.io_tracker.snapshot()
     }
 
     pub fn process_queue(&mut self, vring: &mut Vring<'_>) -> bool {

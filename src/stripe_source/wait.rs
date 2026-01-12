@@ -98,4 +98,17 @@ mod tests {
             Err(UbiblkError::StripeFetchTimeout { stripe: 1 })
         ));
     }
+
+    #[test]
+    fn test_wait_for_stripe_timeout_with_other_completion() {
+        let mut source: Box<dyn StripeSource> = Box::new(MockStripeSource {
+            busy: true,
+            completed_stripes: vec![(2, true)],
+        });
+        let result = source.wait_for_stripe(1, Duration::from_millis(50));
+        assert!(matches!(
+            result,
+            Err(UbiblkError::StripeFetchTimeout { stripe: 1 })
+        ));
+    }
 }

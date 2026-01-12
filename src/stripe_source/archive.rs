@@ -10,6 +10,12 @@ use crate::{
 
 use super::StripeSource;
 
+struct PendingRequest {
+    stripe_id: usize,
+    buffer: SharedBuffer,
+    expected_sha256: String,
+}
+
 pub struct ArchiveStripeSource {
     store: Box<dyn ArchiveStore>,
     xts_cipher: Option<XtsBlockCipher>,
@@ -17,6 +23,7 @@ pub struct ArchiveStripeSource {
     max_stripe_id: usize,
     stripe_sector_count: u64,
     finished_requests: Vec<(usize, bool)>,
+    pending_requests: HashMap<String, PendingRequest>,
 }
 
 impl ArchiveStripeSource {
@@ -26,6 +33,7 @@ impl ArchiveStripeSource {
         let max_stripe_id = stripe_object_names.keys().max().cloned().unwrap_or(0);
         let stripe_sector_count = metadata.stripe_sector_count;
         let finished_requests = Vec::new();
+        let pending_requests = HashMap::new();
         let xts_cipher = match metadata.encryption_key {
             None => None,
             Some(key) => Some(XtsBlockCipher::new(key.0, key.1, kek)?),
@@ -37,6 +45,7 @@ impl ArchiveStripeSource {
             max_stripe_id,
             stripe_sector_count,
             finished_requests,
+            pending_requests,
         })
     }
 
@@ -86,24 +95,46 @@ impl ArchiveStripeSource {
         Ok((stripe_id, sha256))
     }
 
-    fn fetch_stripe(
+    fn start_fetch_stripe(
         &mut self,
         stripe_id: usize,
-        object_name: &str,
+        filename: String,
         buffer: SharedBuffer,
     ) -> Result<()> {
-        let (stripe_id_in_name, sha256) = Self::parse_stripe_object_name(object_name)?;
-        if stripe_id != stripe_id_in_name {
+        let (stripe_id_parsed, expected_sha256) = Self::parse_stripe_object_name(&filename)?;
+        if stripe_id_parsed != stripe_id {
             return Err(UbiblkError::ArchiveError {
                 description: format!(
-                    "Stripe ID mismatch: expected {}, found {} in object name {}",
-                    stripe_id, stripe_id_in_name, object_name
+                    "Stripe ID {} does not match parsed ID {} from filename {}",
+                    stripe_id, stripe_id_parsed, &filename
                 ),
             });
         }
+        if self.pending_requests.contains_key(&filename) {
+            return Err(UbiblkError::ArchiveError {
+                description: format!("Stripe {} is already being fetched", stripe_id),
+            });
+        }
+        self.store.start_get_object(&filename);
+        self.pending_requests.insert(
+            filename,
+            PendingRequest {
+                stripe_id,
+                buffer,
+                expected_sha256,
+            },
+        );
+        Ok(())
+    }
 
-        let data = self.store.get_object(object_name)?;
-        Self::verify_stripe_data(stripe_id, &data, &sha256)?;
+    fn finish_stripe_request(
+        &mut self,
+        stripe_id: usize,
+        data: &[u8],
+        expected_sha256: &str,
+        buffer: SharedBuffer,
+    ) -> Result<()> {
+        Self::verify_stripe_data(stripe_id, data, expected_sha256)?;
 
         let mut buf_ref = buffer.borrow_mut();
         let buf = buf_ref.as_mut_slice();
@@ -117,7 +148,7 @@ impl ArchiveStripeSource {
                 ),
             });
         }
-        buf[..data.len()].copy_from_slice(&data);
+        buf[..data.len()].copy_from_slice(data);
 
         if data.len() < buf.len() {
             buf[data.len()..].fill(0);
@@ -128,7 +159,6 @@ impl ArchiveStripeSource {
             cipher.decrypt(buf, sector_start, self.stripe_sector_count);
         }
 
-        self.finished_requests.push((stripe_id, true));
         Ok(())
     }
 
@@ -147,7 +177,7 @@ impl StripeSource for ArchiveStripeSource {
     fn request(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
         let maybe_filename = self.stripe_object_names.get(&stripe_id).cloned();
         match maybe_filename {
-            Some(filename) => self.fetch_stripe(stripe_id, &filename, buffer),
+            Some(filename) => self.start_fetch_stripe(stripe_id, filename, buffer),
             None => {
                 buffer.borrow_mut().as_mut_slice().fill(0);
                 self.finished_requests.push((stripe_id, true));
@@ -157,11 +187,36 @@ impl StripeSource for ArchiveStripeSource {
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
+        let completions = self.store.poll_gets();
+        for (object_name, result) in completions {
+            if let Some(pending) = self.pending_requests.remove(&object_name) {
+                let success = match result {
+                    Ok(data) => self
+                        .finish_stripe_request(
+                            pending.stripe_id,
+                            &data,
+                            &pending.expected_sha256,
+                            pending.buffer,
+                        )
+                        .is_ok(),
+                    Err(e) => {
+                        log::error!("Failed to fetch stripe {}: {}", pending.stripe_id, e);
+                        false
+                    }
+                };
+                self.finished_requests.push((pending.stripe_id, success));
+            } else {
+                log::error!(
+                    "Received unexpected completed get for object {}",
+                    object_name
+                );
+            }
+        }
         self.finished_requests.drain(..).collect()
     }
 
     fn busy(&self) -> bool {
-        !self.finished_requests.is_empty()
+        !self.pending_requests.is_empty() || !self.finished_requests.is_empty()
     }
 
     fn sector_count(&self) -> u64 {
@@ -404,13 +459,17 @@ mod tests {
         assert!(source.request(1, buf.clone()).is_ok());
 
         // Stripe 2 should error out due to hash mismatch
-        let result = source.request(2, buf.clone());
-        assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("sha256 hash mismatch for stripe 2"));
+        assert!(source.request(2, buf.clone()).is_ok());
+
+        let completions = source.poll();
+        assert_eq!(completions.len(), 3);
+        for (stripe_id, success) in completions {
+            match stripe_id {
+                0 | 1 => assert!(success, "stripe {} should succeed", stripe_id),
+                2 => assert!(!success, "stripe 2 should fail"),
+                _ => panic!("unexpected stripe id {}", stripe_id),
+            }
+        }
     }
 
     #[test]

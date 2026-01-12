@@ -45,7 +45,7 @@ fn default_device_id() -> String {
 }
 
 fn default_s3_connections() -> usize {
-    4
+    16
 }
 
 fn deserialize_device_id<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -621,7 +621,7 @@ mod tests {
                         access_key_id: b"AKIAIAAAAAAAA".to_vec(),
                         secret_access_key: b"secretKey123456".to_vec(),
                     }),
-                    connections: 4,
+                    connections: 16,
                 }
             })
         );

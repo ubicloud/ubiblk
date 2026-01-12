@@ -4,10 +4,12 @@ use crate::Result;
 
 /// A block device that emulates `/dev/null`.
 ///
-/// The device reports zero capacity but always reports success for any issued
-/// request. Read operations zero the provided buffer, while writes and flushes
-/// are acknowledged immediately.
-pub struct NullBlockDevice;
+/// The device has a configurable capacity and always reports success for any
+/// issued request. Read operations zero the provided buffer, while writes and
+/// flushes are acknowledged immediately.
+pub struct NullBlockDevice {
+    sector_count: u64,
+}
 
 struct NullIoChannel {
     finished_requests: Vec<(usize, bool)>,
@@ -64,7 +66,11 @@ impl IoChannel for NullIoChannel {
 
 impl NullBlockDevice {
     pub fn new() -> Box<Self> {
-        Box::new(NullBlockDevice)
+        Box::new(NullBlockDevice { sector_count: 0 })
+    }
+
+    pub fn new_with_sector_count(sector_count: u64) -> Box<Self> {
+        Box::new(NullBlockDevice { sector_count })
     }
 }
 
@@ -74,11 +80,13 @@ impl BlockDevice for NullBlockDevice {
     }
 
     fn sector_count(&self) -> u64 {
-        0
+        self.sector_count
     }
 
     fn clone(&self) -> Box<dyn BlockDevice> {
-        Box::new(NullBlockDevice)
+        Box::new(NullBlockDevice {
+            sector_count: self.sector_count,
+        })
     }
 }
 

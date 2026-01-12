@@ -492,4 +492,17 @@ mod tests {
             .to_string()
             .contains("Duplicate stripe object for stripe ID 1"));
     }
+
+    #[test]
+    fn test_errors_on_duplicate_request() {
+        let kek = KeyEncryptionCipher::default();
+        let mut setup = prep(4, 2, false, &[0], kek.clone());
+        setup.archiver.archive_all().unwrap();
+
+        let mut source = ArchiveStripeSource::new(clone_memstore(&setup.store), kek).unwrap();
+        let buf = shared_buffer((STRIPE_SECTOR_COUNT * SECTOR_SIZE as u64) as usize);
+        source.request(0, buf.clone()).unwrap();
+        let err = source.request(0, buf).unwrap_err();
+        assert!(matches!(err, UbiblkError::ArchiveError { .. }));
+    }
 }

@@ -59,3 +59,20 @@ impl StripeSource for BlockDeviceStripeSource {
         stripe_sector_offset < self.source_sector_count
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block_device::{bdev_test::TestBlockDevice, shared_buffer};
+    use crate::vhost_backend::SECTOR_SIZE;
+
+    #[test]
+    fn test_request_beyond_end_errors() {
+        let device = Box::new(TestBlockDevice::new(8 * SECTOR_SIZE as u64));
+        let mut source = BlockDeviceStripeSource::new(device, 4).unwrap();
+        let buffer = shared_buffer(SECTOR_SIZE);
+
+        let err = source.request(2, buffer).unwrap_err();
+        assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
+    }
+}

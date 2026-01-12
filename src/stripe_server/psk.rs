@@ -195,4 +195,20 @@ mod tests {
             panic!("Wrong error type, got {:?}", err);
         }
     }
+
+    #[test]
+    fn test_psk_credentials_empty_identity() {
+        let err = PskCredentials::new("".to_string(), vec![0x11; 16]).unwrap_err();
+        assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
+    }
+
+    #[test]
+    fn test_parse_psk_credentials_short_secret() {
+        let kek = KeyEncryptionCipher::default();
+        let secret = vec![0x11; 8];
+        let secret_b64 = STANDARD.encode(&secret);
+        let err = parse_psk_credentials(Some("identity".to_string()), Some(secret_b64), &kek)
+            .unwrap_err();
+        assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
+    }
 }

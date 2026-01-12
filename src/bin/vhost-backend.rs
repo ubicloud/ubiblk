@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::path::PathBuf;
+use ubiblk::cli::CommonArgs;
 use ubiblk::{vhost_backend::*, KeyEncryptionCipher, Result};
 
 #[derive(Parser)]
@@ -10,17 +10,8 @@ use ubiblk::{vhost_backend::*, KeyEncryptionCipher, Result};
     about = "Launch a vhost-user-blk backend using a config file."
 )]
 struct Args {
-    /// Path to the configuration YAML file.
-    #[arg(short = 'f', long = "config")]
-    config: String,
-
-    /// Path to the key encryption key file.
-    #[arg(short = 'k', long = "kek")]
-    kek: Option<String>,
-
-    /// Unlink the key encryption key file after use.
-    #[arg(short = 'u', long = "unlink-kek", default_value_t = false)]
-    unlink_kek: bool,
+    #[command(flatten)]
+    common: CommonArgs,
 }
 
 fn main() -> Result<()> {
@@ -28,11 +19,8 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let config_path = &args.config;
-    let options = Options::load_from_file(&PathBuf::from(config_path))?;
+    let options = Options::load_from_file(&args.common.config)?;
 
-    let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), args.unlink_kek)?;
-
+    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
     block_backend_loop(&options, kek)
 }

@@ -26,6 +26,12 @@ pub struct CommonArgs {
 }
 
 pub fn load_options(common: &CommonArgs) -> Result<Options> {
+    let (options, _kek) = load_options_and_kek(common)?;
+    Ok(options)
+}
+
+pub fn load_options_and_kek(common: &CommonArgs) -> Result<(Options, KeyEncryptionCipher)> {
     let kek = KeyEncryptionCipher::load(common.kek.as_ref(), common.unlink_kek)?;
-    Options::load_from_file_with_kek(&common.config, &kek)
+    let options = Options::load_from_file_with_kek(&common.config, &kek)?;
+    Ok((options, kek))
 }

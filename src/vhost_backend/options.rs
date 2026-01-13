@@ -236,6 +236,8 @@ impl Options {
                     }
                 }
                 StripeSourceConfig::Archive { config } => {
+                    let archive_kek = config.archive_kek_mut();
+                    Self::decrypt_archive_kek(kek, archive_kek)?;
                     if let ArchiveStripeSourceConfig::S3 { credentials, .. } = config {
                         if let Some(creds) = credentials.as_mut() {
                             let access_key_id = kek
@@ -253,6 +255,42 @@ impl Options {
         }
 
         Ok(())
+    }
+
+    fn decrypt_archive_kek(
+        kek: &KeyEncryptionCipher,
+        archive_kek: &mut KeyEncryptionCipher,
+    ) -> crate::Result<()> {
+        Self::decrypt_optional_secret(kek, &mut archive_kek.key)?;
+        Self::decrypt_optional_secret(kek, &mut archive_kek.init_vector)?;
+        Self::decrypt_optional_secret(kek, &mut archive_kek.auth_data)?;
+        Ok(())
+    }
+
+    fn decrypt_optional_secret(
+        kek: &KeyEncryptionCipher,
+        secret: &mut Option<Vec<u8>>,
+    ) -> crate::Result<()> {
+        if let Some(value) = secret.take() {
+            *secret = Some(kek.decrypt_psk_secret(value)?);
+        }
+        Ok(())
+    }
+}
+
+impl ArchiveStripeSourceConfig {
+    pub fn archive_kek(&self) -> &KeyEncryptionCipher {
+        match self {
+            ArchiveStripeSourceConfig::Filesystem { archive_kek, .. } => archive_kek,
+            ArchiveStripeSourceConfig::S3 { archive_kek, .. } => archive_kek,
+        }
+    }
+
+    pub fn archive_kek_mut(&mut self) -> &mut KeyEncryptionCipher {
+        match self {
+            ArchiveStripeSourceConfig::Filesystem { archive_kek, .. } => archive_kek,
+            ArchiveStripeSourceConfig::S3 { archive_kek, .. } => archive_kek,
+        }
     }
 }
 
@@ -292,6 +330,8 @@ pub enum StripeSourceConfig {
 pub enum ArchiveStripeSourceConfig {
     Filesystem {
         path: String,
+        #[serde(default)]
+        archive_kek: KeyEncryptionCipher,
     },
     S3 {
         bucket: String,
@@ -307,6 +347,8 @@ pub enum ArchiveStripeSourceConfig {
         credentials: Option<AwsCredentials>,
         #[serde(default = "default_s3_connections")]
         connections: usize,
+        #[serde(default)]
+        archive_kek: KeyEncryptionCipher,
     },
 }
 
@@ -617,7 +659,8 @@ mod tests {
             options.stripe_source,
             Some(StripeSourceConfig::Archive {
                 config: ArchiveStripeSourceConfig::Filesystem {
-                    path: "/path/to/archive".to_string()
+                    path: "/path/to/archive".to_string(),
+                    archive_kek: KeyEncryptionCipher::default(),
                 }
             })
         );
@@ -671,9 +714,95 @@ mod tests {
                         secret_access_key: b"secretKey123456".to_vec(),
                     }),
                     connections: 16,
+                    archive_kek: KeyEncryptionCipher::default(),
                 }
             })
         );
+    }
+
+    #[test]
+    fn test_archive_kek_decryption() {
+        use aes_gcm::{
+            aead::{Aead, KeyInit, Payload},
+            Aes256Gcm, Nonce,
+        };
+
+        let kek_key = [0x11u8; 32];
+        let iv = [0x22u8; 12];
+        let aad = b"test-aad";
+        let kek = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(kek_key.to_vec()),
+            init_vector: Some(iv.to_vec()),
+            auth_data: Some(aad.to_vec()),
+        };
+
+        let archive_key = [0x33u8; 32];
+        let archive_iv = [0x44u8; 12];
+        let archive_aad = b"archive-aad";
+
+        let cipher = Aes256Gcm::new_from_slice(&kek_key).unwrap();
+        let nonce = Nonce::from_slice(&iv);
+        let enc_key = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &archive_key,
+                    aad,
+                },
+            )
+            .unwrap();
+        let enc_iv = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: &archive_iv,
+                    aad,
+                },
+            )
+            .unwrap();
+        let enc_aad = cipher
+            .encrypt(
+                nonce,
+                Payload {
+                    msg: archive_aad,
+                    aad,
+                },
+            )
+            .unwrap();
+
+        let yaml = format!(
+            r#"
+        path: "/path/to/disk"
+        socket: "/path/to/socket"
+        metadata_path: "/path/to/metadata"
+        copy_on_read: true
+        stripe_source:
+          source: archive
+          type: filesystem
+          path: "/path/to/archive"
+          archive_kek:
+            method: aes256-gcm
+            key: "{}"
+            init_vector: "{}"
+            auth_data: "{}"
+        "#,
+            STANDARD.encode(enc_key),
+            STANDARD.encode(enc_iv),
+            STANDARD.encode(enc_aad),
+        );
+
+        let options = Options::load_from_str_with_kek(&yaml, &kek).unwrap();
+        let config = match options.resolved_stripe_source() {
+            Some(StripeSourceConfig::Archive { config }) => config,
+            _ => panic!("Expected archive stripe source"),
+        };
+
+        let archive_kek = config.archive_kek();
+        assert_eq!(archive_kek.method, CipherMethod::Aes256Gcm);
+        assert_eq!(archive_kek.key, Some(archive_key.to_vec()));
+        assert_eq!(archive_kek.init_vector, Some(archive_iv.to_vec()));
+        assert_eq!(archive_kek.auth_data, Some(archive_aad.to_vec()));
     }
 
     #[test]

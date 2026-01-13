@@ -5,26 +5,20 @@ use crate::{
     vhost_backend::{
         build_source_device, ArchiveStripeSourceConfig, AwsCredentials, Options, StripeSourceConfig,
     },
-    KeyEncryptionCipher, Result, UbiblkError,
+    Result, UbiblkError,
 };
 
 use super::*;
 
 pub struct StripeSourceBuilder {
     options: Options,
-    archive_kek: KeyEncryptionCipher,
     stripe_sector_count: u64,
 }
 
 impl StripeSourceBuilder {
-    pub fn new(
-        options: Options,
-        archive_kek: KeyEncryptionCipher,
-        stripe_sector_count: u64,
-    ) -> Self {
+    pub fn new(options: Options, stripe_sector_count: u64) -> Self {
         Self {
             options,
-            archive_kek,
             stripe_sector_count,
         }
     }
@@ -34,7 +28,8 @@ impl StripeSourceBuilder {
             match stripe_source {
                 StripeSourceConfig::Archive { config } => {
                     let store = Self::build_archive_store(&config)?;
-                    let stripe_source = ArchiveStripeSource::new(store, self.archive_kek.clone())?;
+                    let stripe_source =
+                        ArchiveStripeSource::new(store, config.archive_kek().clone())?;
                     return Ok(Box::new(stripe_source));
                 }
                 StripeSourceConfig::Remote {
@@ -105,9 +100,10 @@ impl StripeSourceBuilder {
         config: &ArchiveStripeSourceConfig,
     ) -> Result<Box<dyn ArchiveStore>> {
         match config {
-            ArchiveStripeSourceConfig::Filesystem { path } => {
-                Ok(Box::new(FileSystemStore::new(path.into())?))
-            }
+            ArchiveStripeSourceConfig::Filesystem {
+                path,
+                archive_kek: _,
+            } => Ok(Box::new(FileSystemStore::new(path.into())?)),
             ArchiveStripeSourceConfig::S3 {
                 bucket,
                 prefix,
@@ -116,6 +112,7 @@ impl StripeSourceBuilder {
                 profile,
                 credentials,
                 connections,
+                archive_kek: _,
             } => {
                 let decrypted_credentials = Self::build_aws_credentials(credentials)?;
                 let runtime = create_runtime()?;
@@ -141,6 +138,7 @@ impl StripeSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KeyEncryptionCipher;
     use std::fs::File;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -166,8 +164,7 @@ mod tests {
     #[test]
     fn test_build_defaults_to_null_device() {
         let options = create_test_options(None, None);
-        let kek = KeyEncryptionCipher::default();
-        let builder = StripeSourceBuilder::new(options, kek, 4096);
+        let builder = StripeSourceBuilder::new(options, 4096);
 
         let result = builder.build();
 
@@ -187,8 +184,7 @@ mod tests {
         f.set_len(1024 * 1024).unwrap();
 
         let options = create_test_options(None, Some(file_path));
-        let kek = KeyEncryptionCipher::default();
-        let builder = StripeSourceBuilder::new(options, kek, 4096);
+        let builder = StripeSourceBuilder::new(options, 4096);
 
         let result = builder.build();
         assert!(
@@ -201,8 +197,7 @@ mod tests {
     fn test_build_local_block_device_fails_on_missing_file() {
         let bad_path = PathBuf::from("/path/to/nonexistent/file.img");
         let options = create_test_options(None, Some(bad_path));
-        let kek = KeyEncryptionCipher::default();
-        let builder = StripeSourceBuilder::new(options, kek, 4096);
+        let builder = StripeSourceBuilder::new(options, 4096);
 
         let result = builder.build();
 
@@ -219,8 +214,7 @@ mod tests {
     #[test]
     fn test_connect_to_invalid_remote_server() {
         let options = create_test_options(Some("127.0.0.1:99999".to_string()), None);
-        let kek = KeyEncryptionCipher::default();
-        let builder = StripeSourceBuilder::new(options, kek, 4096);
+        let builder = StripeSourceBuilder::new(options, 4096);
 
         let result = builder.build();
 
@@ -263,6 +257,7 @@ mod tests {
         let store =
             StripeSourceBuilder::build_archive_store(&ArchiveStripeSourceConfig::Filesystem {
                 path: temp_dir.path().to_str().unwrap().to_string(),
+                archive_kek: KeyEncryptionCipher::default(),
             });
         assert!(store.is_ok());
     }
@@ -281,6 +276,7 @@ mod tests {
             profile: Some("profile1".to_string()),
             credentials: Some(aws_creds),
             connections: 4,
+            archive_kek: KeyEncryptionCipher::default(),
         };
         let store = StripeSourceBuilder::build_archive_store(&config);
         assert!(store.is_ok());

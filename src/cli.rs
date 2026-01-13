@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 
+use crate::{vhost_backend::Options, KeyEncryptionCipher, Result};
+
 #[derive(Args, Debug, Clone)]
 /// Common command-line arguments used in most of the binaries.
 pub struct CommonArgs {
@@ -21,4 +23,9 @@ pub struct CommonArgs {
         requires = "kek"
     )]
     pub unlink_kek: bool,
+}
+
+pub fn load_options(common: &CommonArgs) -> Result<Options> {
+    let kek = KeyEncryptionCipher::load(common.kek.as_ref(), common.unlink_kek)?;
+    Options::load_from_file_with_kek(&common.config, &kek)
 }

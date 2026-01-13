@@ -6,7 +6,7 @@ use clap::Parser;
 use ubiblk::{
     archive::{ArchiveStore, FileSystemStore, S3Store, StripeArchiver},
     block_device::UbiMetadata,
-    cli::CommonArgs,
+    cli::{load_options, CommonArgs},
     stripe_source::StripeSourceBuilder,
     utils::s3::{build_s3_client, create_runtime},
     vhost_backend::*,
@@ -89,33 +89,34 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let options = Options::load_from_file(&args.common.config)?;
-
-    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
+    let options = load_options(&args.common)?;
     let metadata_path = options
         .metadata_path
         .as_ref()
         .ok_or(UbiblkError::InvalidParameter {
             description: "Metadata path is missing".to_string(),
         })?;
-    let metadata_dev = build_block_device(metadata_path, &options, kek.clone(), true)?;
+    let metadata_dev = build_block_device(metadata_path, &options, true)?;
     let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
 
-    let disk_dev = build_block_device(&options.path, &options, kek.clone(), true)?;
+    let disk_dev = build_block_device(&options.path, &options, true)?;
 
     let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
+
+    // TODO: Use proper KEK for archives instead of default (tracked in future PR)
+    let archive_kek = KeyEncryptionCipher::default();
     let stripe_source =
-        StripeSourceBuilder::new(options.clone(), kek.clone(), stripe_sector_count).build()?;
+        StripeSourceBuilder::new(options.clone(), archive_kek.clone(), stripe_sector_count)
+            .build()?;
 
-    let store = build_store(&args, &kek)?;
-
+    let store = build_store(&args, &archive_kek)?;
     let mut archiver = StripeArchiver::new(
         stripe_source,
         disk_dev.as_ref(),
         metadata,
         store,
         args.encrypt,
-        kek.clone(),
+        archive_kek.clone(),
         args.s3_connections,
     )?;
 

@@ -1,6 +1,7 @@
 use clap::Parser;
-use ubiblk::cli::CommonArgs;
-use ubiblk::{vhost_backend::*, KeyEncryptionCipher, Result};
+use ubiblk::cli::{load_options, CommonArgs};
+use ubiblk::vhost_backend::*;
+use ubiblk::Result;
 
 #[derive(Parser)]
 #[command(
@@ -19,8 +20,6 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let options = Options::load_from_file(&args.common.config)?;
-
-    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
-    block_backend_loop(&options, kek)
+    let options = load_options(&args.common)?;
+    block_backend_loop(&options)
 }

@@ -36,7 +36,7 @@ impl ArchiveStripeSource {
         let pending_requests = HashMap::new();
         let xts_cipher = match metadata.encryption_key {
             None => None,
-            Some(key) => Some(XtsBlockCipher::new(key.0, key.1, kek)?),
+            Some(key) => Some(XtsBlockCipher::from_encrypted(key.0, key.1, &kek)?),
         };
         Ok(Self {
             store,

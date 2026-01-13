@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 
-use crate::crypt::{decode_key, decode_optional_key, decode_optional_key_pair};
+use crate::crypt::{
+    decode_key, decode_optional_key, decode_optional_key_pair, KeyEncryptionCipher,
+};
 use serde::{Deserialize, Deserializer, Serialize};
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 
@@ -168,20 +170,32 @@ impl Options {
     }
 
     pub fn load_from_str(yaml_str: &str) -> crate::Result<Self> {
-        let options: Options =
+        Self::load_from_str_with_kek(yaml_str, &KeyEncryptionCipher::default())
+    }
+
+    pub fn load_from_str_with_kek(
+        yaml_str: &str,
+        kek: &KeyEncryptionCipher,
+    ) -> crate::Result<Self> {
+        let mut options: Options =
             serde_yaml::from_str(yaml_str).map_err(|e| crate::UbiblkError::InvalidParameter {
                 description: format!("Failed to parse options YAML: {}", e),
             })?;
+        options.decrypt_with_kek(kek)?;
         options.validate()?;
         Ok(options)
     }
 
     pub fn load_from_file(path: &Path) -> crate::Result<Self> {
+        Self::load_from_file_with_kek(path, &KeyEncryptionCipher::default())
+    }
+
+    pub fn load_from_file_with_kek(path: &Path, kek: &KeyEncryptionCipher) -> crate::Result<Self> {
         let contents =
             std::fs::read_to_string(path).map_err(|e| crate::UbiblkError::InvalidParameter {
                 description: format!("Failed to read options file {}: {}", path.display(), e),
             })?;
-        Self::load_from_str(&contents)
+        Self::load_from_str_with_kek(&contents, kek)
     }
 
     #[allow(deprecated)]
@@ -206,6 +220,39 @@ impl Options {
             Some(StripeSourceConfig::Raw { path }) => Some(path.clone()),
             _ => self.image_path.as_ref().map(PathBuf::from),
         }
+    }
+
+    fn decrypt_with_kek(&mut self, kek: &KeyEncryptionCipher) -> crate::Result<()> {
+        if let Some((key1, key2)) = self.encryption_key.take() {
+            let (key1, key2) = kek.decrypt_xts_keys(key1, key2)?;
+            self.encryption_key = Some((key1.to_vec(), key2.to_vec()));
+        }
+
+        if let Some(stripe_source) = self.stripe_source.as_mut() {
+            match stripe_source {
+                StripeSourceConfig::Remote { psk_secret, .. } => {
+                    if let Some(secret) = psk_secret.take() {
+                        *psk_secret = Some(kek.decrypt_psk_secret(secret)?);
+                    }
+                }
+                StripeSourceConfig::Archive { config } => {
+                    if let ArchiveStripeSourceConfig::S3 { credentials, .. } = config {
+                        if let Some(creds) = credentials.as_mut() {
+                            let access_key_id = kek
+                                .decrypt_aws_credential(std::mem::take(&mut creds.access_key_id))?;
+                            let secret_access_key = kek.decrypt_aws_credential(std::mem::take(
+                                &mut creds.secret_access_key,
+                            ))?;
+                            creds.access_key_id = access_key_id.into_bytes();
+                            creds.secret_access_key = secret_access_key.into_bytes();
+                        }
+                    }
+                }
+                StripeSourceConfig::Raw { .. } => {}
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -275,6 +322,7 @@ pub enum IoEngine {
 mod tests {
     use super::*;
     use crate::crypt::{CipherMethod, KeyEncryptionCipher};
+    use base64::{engine::general_purpose::STANDARD, Engine};
     use serde_yaml::from_str;
 
     #[test]
@@ -312,31 +360,32 @@ mod tests {
 
     #[test]
     fn test_decode_encryption_keys() {
-        let yaml = r#"
+        let kek_key = [0x11u8; 32];
+        let iv = [0x22u8; 12];
+        let aad = b"test-aad";
+        let kek = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(kek_key.to_vec()),
+            init_vector: Some(iv.to_vec()),
+            auth_data: Some(aad.to_vec()),
+        };
+        let key1 = vec![0xAAu8; 32];
+        let key2 = vec![0xBBu8; 32];
+        let (enc1, enc2) = kek.encrypt_xts_keys(&key1, &key2).unwrap();
+
+        let yaml = format!(
+            r#"
         path: "/path/to/disk"
         socket: "/path/to/socket"
         encryption_key:
-          - "aISq7jbeNWO8U+VHOb09K4K5Sj1DsMGLf289oO4vOG9SI1WpGdUM7WmuWQBtGhky"
-          - "5OTauknSxwWFqRGvE2Ef3Zv2s1syPdbYFXyq3FHkK69/BhI+7jF+VFQGFb1+j3sj"
-        "#;
-        let options = Options::load_from_str(yaml).unwrap();
-        assert_eq!(
-            options.encryption_key,
-            Some((
-                vec![
-                    0x68, 0x84, 0xaa, 0xee, 0x36, 0xde, 0x35, 0x63, 0xbc, 0x53, 0xe5, 0x47, 0x39,
-                    0xbd, 0x3d, 0x2b, 0x82, 0xb9, 0x4a, 0x3d, 0x43, 0xb0, 0xc1, 0x8b, 0x7f, 0x6f,
-                    0x3d, 0xa0, 0xee, 0x2f, 0x38, 0x6f, 0x52, 0x23, 0x55, 0xa9, 0x19, 0xd5, 0x0c,
-                    0xed, 0x69, 0xae, 0x59, 0x00, 0x6d, 0x1a, 0x19, 0x32,
-                ],
-                vec![
-                    0xe4, 0xe4, 0xda, 0xba, 0x49, 0xd2, 0xc7, 0x05, 0x85, 0xa9, 0x11, 0xaf, 0x13,
-                    0x61, 0x1f, 0xdd, 0x9b, 0xf6, 0xb3, 0x5b, 0x32, 0x3d, 0xd6, 0xd8, 0x15, 0x7c,
-                    0xaa, 0xdc, 0x51, 0xe4, 0x2b, 0xaf, 0x7f, 0x06, 0x12, 0x3e, 0xee, 0x31, 0x7e,
-                    0x54, 0x54, 0x06, 0x15, 0xbd, 0x7e, 0x8f, 0x7b, 0x23,
-                ]
-            ))
+          - "{}"
+          - "{}"
+        "#,
+            STANDARD.encode(enc1),
+            STANDARD.encode(enc2),
         );
+        let options = Options::load_from_str_with_kek(&yaml, &kek).unwrap();
+        assert_eq!(options.encryption_key, Some((key1, key2)));
     }
 
     #[test]

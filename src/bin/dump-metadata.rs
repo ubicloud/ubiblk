@@ -1,9 +1,9 @@
 use clap::Parser;
 use std::path::PathBuf;
 use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
-use ubiblk::cli::CommonArgs;
-use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
-use ubiblk::{Error, KeyEncryptionCipher, Result};
+use ubiblk::cli::{load_options, CommonArgs};
+use ubiblk::vhost_backend::{build_block_device, SECTOR_SIZE};
+use ubiblk::{Error, Result};
 
 #[derive(Parser)]
 #[command(
@@ -15,27 +15,6 @@ use ubiblk::{Error, KeyEncryptionCipher, Result};
 struct Args {
     #[command(flatten)]
     common: CommonArgs,
-}
-
-fn build_block_device(
-    path: &str,
-    options: &Options,
-    readonly: bool,
-    kek: KeyEncryptionCipher,
-) -> Result<Box<dyn BlockDevice>> {
-    let mut device: Box<dyn BlockDevice> = block_device::UringBlockDevice::new(
-        PathBuf::from(path),
-        options.queue_size,
-        readonly,
-        true,
-        options.write_through,
-    )?;
-
-    if let Some((key1, key2)) = &options.encryption_key {
-        device = block_device::CryptBlockDevice::new(device, key1.clone(), key2.clone(), kek)?;
-    }
-
-    Ok(device)
 }
 
 fn format_list(list: &[usize]) -> String {
@@ -78,12 +57,10 @@ fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
     let args = Args::parse();
 
-    let options = Options::load_from_file(&args.common.config)?;
-
-    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
+    let options = load_options(&args.common)?;
 
     // base data device
-    let base_dev = build_block_device(&options.path, &options, true, kek.clone())?;
+    let base_dev = build_block_device(&options.path, &options, true)?;
     let data_size = base_dev.sector_count() * SECTOR_SIZE as u64;
 
     // image device if provided
@@ -110,7 +87,7 @@ fn main() -> Result<()> {
         .ok_or_else(|| Error::InvalidParameter {
             description: "metadata_path is none".to_string(),
         })?;
-    let metadata_dev = build_block_device(metadata_path, &options, true, kek.clone())?;
+    let metadata_dev = build_block_device(metadata_path, &options, true)?;
     let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
 
     let stripe_size = metadata.stripe_size();

@@ -1,6 +1,6 @@
 use clap::Parser;
-use ubiblk::cli::CommonArgs;
-use ubiblk::{vhost_backend::*, KeyEncryptionCipher};
+use ubiblk::cli::{load_options, CommonArgs};
+use ubiblk::vhost_backend::*;
 use ubiblk::{Error, Result};
 
 const STRIPE_SECTOR_COUNT_SHIFT_MIN: u8 = 6;
@@ -27,7 +27,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let options = Options::load_from_file(&args.common.config)?;
+    let options = load_options(&args.common)?;
 
     let stripe_sector_count_shift = args.stripe_sector_count_shift;
 
@@ -41,7 +41,5 @@ fn main() -> Result<()> {
         });
     }
 
-    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
-
-    init_metadata(&options, kek, stripe_sector_count_shift)
+    init_metadata(&options, stripe_sector_count_shift)
 }

@@ -2,7 +2,6 @@
 mod tests {
     use crate::{
         block_device::bdev_test::TestBlockDevice,
-        crypt::KeyEncryptionCipher,
         utils::{aligned_buffer::BUFFER_ALIGNMENT, block::VirtioBlockConfig},
         vhost_backend::{init_metadata, Options, UbiBlkBackend, SECTOR_SIZE},
         UbiblkError,
@@ -99,7 +98,7 @@ mod tests {
     #[test]
     fn init_metadata_missing_path() {
         let opts = default_options("img".to_string());
-        let res = init_metadata(&opts, KeyEncryptionCipher::default(), 4);
+        let res = init_metadata(&opts, 4);
         assert!(res.is_err());
     }
 

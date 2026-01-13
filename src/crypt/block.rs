@@ -12,10 +12,20 @@ pub struct XtsBlockCipher {
 }
 
 impl XtsBlockCipher {
-    pub fn new(
+    pub fn new(key1: Vec<u8>, key2: Vec<u8>) -> Result<Self> {
+        let dec_key1 = ensure_32_bytes(key1)?;
+        let dec_key2 = ensure_32_bytes(key2)?;
+
+        Ok(XtsBlockCipher {
+            key1: dec_key1,
+            key2: dec_key2,
+        })
+    }
+
+    pub fn from_encrypted(
         encrypted_key1: Vec<u8>,
         encrypted_key2: Vec<u8>,
-        kek: KeyEncryptionCipher,
+        kek: &KeyEncryptionCipher,
     ) -> Result<Self> {
         let (dec_key1, dec_key2) = kek.decrypt_xts_keys(encrypted_key1, encrypted_key2)?;
 
@@ -105,6 +115,13 @@ impl XtsBlockCipher {
     }
 }
 
+fn ensure_32_bytes(data: Vec<u8>) -> Result<[u8; 32]> {
+    data.try_into()
+        .map_err(|_| crate::UbiblkError::InvalidParameter {
+            description: "Key length must be exactly 32 bytes".to_string(),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::CipherMethod;
@@ -113,8 +130,7 @@ mod tests {
 
     #[test]
     fn test_get_initial_tweak() {
-        let kek = KeyEncryptionCipher::default();
-        let xts_cipher = XtsBlockCipher::new(vec![1u8; 32], vec![2u8; 32], kek).unwrap();
+        let xts_cipher = XtsBlockCipher::new(vec![1u8; 32], vec![2u8; 32]).unwrap();
 
         let sector = 0x1122_3344_5566_7788u64;
         let tweak = xts_cipher.get_initial_tweak(sector);
@@ -140,7 +156,7 @@ mod tests {
         let key1 = vec![3u8; 32];
         let key2 = vec![4u8; 32];
 
-        let xts_cipher = XtsBlockCipher::new(key1.clone(), key2.clone(), kek.clone()).unwrap();
+        let xts_cipher = XtsBlockCipher::new(key1.clone(), key2.clone()).unwrap();
         let (enc_key1, enc_key2) = xts_cipher.encrypted_keys(&kek).unwrap();
 
         assert_eq!(enc_key1, key1.as_slice());
@@ -166,7 +182,7 @@ mod tests {
         assert_ne!(enc1, key1);
         assert_ne!(enc2, key2);
 
-        let xts_cipher = XtsBlockCipher::new(enc1.clone(), enc2.clone(), kek.clone()).unwrap();
+        let xts_cipher = XtsBlockCipher::from_encrypted(enc1.clone(), enc2.clone(), &kek).unwrap();
         let (enc3, enc4) = xts_cipher.encrypted_keys(&kek).unwrap();
 
         assert_eq!(enc1, enc3);

@@ -1,6 +1,6 @@
 use clap::Parser;
-use ubiblk::cli::CommonArgs;
-use ubiblk::{vhost_backend::*, KeyEncryptionCipher, Result};
+use ubiblk::cli::{load_common_args, CommonArgs};
+use ubiblk::{vhost_backend::*, Result};
 
 #[derive(Parser)]
 #[command(
@@ -18,9 +18,7 @@ fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
+    let common = load_common_args(&args.common)?;
 
-    let options = Options::load_from_file(&args.common.config)?;
-
-    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
-    block_backend_loop(&options, kek)
+    block_backend_loop(&common.config, common.kek, common.archive_kek)
 }

@@ -4,12 +4,11 @@ use clap::Parser;
 use log::{error, info};
 
 use ubiblk::{
-    cli::CommonArgs,
+    cli::{load_common_args, CommonArgs, LoadedCommonArgs},
     stripe_server::{
         parse_psk_credentials, prepare_stripe_server, wrap_psk_server_stream, DynStream,
     },
-    vhost_backend::Options,
-    Error, KeyEncryptionCipher, Result,
+    Error, Result,
 };
 
 #[derive(Parser)]
@@ -44,17 +43,18 @@ fn main() -> Result<()> {
 
 fn run(args: Args) -> Result<()> {
     let Args {
-        common: CommonArgs {
-            config,
-            kek,
-            unlink_kek,
-        },
+        common,
         bind,
         psk_identity,
         psk_secret,
     } = args;
 
-    let options = Options::load_from_file(&config)?;
+    let LoadedCommonArgs {
+        config: options,
+        kek,
+        archive_kek: _,
+    } = load_common_args(&common)?;
+
     if options.has_stripe_source() {
         return Err(Error::InvalidParameter {
             description:
@@ -63,7 +63,6 @@ fn run(args: Args) -> Result<()> {
         });
     }
 
-    let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
     let stripe_server = prepare_stripe_server(&options, kek.clone())?;
     let psk = parse_psk_credentials(psk_identity, psk_secret, &kek)?;
 

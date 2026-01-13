@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
-use ubiblk::cli::CommonArgs;
+use ubiblk::cli::{load_common_args, CommonArgs, LoadedCommonArgs};
 use ubiblk::vhost_backend::{Options, SECTOR_SIZE};
 use ubiblk::{Error, KeyEncryptionCipher, Result};
 
@@ -78,9 +78,11 @@ fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
     let args = Args::parse();
 
-    let options = Options::load_from_file(&args.common.config)?;
-
-    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
+    let LoadedCommonArgs {
+        config: options,
+        kek,
+        archive_kek: _,
+    } = load_common_args(&args.common)?;
 
     // base data device
     let base_dev = build_block_device(&options.path, &options, true, kek.clone())?;

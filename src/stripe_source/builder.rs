@@ -13,14 +13,21 @@ use super::*;
 pub struct StripeSourceBuilder {
     options: Options,
     kek: KeyEncryptionCipher,
+    archive_kek: KeyEncryptionCipher,
     stripe_sector_count: u64,
 }
 
 impl StripeSourceBuilder {
-    pub fn new(options: Options, kek: KeyEncryptionCipher, stripe_sector_count: u64) -> Self {
+    pub fn new(
+        options: Options,
+        kek: KeyEncryptionCipher,
+        archive_kek: KeyEncryptionCipher,
+        stripe_sector_count: u64,
+    ) -> Self {
         Self {
             options,
             kek,
+            archive_kek,
             stripe_sector_count,
         }
     }
@@ -29,8 +36,8 @@ impl StripeSourceBuilder {
         if let Some(stripe_source) = self.options.resolved_stripe_source() {
             match stripe_source {
                 StripeSourceConfig::Archive { config } => {
-                    let store = Self::build_archive_store(&config, &self.kek)?;
-                    let stripe_source = ArchiveStripeSource::new(store, self.kek.clone())?;
+                    let store = Self::build_archive_store(&config, &self.archive_kek)?;
+                    let stripe_source = ArchiveStripeSource::new(store, self.archive_kek.clone())?;
                     return Ok(Box::new(stripe_source));
                 }
                 StripeSourceConfig::Remote {
@@ -159,7 +166,8 @@ mod tests {
     fn test_build_defaults_to_null_device() {
         let options = create_test_options(None, None);
         let kek = KeyEncryptionCipher::default();
-        let builder = StripeSourceBuilder::new(options, kek, 4096);
+        let archive_kek = KeyEncryptionCipher::default();
+        let builder = StripeSourceBuilder::new(options, kek, archive_kek, 4096);
 
         let result = builder.build();
 
@@ -180,7 +188,8 @@ mod tests {
 
         let options = create_test_options(None, Some(file_path));
         let kek = KeyEncryptionCipher::default();
-        let builder = StripeSourceBuilder::new(options, kek, 4096);
+        let archive_kek = KeyEncryptionCipher::default();
+        let builder = StripeSourceBuilder::new(options, kek, archive_kek, 4096);
 
         let result = builder.build();
         assert!(
@@ -194,7 +203,8 @@ mod tests {
         let bad_path = PathBuf::from("/path/to/nonexistent/file.img");
         let options = create_test_options(None, Some(bad_path));
         let kek = KeyEncryptionCipher::default();
-        let builder = StripeSourceBuilder::new(options, kek, 4096);
+        let archive_kek = KeyEncryptionCipher::default();
+        let builder = StripeSourceBuilder::new(options, kek, archive_kek, 4096);
 
         let result = builder.build();
 
@@ -212,7 +222,8 @@ mod tests {
     fn test_connect_to_invalid_remote_server() {
         let options = create_test_options(Some("127.0.0.1:99999".to_string()), None);
         let kek = KeyEncryptionCipher::default();
-        let builder = StripeSourceBuilder::new(options, kek, 4096);
+        let archive_kek = KeyEncryptionCipher::default();
+        let builder = StripeSourceBuilder::new(options, kek, archive_kek, 4096);
 
         let result = builder.build();
 

@@ -49,7 +49,11 @@ struct BackendEnv {
 }
 
 impl BackendEnv {
-    fn build(options: &Options, kek: KeyEncryptionCipher) -> Result<Self> {
+    fn build(
+        options: &Options,
+        kek: KeyEncryptionCipher,
+        archive_kek: KeyEncryptionCipher,
+    ) -> Result<Self> {
         let base_device = build_block_device(&options.path, options, kek.clone(), false)?;
         let alignment = Self::determine_alignment(&options.path)?;
 
@@ -58,8 +62,7 @@ impl BackendEnv {
             config,
             channel,
             status_reporter,
-        } = Self::build_devices(base_device, options, kek, alignment)?;
-
+        } = Self::build_devices(base_device, options, kek, archive_kek, alignment)?;
         let io_trackers = (0..options.num_queues)
             .map(|_| IoTracker::new(options.queue_size))
             .collect();
@@ -88,10 +91,18 @@ impl BackendEnv {
         base_device: Box<dyn BlockDevice>,
         options: &Options,
         kek: KeyEncryptionCipher,
+        archive_kek: KeyEncryptionCipher,
         alignment: usize,
     ) -> Result<BgWorkerSetup> {
         if let Some(metadata_path) = options.metadata_path.as_ref() {
-            Self::build_lazy_device(base_device, options, kek, alignment, metadata_path)
+            Self::build_lazy_device(
+                base_device,
+                options,
+                kek,
+                archive_kek,
+                alignment,
+                metadata_path,
+            )
         } else {
             Ok(BgWorkerSetup {
                 block_device: base_device,
@@ -107,6 +118,7 @@ impl BackendEnv {
         base_device: Box<dyn BlockDevice>,
         options: &Options,
         kek: KeyEncryptionCipher,
+        archive_kek: KeyEncryptionCipher,
         alignment: usize,
         metadata_path: &str,
     ) -> Result<BgWorkerSetup> {
@@ -135,6 +147,7 @@ impl BackendEnv {
         let stripe_source_builder = Box::new(StripeSourceBuilder::new(
             options.clone(),
             kek,
+            archive_kek,
             shared_state.stripe_sector_count(),
         ));
 
@@ -274,11 +287,15 @@ struct BgWorkerSetup {
     status_reporter: Option<StatusReporter>,
 }
 
-pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<()> {
+pub fn block_backend_loop(
+    config: &Options,
+    kek: KeyEncryptionCipher,
+    archive_kek: KeyEncryptionCipher,
+) -> Result<()> {
     info!("Starting vhost-user-blk backend with options: {config:?}");
     info!("Process ID: {}", std::process::id());
 
-    let mut backend_env = BackendEnv::build(config, kek.clone())?;
+    let mut backend_env = BackendEnv::build(config, kek.clone(), archive_kek.clone())?;
     backend_env.run_bgworker_thread()?;
 
     let _rpc_handle = if let Some(path) = config.rpc_socket_path.as_ref() {
@@ -299,6 +316,7 @@ pub fn block_backend_loop(config: &Options, kek: KeyEncryptionCipher) -> Result<
 pub fn init_metadata(
     config: &Options,
     kek: KeyEncryptionCipher,
+    archive_kek: KeyEncryptionCipher,
     stripe_sector_count_shift: u8,
 ) -> Result<()> {
     let metadata_path =
@@ -317,8 +335,13 @@ pub fn init_metadata(
         // No image source
         UbiMetadata::new(stripe_sector_count_shift, base_stripe_count, 0)
     } else {
-        let stripe_source =
-            StripeSourceBuilder::new(config.clone(), kek.clone(), stripe_sector_count).build()?;
+        let stripe_source = StripeSourceBuilder::new(
+            config.clone(),
+            kek.clone(),
+            archive_kek.clone(),
+            stripe_sector_count,
+        )
+        .build()?;
         UbiMetadata::new_from_stripe_source(
             stripe_sector_count_shift,
             base_stripe_count,
@@ -423,7 +446,11 @@ mod tests {
             ..Default::default()
         };
 
-        let result = BackendEnv::build(&options, KeyEncryptionCipher::default());
+        let result = BackendEnv::build(
+            &options,
+            KeyEncryptionCipher::default(),
+            KeyEncryptionCipher::default(),
+        );
         assert!(result.is_ok());
     }
 
@@ -436,7 +463,11 @@ mod tests {
             ..Default::default()
         };
 
-        let result = BackendEnv::build(&options, KeyEncryptionCipher::default());
+        let result = BackendEnv::build(
+            &options,
+            KeyEncryptionCipher::default(),
+            KeyEncryptionCipher::default(),
+        );
         assert!(result.is_err());
     }
 
@@ -462,9 +493,13 @@ mod tests {
             ..Default::default()
         };
 
-        init_metadata(&options, KeyEncryptionCipher::default(), 11).unwrap();
+        let (kek, archive_kek) = (
+            KeyEncryptionCipher::default(),
+            KeyEncryptionCipher::default(),
+        );
+        init_metadata(&options, kek.clone(), archive_kek.clone(), 11).unwrap();
 
-        let result = BackendEnv::build(&options, KeyEncryptionCipher::default());
+        let result = BackendEnv::build(&options, kek, archive_kek);
         assert!(result.is_ok());
     }
 }

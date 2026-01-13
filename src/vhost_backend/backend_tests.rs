@@ -99,7 +99,12 @@ mod tests {
     #[test]
     fn init_metadata_missing_path() {
         let opts = default_options("img".to_string());
-        let res = init_metadata(&opts, KeyEncryptionCipher::default(), 4);
+        let res = init_metadata(
+            &opts,
+            KeyEncryptionCipher::default(),
+            KeyEncryptionCipher::default(),
+            4,
+        );
         assert!(res.is_err());
     }
 

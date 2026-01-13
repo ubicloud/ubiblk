@@ -6,7 +6,7 @@ use clap::Parser;
 use ubiblk::{
     archive::{ArchiveStore, FileSystemStore, S3Store, StripeArchiver},
     block_device::UbiMetadata,
-    cli::CommonArgs,
+    cli::{load_common_args, CommonArgs, LoadedCommonArgs},
     stripe_source::StripeSourceBuilder,
     utils::s3::{build_s3_client, create_runtime},
     vhost_backend::*,
@@ -88,10 +88,12 @@ fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
+    let LoadedCommonArgs {
+        config: options,
+        kek,
+        archive_kek,
+    } = load_common_args(&args.common)?;
 
-    let options = Options::load_from_file(&args.common.config)?;
-
-    let kek = KeyEncryptionCipher::load(args.common.kek.as_ref(), args.common.unlink_kek)?;
     let metadata_path = options
         .metadata_path
         .as_ref()
@@ -104,8 +106,13 @@ fn main() -> Result<()> {
     let disk_dev = build_block_device(&options.path, &options, kek.clone(), true)?;
 
     let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
-    let stripe_source =
-        StripeSourceBuilder::new(options.clone(), kek.clone(), stripe_sector_count).build()?;
+    let stripe_source = StripeSourceBuilder::new(
+        options.clone(),
+        kek.clone(),
+        archive_kek.clone(),
+        stripe_sector_count,
+    )
+    .build()?;
 
     let store = build_store(&args, &kek)?;
 
@@ -115,7 +122,7 @@ fn main() -> Result<()> {
         metadata,
         store,
         args.encrypt,
-        kek.clone(),
+        archive_kek,
         args.s3_connections,
     )?;
 

@@ -46,7 +46,7 @@ fn default_device_id() -> String {
     "ubiblk".to_string()
 }
 
-fn default_s3_connections() -> usize {
+fn default_archive_connections() -> usize {
     16
 }
 
@@ -236,21 +236,49 @@ impl Options {
                     }
                 }
                 StripeSourceConfig::Archive { config } => {
-                    let archive_kek = config.archive_kek_mut();
-                    Self::decrypt_archive_kek(kek, archive_kek)?;
-                    if let ArchiveStripeSourceConfig::S3 { credentials, .. } = config {
-                        if let Some(creds) = credentials.as_mut() {
-                            let access_key_id = kek
-                                .decrypt_aws_credential(std::mem::take(&mut creds.access_key_id))?;
-                            let secret_access_key = kek.decrypt_aws_credential(std::mem::take(
-                                &mut creds.secret_access_key,
-                            ))?;
-                            creds.access_key_id = access_key_id.into_bytes();
-                            creds.secret_access_key = secret_access_key.into_bytes();
-                        }
-                    }
+                    config.decrypt_with_kek(kek)?;
                 }
                 StripeSourceConfig::Raw { .. } => {}
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl ArchiveStripeSourceConfig {
+    pub fn archive_kek(&self) -> &KeyEncryptionCipher {
+        match self {
+            ArchiveStripeSourceConfig::Filesystem { archive_kek, .. } => archive_kek,
+            ArchiveStripeSourceConfig::S3 { archive_kek, .. } => archive_kek,
+        }
+    }
+
+    pub fn archive_kek_mut(&mut self) -> &mut KeyEncryptionCipher {
+        match self {
+            ArchiveStripeSourceConfig::Filesystem { archive_kek, .. } => archive_kek,
+            ArchiveStripeSourceConfig::S3 { archive_kek, .. } => archive_kek,
+        }
+    }
+
+    pub fn connections(&self) -> usize {
+        match self {
+            ArchiveStripeSourceConfig::Filesystem { .. } => default_archive_connections(),
+            ArchiveStripeSourceConfig::S3 { connections, .. } => *connections,
+        }
+    }
+
+    pub fn decrypt_with_kek(&mut self, kek: &KeyEncryptionCipher) -> crate::Result<()> {
+        Self::decrypt_archive_kek(kek, self.archive_kek_mut())?;
+
+        if let ArchiveStripeSourceConfig::S3 { credentials, .. } = self {
+            if let Some(creds) = credentials.as_mut() {
+                let access_key_id =
+                    kek.decrypt_aws_credential(std::mem::take(&mut creds.access_key_id))?;
+                let secret_access_key =
+                    kek.decrypt_aws_credential(std::mem::take(&mut creds.secret_access_key))?;
+                creds.access_key_id = access_key_id.into_bytes();
+                creds.secret_access_key = secret_access_key.into_bytes();
             }
         }
 
@@ -275,22 +303,6 @@ impl Options {
             *secret = Some(kek.decrypt_psk_secret(value)?);
         }
         Ok(())
-    }
-}
-
-impl ArchiveStripeSourceConfig {
-    pub fn archive_kek(&self) -> &KeyEncryptionCipher {
-        match self {
-            ArchiveStripeSourceConfig::Filesystem { archive_kek, .. } => archive_kek,
-            ArchiveStripeSourceConfig::S3 { archive_kek, .. } => archive_kek,
-        }
-    }
-
-    pub fn archive_kek_mut(&mut self) -> &mut KeyEncryptionCipher {
-        match self {
-            ArchiveStripeSourceConfig::Filesystem { archive_kek, .. } => archive_kek,
-            ArchiveStripeSourceConfig::S3 { archive_kek, .. } => archive_kek,
-        }
     }
 }
 
@@ -345,7 +357,7 @@ pub enum ArchiveStripeSourceConfig {
         profile: Option<String>,
         #[serde(default)]
         credentials: Option<AwsCredentials>,
-        #[serde(default = "default_s3_connections")]
+        #[serde(default = "default_archive_connections")]
         connections: usize,
         #[serde(default)]
         archive_kek: KeyEncryptionCipher,

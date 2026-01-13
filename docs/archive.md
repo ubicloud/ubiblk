@@ -5,34 +5,54 @@ in either a local directory or an S3-compatible object store.
 
 **Usage:**
 ```bash
-archive --config <CONFIG_YAML> --target <PATH|S3_URI> [options]
+archive --config <CONFIG_YAML> --target-config <TARGET_CONFIG_YAML> [options]
 ```
 
 **Required inputs:**
 - `--config` (`-f`): ubiblk configuration YAML.
-- `--target` (`-t`): Local path or `s3://bucket[/prefix]` destination.
+- `--target-config`: Archive target configuration YAML (filesystem or S3).
 
 **Options:**
 - `--kek` (`-k`): Path to the key encryption key file.
 - `--unlink-kek` (`-u`): Delete the KEK file after use.
 - `--encrypt` (`-e`): Encrypt archived stripes with a random AES-XTS key.
-- `--endpoint`: Custom S3 endpoint (e.g. Cloudflare R2).
-- `--access-key-id` / `--secret-access-key`: Base64-encoded (possibly KEK-
-  encrypted) credentials for S3 access. Both must be provided together.
-- `--region`: S3 region string (for example `auto`).
-- `--profile`: AWS profile name to use for credentials.
+
+**Target config format:**
+```yaml
+type: filesystem
+path: "/var/ubiblk/archive"
+archive_kek:
+  method: "aes256-gcm"
+  key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60="
+  init_vector: "UEt+wI+Ldq1UgQ/P"
+  auth_data: "dm0zamdlejhfMA=="
+```
+
+```yaml
+type: s3
+bucket: "my-bucket"
+prefix: "ubiblk"                       # Optional: prefix inside the bucket
+endpoint: "https://s3.example.com"     # Optional: custom S3 endpoint
+region: "auto"                         # Optional: AWS region
+profile: "r2"                          # Optional: aws-cli profile name
+credentials:                           # Optional: KEK-encrypted credentials
+  access_key_id: "BASE64-ENCODED-ACCESS-KEY-ID"
+  secret_access_key: "BASE64-ENCODED-SECRET-ACCESS-KEY"
+connections: 16                        # Optional: number of connections
+archive_kek:
+  method: "aes256-gcm"
+  key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60="
+  init_vector: "UEt+wI+Ldq1UgQ/P"
+  auth_data: "dm0zamdlejhfMA=="
+```
 
 **Examples:**
 ```bash
 # Archive to a local directory
-archive -f config.yaml -t /var/ubiblk/archive
+archive -f config.yaml --target-config archive_target.yaml
 
 # Archive to S3 with a prefix
-archive -f config.yaml -t s3://my-bucket/ubiblk
-
-# Archive to Cloudflare R2 with a custom endpoint
-archive -f config.yaml -t s3://my-r2-bucket/ubiblk --profile r2 \
-  --endpoint https://<account>.r2.cloudflarestorage.com
+archive -f config.yaml --target-config archive_target.yaml
 ```
 
 ## Archive format

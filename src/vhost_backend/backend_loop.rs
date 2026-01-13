@@ -21,7 +21,7 @@ use crate::{
     stripe_source::StripeSourceBuilder,
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     vhost_backend::io_tracking::IoTracker,
-    KeyEncryptionCipher, Result, UbiblkError,
+    Result, UbiblkError,
 };
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
@@ -129,11 +129,8 @@ impl BackendEnv {
             options.track_written,
         )?;
 
-        // TODO: Use proper KEK for archives instead of default (tracked in future PR)
-        let archive_kek = KeyEncryptionCipher::default();
         let stripe_source_builder = Box::new(StripeSourceBuilder::new(
             options.clone(),
-            archive_kek,
             shared_state.stripe_sector_count(),
         ));
 
@@ -314,12 +311,8 @@ pub fn init_metadata(config: &Options, stripe_sector_count_shift: u8) -> Result<
         // No image source
         UbiMetadata::new(stripe_sector_count_shift, base_stripe_count, 0)
     } else {
-        let stripe_source = StripeSourceBuilder::new(
-            config.clone(),
-            KeyEncryptionCipher::default(),
-            stripe_sector_count,
-        )
-        .build()?;
+        let stripe_source =
+            StripeSourceBuilder::new(config.clone(), stripe_sector_count).build()?;
         UbiMetadata::new_from_stripe_source(
             stripe_sector_count_shift,
             base_stripe_count,

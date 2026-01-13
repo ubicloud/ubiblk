@@ -5,22 +5,26 @@ use crate::{
     vhost_backend::{
         build_source_device, ArchiveStripeSourceConfig, AwsCredentials, Options, StripeSourceConfig,
     },
-    KeyEncryptionCipher, Result,
+    KeyEncryptionCipher, Result, UbiblkError,
 };
 
 use super::*;
 
 pub struct StripeSourceBuilder {
     options: Options,
-    kek: KeyEncryptionCipher,
+    archive_kek: KeyEncryptionCipher,
     stripe_sector_count: u64,
 }
 
 impl StripeSourceBuilder {
-    pub fn new(options: Options, kek: KeyEncryptionCipher, stripe_sector_count: u64) -> Self {
+    pub fn new(
+        options: Options,
+        archive_kek: KeyEncryptionCipher,
+        stripe_sector_count: u64,
+    ) -> Self {
         Self {
             options,
-            kek,
+            archive_kek,
             stripe_sector_count,
         }
     }
@@ -29,8 +33,8 @@ impl StripeSourceBuilder {
         if let Some(stripe_source) = self.options.resolved_stripe_source() {
             match stripe_source {
                 StripeSourceConfig::Archive { config } => {
-                    let store = Self::build_archive_store(&config, &self.kek)?;
-                    let stripe_source = ArchiveStripeSource::new(store, self.kek.clone())?;
+                    let store = Self::build_archive_store(&config)?;
+                    let stripe_source = ArchiveStripeSource::new(store, self.archive_kek.clone())?;
                     return Ok(Box::new(stripe_source));
                 }
                 StripeSourceConfig::Remote {
@@ -39,7 +43,6 @@ impl StripeSourceBuilder {
                     psk_secret,
                 } => {
                     let client = Self::build_remote_client(
-                        &self.kek,
                         address.as_str(),
                         psk_identity.as_deref(),
                         psk_secret,
@@ -59,13 +62,11 @@ impl StripeSourceBuilder {
     }
 
     pub fn build_remote_client(
-        kek: &KeyEncryptionCipher,
         server_addr: &str,
         psk_identity: Option<&str>,
         psk_secret: Option<Vec<u8>>,
     ) -> Result<StripeServerClient> {
-        let psk = if let (Some(identity), Some(secret_encrypted)) = (psk_identity, psk_secret) {
-            let secret = kek.decrypt_psk_secret(secret_encrypted)?;
+        let psk = if let (Some(identity), Some(secret)) = (psk_identity, psk_secret) {
             Some(PskCredentials::new(identity.to_string(), secret)?)
         } else {
             None
@@ -73,13 +74,21 @@ impl StripeSourceBuilder {
         connect_to_stripe_server(server_addr, psk.as_ref())
     }
 
-    fn decrypt_aws_credentials(
+    fn build_aws_credentials(
         credentials: &Option<AwsCredentials>,
-        kek: &KeyEncryptionCipher,
     ) -> Result<Option<aws_sdk_s3::config::Credentials>> {
         if let Some(creds) = credentials {
-            let access_key_id = kek.decrypt_aws_credential(creds.access_key_id.clone())?;
-            let secret_access_key = kek.decrypt_aws_credential(creds.secret_access_key.clone())?;
+            let access_key_id = String::from_utf8(creds.access_key_id.clone()).map_err(|e| {
+                UbiblkError::InvalidParameter {
+                    description: format!("AWS access_key_id is not valid UTF-8: {e}"),
+                }
+            })?;
+            let secret_access_key =
+                String::from_utf8(creds.secret_access_key.clone()).map_err(|e| {
+                    UbiblkError::InvalidParameter {
+                        description: format!("AWS secret_access_key is not valid UTF-8: {e}"),
+                    }
+                })?;
             Ok(Some(
                 aws_sdk_s3::config::Credentials::builder()
                     .access_key_id(access_key_id)
@@ -94,7 +103,6 @@ impl StripeSourceBuilder {
 
     pub fn build_archive_store(
         config: &ArchiveStripeSourceConfig,
-        kek: &KeyEncryptionCipher,
     ) -> Result<Box<dyn ArchiveStore>> {
         match config {
             ArchiveStripeSourceConfig::Filesystem { path } => {
@@ -109,7 +117,7 @@ impl StripeSourceBuilder {
                 credentials,
                 connections,
             } => {
-                let decrypted_credentials = Self::decrypt_aws_credentials(credentials, kek)?;
+                let decrypted_credentials = Self::build_aws_credentials(credentials)?;
                 let runtime = create_runtime()?;
                 let client = build_s3_client(
                     &runtime,
@@ -223,29 +231,26 @@ mod tests {
     }
 
     #[test]
-    fn test_decrypt_aws_credentials_none() {
-        let result =
-            StripeSourceBuilder::decrypt_aws_credentials(&None, &KeyEncryptionCipher::default())
-                .unwrap();
+    fn test_build_aws_credentials_none() {
+        let result = StripeSourceBuilder::build_aws_credentials(&None).unwrap();
         assert!(
             result.is_none(),
-            "Decrypted credentials should be None when input is None"
+            "Credentials should be None when input is None"
         );
     }
 
     #[test]
-    fn test_decrypt_aws_credentials_no_encryption() {
-        let kek = KeyEncryptionCipher::default();
+    fn test_build_aws_credentials_no_encryption() {
         let encrypted_access_key = "test_access_key".as_bytes().to_vec();
         let encrypted_secret_key = "test_secret_key".as_bytes().to_vec();
         let aws_creds = AwsCredentials {
             access_key_id: encrypted_access_key,
             secret_access_key: encrypted_secret_key,
         };
-        let result = StripeSourceBuilder::decrypt_aws_credentials(&Some(aws_creds), &kek).unwrap();
+        let result = StripeSourceBuilder::build_aws_credentials(&Some(aws_creds)).unwrap();
         assert!(
             result.is_some(),
-            "Decrypted credentials should be Some when input is Some"
+            "Credentials should be Some when input is Some"
         );
         let creds = result.unwrap();
         assert_eq!(creds.access_key_id(), "test_access_key");
@@ -255,12 +260,10 @@ mod tests {
     #[test]
     fn test_build_archive_store_filesystem() {
         let temp_dir = tempdir().unwrap();
-        let store = StripeSourceBuilder::build_archive_store(
-            &ArchiveStripeSourceConfig::Filesystem {
+        let store =
+            StripeSourceBuilder::build_archive_store(&ArchiveStripeSourceConfig::Filesystem {
                 path: temp_dir.path().to_str().unwrap().to_string(),
-            },
-            &KeyEncryptionCipher::default(),
-        );
+            });
         assert!(store.is_ok());
     }
 
@@ -279,8 +282,7 @@ mod tests {
             credentials: Some(aws_creds),
             connections: 4,
         };
-        let store =
-            StripeSourceBuilder::build_archive_store(&config, &KeyEncryptionCipher::default());
+        let store = StripeSourceBuilder::build_archive_store(&config);
         assert!(store.is_ok());
     }
 }

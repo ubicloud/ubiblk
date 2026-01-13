@@ -4,16 +4,13 @@ use crate::{
     block_device::{metadata_flags, UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT},
     stripe_server::StripeServer,
     vhost_backend::{build_block_device, Options},
-    KeyEncryptionCipher, Result,
+    Result,
 };
 
-pub fn prepare_stripe_server(
-    options: &Options,
-    kek: KeyEncryptionCipher,
-) -> Result<Arc<StripeServer>> {
-    let stripe_device = build_block_device(&options.path, options, kek.clone(), false)?;
+pub fn prepare_stripe_server(options: &Options) -> Result<Arc<StripeServer>> {
+    let stripe_device = build_block_device(&options.path, options, false)?;
     let metadata: Arc<UbiMetadata> = if let Some(metadata_path) = options.metadata_path.as_deref() {
-        let metadata_device = build_block_device(metadata_path, options, kek, false)?;
+        let metadata_device = build_block_device(metadata_path, options, false)?;
         let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
         Arc::from(metadata)
     } else {
@@ -60,9 +57,7 @@ mod tests {
 
         let options = options(storage_file.path().to_str().unwrap().to_string(), None);
 
-        let kek = KeyEncryptionCipher::default();
-
-        let server = prepare_stripe_server(&options, kek)?;
+        let server = prepare_stripe_server(&options)?;
 
         let metadata = server.metadata.as_ref();
         assert_eq!(metadata.stripe_headers.len(), stripe_count as usize);
@@ -101,8 +96,7 @@ mod tests {
             Some(metadata_file.path().to_str().unwrap().to_string()),
         );
 
-        let kek = KeyEncryptionCipher::default();
-        let server = prepare_stripe_server(&options, kek)?;
+        let server = prepare_stripe_server(&options)?;
 
         let loaded_metadata = server.metadata.as_ref();
         for i in 0..stripe_count as usize {

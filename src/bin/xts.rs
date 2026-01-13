@@ -56,11 +56,11 @@ struct Args {
     output: String,
 }
 
-fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) -> Result<()> {
+fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>) -> Result<()> {
     let base_device: Box<dyn BlockDevice> =
         block_device::SyncBlockDevice::new(PathBuf::from(&args.input), true, false, false)?;
 
-    let crypt_device = block_device::CryptBlockDevice::new(base_device, key1, key2, kek)?;
+    let crypt_device = block_device::CryptBlockDevice::new(base_device, key1, key2)?;
 
     let total_sectors = crypt_device.sector_count();
     let start_sector = args.start_sector.unwrap_or(0);
@@ -125,7 +125,7 @@ fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) -
     Ok(())
 }
 
-fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) -> Result<()> {
+fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>) -> Result<()> {
     let mut input_file = File::open(&args.input)?;
 
     let input_metadata = input_file.metadata()?;
@@ -176,7 +176,7 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>, kek: KeyEncryptionCipher) -
     let base_device: Box<dyn BlockDevice> =
         block_device::SyncBlockDevice::new(PathBuf::from(&args.output), false, false, false)?;
 
-    let crypt_device = block_device::CryptBlockDevice::new(base_device, key1, key2, kek)?;
+    let crypt_device = block_device::CryptBlockDevice::new(base_device, key1, key2)?;
 
     input_file.seek(SeekFrom::Start(start_sector * SECTOR_SIZE as u64))?;
 
@@ -212,7 +212,9 @@ fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
-    let options = Options::load_from_file(&PathBuf::from(&args.config))?;
+    let kek_path = args.kek.as_ref().map(PathBuf::from);
+    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;
+    let options = Options::load_from_file_with_kek(&PathBuf::from(&args.config), &kek)?;
 
     let (key1, key2) = options
         .encryption_key
@@ -221,11 +223,8 @@ fn main() -> Result<()> {
             description: "Configuration does not contain encryption keys".to_string(),
         })?;
 
-    let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;
-
     match args.action {
-        Action::Decode => decode(&args, key1, key2, kek),
-        Action::Encode => encode(&args, key1, key2, kek),
+        Action::Decode => decode(&args, key1, key2),
+        Action::Encode => encode(&args, key1, key2),
     }
 }

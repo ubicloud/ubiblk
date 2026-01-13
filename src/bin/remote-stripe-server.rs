@@ -54,7 +54,9 @@ fn run(args: Args) -> Result<()> {
         psk_secret,
     } = args;
 
-    let options = Options::load_from_file(&config)?;
+    let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
+
+    let options = Options::load_from_file_with_kek(&config, &kek)?;
     if options.has_stripe_source() {
         return Err(Error::InvalidParameter {
             description:
@@ -63,8 +65,7 @@ fn run(args: Args) -> Result<()> {
         });
     }
 
-    let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
-    let stripe_server = prepare_stripe_server(&options, kek.clone())?;
+    let stripe_server = prepare_stripe_server(&options)?;
     let psk = parse_psk_credentials(psk_identity, psk_secret, &kek)?;
 
     let listener = TcpListener::bind(&bind)?;

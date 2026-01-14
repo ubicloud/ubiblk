@@ -122,4 +122,11 @@ mod tests {
             .iter()
             .all(|byte| *byte == 0));
     }
+
+    #[test]
+    fn test_clone() {
+        let dev = NullBlockDevice::new_with_sector_count(5000);
+        let dev_clone = dev.clone();
+        assert_eq!(dev.sector_count(), dev_clone.sector_count());
+    }
 }

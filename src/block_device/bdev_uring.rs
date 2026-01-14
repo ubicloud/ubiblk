@@ -241,7 +241,7 @@ impl UringBlockDevice {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_device::shared_buffer;
+    use crate::block_device::{shared_buffer, wait_for_completion};
 
     use super::*;
 
@@ -529,5 +529,37 @@ mod tests {
         assert!(result.contains(&(1, true)));
         assert!(result.contains(&(2, false)));
         Ok(())
+    }
+
+    #[test]
+    fn test_clone() {
+        let tmpfile = NamedTempFile::new().unwrap();
+        let path = tmpfile.path().to_path_buf();
+        let device = UringBlockDevice::new(path, 8, false, true, true).unwrap();
+        let device_clone = device.clone();
+        assert_eq!(device.sector_count(), device_clone.sector_count());
+
+        // Write to the clone & read from the original to verify they access the
+        // same file.
+        let mut chan_clone = device_clone.create_channel().unwrap();
+        let pattern = vec![0xDEu8; SECTOR_SIZE];
+        let write_buf = shared_buffer(SECTOR_SIZE);
+        write_buf
+            .borrow_mut()
+            .as_mut_slice()
+            .copy_from_slice(&pattern);
+        chan_clone.add_write(0, 1, write_buf.clone(), 1);
+        chan_clone.submit().unwrap();
+        wait_for_completion(chan_clone.as_mut(), 1, Duration::from_secs(5)).unwrap();
+        chan_clone.add_flush(0);
+        chan_clone.submit().unwrap();
+        wait_for_completion(chan_clone.as_mut(), 0, Duration::from_secs(5)).unwrap();
+
+        let mut chan = device.create_channel().unwrap();
+        let read_buf = shared_buffer(SECTOR_SIZE);
+        chan.add_read(0, 1, read_buf.clone(), 2);
+        chan.submit().unwrap();
+        wait_for_completion(chan.as_mut(), 2, Duration::from_secs(5)).unwrap();
+        assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
     }
 }

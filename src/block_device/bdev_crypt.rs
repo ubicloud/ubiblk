@@ -226,4 +226,30 @@ mod tests {
 
         assert_eq!(bdev.sector_count(), 2048);
     }
+
+    #[test]
+    fn test_clone() {
+        let base = TestBlockDevice::new(1024 * 1024);
+        let key1 = vec![1u8; 32];
+        let key2 = vec![3u8; 32];
+        let bdev = CryptBlockDevice::new(Box::new(base), key1, key2).unwrap();
+        let bdev_clone = bdev.clone();
+        assert_eq!(bdev.sector_count(), bdev_clone.sector_count());
+
+        // write some data using the original device
+        let mut channel = bdev.create_channel().unwrap();
+        let buf = shared_buffer(SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice()[0..5].copy_from_slice(b"Hello");
+        channel.add_write(0, 1, buf.clone(), 1);
+        channel.submit().unwrap();
+        assert_eq!(channel.poll(), vec![(1, true)]);
+
+        // read the data back using the cloned device
+        let mut clone_channel = bdev_clone.create_channel().unwrap();
+        let read_buf = shared_buffer(SECTOR_SIZE);
+        clone_channel.add_read(0, 1, read_buf.clone(), 2);
+        clone_channel.submit().unwrap();
+        assert_eq!(clone_channel.poll(), vec![(2, true)]);
+        assert_eq!(&read_buf.borrow().as_slice()[0..5], b"Hello");
+    }
 }

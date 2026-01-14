@@ -395,4 +395,36 @@ mod tests {
         assert_eq!(result, vec![(1, true)]);
         Ok(())
     }
+
+    #[test]
+    fn test_clone() {
+        let tmpfile = NamedTempFile::new().unwrap();
+        let path = tmpfile.path().to_path_buf();
+        let device = SyncBlockDevice::new(path.clone(), false, true, true).unwrap();
+        let device_clone = device.clone();
+        assert_eq!(device.sector_count(), device_clone.sector_count());
+
+        // Write to the clone & read from the original to verify they access the
+        // same file.
+        let mut chan_clone = device_clone.create_channel().unwrap();
+        let pattern = vec![0xDEu8; SECTOR_SIZE];
+        let write_buf = shared_buffer(SECTOR_SIZE);
+        write_buf
+            .borrow_mut()
+            .as_mut_slice()
+            .copy_from_slice(&pattern);
+        chan_clone.add_write(0, 1, write_buf.clone(), 1);
+        chan_clone.submit().unwrap();
+        assert_eq!(chan_clone.poll(), vec![(1, true)]);
+        chan_clone.add_flush(0);
+        chan_clone.submit().unwrap();
+        assert_eq!(chan_clone.poll(), vec![(0, true)]);
+
+        let mut chan = device.create_channel().unwrap();
+        let read_buf = shared_buffer(SECTOR_SIZE);
+        chan.add_read(0, 1, read_buf.clone(), 2);
+        chan.submit().unwrap();
+        assert_eq!(chan.poll(), vec![(2, true)]);
+        assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
+    }
 }

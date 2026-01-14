@@ -63,11 +63,6 @@ impl UbiMetadata {
     }
 
     #[cfg(test)]
-    pub fn stripe_headers_offset(&self, stripe_id: usize) -> usize {
-        SECTOR_SIZE + stripe_id
-    }
-
-    #[cfg(test)]
     pub fn stripe_header(&self, stripe_id: usize) -> u8 {
         self.stripe_headers[stripe_id]
     }

@@ -36,7 +36,7 @@ pub(super) fn spawn_workers(
 
     let mut workers = Vec::with_capacity(worker_threads);
 
-    for _ in 0..worker_threads {
+    for i in 0..worker_threads {
         let ctx = WorkerContext {
             client: S3Client::from_conf(client_config.clone()),
             bucket: Arc::clone(&bucket),
@@ -45,8 +45,10 @@ pub(super) fn spawn_workers(
         let rx = request_rx.clone();
         let tx = result_tx.clone();
 
-        let handle = thread::spawn(move || run_worker_loop(ctx, rx, tx));
-        workers.push(handle);
+        let join_handle = thread::Builder::new()
+            .name(format!("s3-worker-{}", i))
+            .spawn(move || run_worker_loop(ctx, rx, tx))?;
+        workers.push(join_handle);
     }
 
     Ok(workers)

@@ -2,7 +2,7 @@ use std::net::{SocketAddr, TcpStream};
 
 use log::info;
 
-use crate::UbiblkError;
+use crate::{vhost_backend::RemoteStripeSourceConfig, UbiblkError};
 
 use super::*;
 
@@ -117,20 +117,22 @@ impl RemoteStripeProvider for StripeServerClient {
     }
 }
 
-pub fn connect_to_stripe_server(
-    server_addr: &str,
-    psk: Option<&PskCredentials>,
-) -> Result<StripeServerClient> {
+pub fn connect_to_stripe_server(conf: &RemoteStripeSourceConfig) -> Result<StripeServerClient> {
+    let psk = if let (Some(identity), Some(secret)) = (&conf.psk_identity, &conf.psk_secret) {
+        Some(PskCredentials::new(identity.clone(), secret.clone())?)
+    } else {
+        None
+    };
     let server_addr: SocketAddr =
-        server_addr
+        conf.address
             .parse()
             .map_err(|err| UbiblkError::InvalidParameter {
-                description: format!("invalid server address {server_addr}: {err}"),
+                description: format!("invalid server address {}: {}", conf.address, err),
             })?;
 
     let stream: DynStream = Box::new(TcpStream::connect(server_addr)?);
     let stream = if let Some(creds) = psk {
-        wrap_psk_client_stream(stream, creds)?
+        wrap_psk_client_stream(stream, &creds)?
     } else {
         stream
     };
@@ -341,7 +343,12 @@ mod tests {
 
     #[test]
     fn test_connection_failure() {
-        let result = connect_to_stripe_server("127.0.0.1:9999", None);
+        let conf = RemoteStripeSourceConfig {
+            address: "127.0.0.1:9999".to_string(),
+            psk_identity: None,
+            psk_secret: None,
+        };
+        let result = connect_to_stripe_server(&conf);
         assert!(result.is_err());
     }
 }

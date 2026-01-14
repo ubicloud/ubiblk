@@ -128,22 +128,12 @@ impl Options {
 
         if let Some(stripe_source) = &self.stripe_source {
             match stripe_source {
-                StripeSourceConfig::Remote {
-                    address: _,
-                    psk_identity,
-                    psk_secret,
-                } => {
+                StripeSourceConfig::Remote { config } => {
+                    config.validate()?;
                     if !self.copy_on_read {
                         return Err(crate::UbiblkError::InvalidParameter {
                             description:
                                 "copy_on_read must be enabled when using remote stripe source."
-                                    .to_string(),
-                        });
-                    }
-                    if psk_identity.is_some() ^ psk_secret.is_some() {
-                        return Err(crate::UbiblkError::InvalidParameter {
-                            description:
-                                "Both psk_identity and psk_secret must be specified together."
                                     .to_string(),
                         });
                     }
@@ -230,11 +220,7 @@ impl Options {
 
         if let Some(stripe_source) = self.stripe_source.as_mut() {
             match stripe_source {
-                StripeSourceConfig::Remote { psk_secret, .. } => {
-                    if let Some(secret) = psk_secret.take() {
-                        *psk_secret = Some(kek.decrypt_psk_secret(secret)?);
-                    }
-                }
+                StripeSourceConfig::Remote { config } => config.decrypt_with_kek(kek)?,
                 StripeSourceConfig::Archive { config } => {
                     config.decrypt_with_kek(kek)?;
                 }
@@ -306,6 +292,47 @@ impl ArchiveStripeSourceConfig {
     }
 }
 
+impl RemoteStripeSourceConfig {
+    pub fn load_from_file_with_kek(path: &Path, kek: &KeyEncryptionCipher) -> crate::Result<Self> {
+        let contents =
+            std::fs::read_to_string(path).map_err(|e| crate::UbiblkError::InvalidParameter {
+                description: format!(
+                    "Failed to read remote config file {}: {}",
+                    path.display(),
+                    e
+                ),
+            })?;
+        Self::load_from_str_with_kek(&contents, kek)
+    }
+
+    fn load_from_str_with_kek(yaml_str: &str, kek: &KeyEncryptionCipher) -> crate::Result<Self> {
+        let mut config: RemoteStripeSourceConfig =
+            serde_yaml::from_str(yaml_str).map_err(|e| crate::UbiblkError::InvalidParameter {
+                description: format!("Failed to parse remote config YAML: {}", e),
+            })?;
+        config.decrypt_with_kek(kek)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn decrypt_with_kek(&mut self, kek: &KeyEncryptionCipher) -> crate::Result<()> {
+        if let Some(secret) = self.psk_secret.take() {
+            self.psk_secret = Some(kek.decrypt_psk_secret(secret)?);
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> crate::Result<()> {
+        if self.psk_identity.is_some() ^ self.psk_secret.is_some() {
+            return Err(crate::UbiblkError::InvalidParameter {
+                description: "Both psk_identity and psk_secret must be specified together."
+                    .to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct AwsCredentials {
@@ -316,6 +343,16 @@ pub struct AwsCredentials {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct RemoteStripeSourceConfig {
+    pub address: String,
+    #[serde(default)]
+    pub psk_identity: Option<String>,
+    #[serde(default, deserialize_with = "decode_optional_key")]
+    pub psk_secret: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "source")]
 pub enum StripeSourceConfig {
     /// Use a raw image file as the stripe source.
@@ -323,11 +360,8 @@ pub enum StripeSourceConfig {
 
     /// Use a remote stripe server (identified by address or URL).
     Remote {
-        address: String,
-        #[serde(default)]
-        psk_identity: Option<String>,
-        #[serde(default, deserialize_with = "decode_optional_key")]
-        psk_secret: Option<Vec<u8>>,
+        #[serde(flatten)]
+        config: RemoteStripeSourceConfig,
     },
 
     /// Use an archive store (e.g. directory or S3 bucket) as the stripe source.
@@ -475,13 +509,12 @@ mod tests {
 
         let stripe_source = options.stripe_source.expect("stripe_source to be set");
         match stripe_source {
-            StripeSourceConfig::Remote {
-                psk_identity,
-                psk_secret,
-                ..
-            } => {
-                assert_eq!(psk_identity.as_deref(), Some("client1"));
-                assert_eq!(psk_secret.as_deref(), Some(b"0123456789ABCDEF".as_ref()));
+            StripeSourceConfig::Remote { config } => {
+                assert_eq!(config.psk_identity.as_deref(), Some("client1"));
+                assert_eq!(
+                    config.psk_secret.as_deref(),
+                    Some(b"0123456789ABCDEF".as_ref())
+                );
             }
             other => panic!("Unexpected stripe source: {other:?}"),
         }

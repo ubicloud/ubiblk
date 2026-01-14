@@ -4,7 +4,8 @@ use std::{collections::HashMap, io, path::PathBuf};
 
 use ubiblk::{
     block_device::metadata_flags,
-    stripe_server::{connect_to_stripe_server, parse_psk_credentials, RemoteStripeProvider},
+    stripe_server::{connect_to_stripe_server, RemoteStripeProvider},
+    vhost_backend::RemoteStripeSourceConfig,
     KeyEncryptionCipher, Result, UbiblkError,
 };
 
@@ -14,9 +15,9 @@ use ubiblk::{
     about = "Interactive shell for remote-stripe-server"
 )]
 struct Args {
-    /// Address of the remote-stripe-server, e.g. 127.0.0.1:4555
-    #[arg(value_name = "IP:PORT")]
-    server: String,
+    /// Config YAML file containing remote stripe server connection details.
+    #[arg(long = "server-config", value_name = "CONFIG_YAML")]
+    server_config_path: PathBuf,
 
     /// Path to the key encryption key file.
     #[arg(short = 'k', long = "kek")]
@@ -25,29 +26,20 @@ struct Args {
     /// Unlink the key encryption key file after use.
     #[arg(short = 'u', long = "unlink-kek", default_value_t = false)]
     unlink_kek: bool,
-
-    /// PSK identity (required if --psk-secret is set).
-    #[arg(long = "psk-identity")]
-    psk_identity: Option<String>,
-
-    /// Base64-encoded PSK secret encrypted with the KEK (required if --psk-identity is set).
-    #[arg(long = "psk-secret")]
-    psk_secret: Option<String>,
 }
 
 fn main() -> Result<()> {
     let Args {
-        server,
+        server_config_path,
         kek,
         unlink_kek,
-        psk_identity,
-        psk_secret,
     } = Args::parse();
 
     let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
-    let psk = parse_psk_credentials(psk_identity, psk_secret, &kek)?;
+    let server_config =
+        RemoteStripeSourceConfig::load_from_file_with_kek(&server_config_path, &kek)?;
+    let mut client = connect_to_stripe_server(&server_config)?;
 
-    let mut client = connect_to_stripe_server(&server, psk.as_ref())?;
     let metadata = client
         .metadata
         .as_ref()

@@ -1,6 +1,6 @@
 use crate::{
     archive::{ArchiveStore, FileSystemStore, S3Store},
-    stripe_server::{connect_to_stripe_server, PskCredentials, StripeServerClient},
+    stripe_server::connect_to_stripe_server,
     utils::s3::{build_s3_client, create_runtime},
     vhost_backend::{
         build_source_device, ArchiveStripeSourceConfig, AwsCredentials, Options, StripeSourceConfig,
@@ -32,16 +32,8 @@ impl StripeSourceBuilder {
                         ArchiveStripeSource::new(store, config.archive_kek().clone())?;
                     return Ok(Box::new(stripe_source));
                 }
-                StripeSourceConfig::Remote {
-                    address,
-                    psk_identity,
-                    psk_secret,
-                } => {
-                    let client = Self::build_remote_client(
-                        address.as_str(),
-                        psk_identity.as_deref(),
-                        psk_secret,
-                    )?;
+                StripeSourceConfig::Remote { config } => {
+                    let client = connect_to_stripe_server(&config)?;
                     let stripe_source =
                         RemoteStripeSource::new(Box::new(client), self.stripe_sector_count)?;
                     return Ok(Box::new(stripe_source));
@@ -54,19 +46,6 @@ impl StripeSourceBuilder {
 
         let stripe_source = BlockDeviceStripeSource::new(block_device, self.stripe_sector_count)?;
         Ok(Box::new(stripe_source))
-    }
-
-    pub fn build_remote_client(
-        server_addr: &str,
-        psk_identity: Option<&str>,
-        psk_secret: Option<Vec<u8>>,
-    ) -> Result<StripeServerClient> {
-        let psk = if let (Some(identity), Some(secret)) = (psk_identity, psk_secret) {
-            Some(PskCredentials::new(identity.to_string(), secret)?)
-        } else {
-            None
-        };
-        connect_to_stripe_server(server_addr, psk.as_ref())
     }
 
     fn build_aws_credentials(
@@ -138,6 +117,7 @@ impl StripeSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vhost_backend::RemoteStripeSourceConfig;
     use crate::KeyEncryptionCipher;
     use std::fs::File;
     use std::path::PathBuf;
@@ -148,9 +128,11 @@ mod tests {
             Some(StripeSourceConfig::Raw { path })
         } else {
             remote.map(|remote| StripeSourceConfig::Remote {
-                address: remote,
-                psk_identity: None,
-                psk_secret: None,
+                config: RemoteStripeSourceConfig {
+                    address: remote,
+                    psk_identity: None,
+                    psk_secret: None,
+                },
             })
         };
 

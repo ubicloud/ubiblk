@@ -1,8 +1,9 @@
 use clap::Parser;
-use std::path::PathBuf;
 use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
 use ubiblk::cli::{load_options, CommonArgs};
-use ubiblk::vhost_backend::{build_block_device, SECTOR_SIZE};
+use ubiblk::vhost_backend::{
+    build_block_device, ArchiveStripeSourceConfig, StripeSourceConfig, SECTOR_SIZE,
+};
 use ubiblk::{Error, Result};
 
 #[derive(Parser)]
@@ -53,6 +54,60 @@ fn push_range(output: &mut Vec<String>, start: usize, end: usize) {
     }
 }
 
+fn format_optional(value: Option<&str>) -> &str {
+    value.unwrap_or("None")
+}
+
+fn format_source_info(options: &ubiblk::vhost_backend::Options) -> Result<String> {
+    #[allow(deprecated)]
+    match options.resolved_stripe_source() {
+        Some(StripeSourceConfig::Raw { path }) => {
+            let dev = block_device::UringBlockDevice::new(
+                path.clone(),
+                options.queue_size,
+                true,
+                true,
+                options.write_through,
+            )?;
+            let image_size = dev.sector_count() * SECTOR_SIZE as u64;
+            Ok(format!(
+                "raw (path: {}, size: {} bytes)",
+                path.display(),
+                image_size
+            ))
+        }
+        Some(StripeSourceConfig::Remote {
+            address,
+            psk_identity,
+            ..
+        }) => Ok(format!(
+            "remote (address: {address}, psk_identity: {})",
+            format_optional(psk_identity.as_deref())
+        )),
+        Some(StripeSourceConfig::Archive { config }) => match config {
+            ArchiveStripeSourceConfig::Filesystem { path, .. } => {
+                Ok(format!("archive filesystem (path: {path})"))
+            }
+            ArchiveStripeSourceConfig::S3 {
+                bucket,
+                prefix,
+                endpoint,
+                region,
+                profile,
+                connections,
+                ..
+            } => Ok(format!(
+                "archive s3 (bucket: {bucket}, prefix: {}, endpoint: {}, region: {}, profile: {}, connections: {connections})",
+                format_optional(prefix.as_deref()),
+                format_optional(endpoint.as_deref()),
+                format_optional(region.as_deref()),
+                format_optional(profile.as_deref()),
+            )),
+        },
+        None => Ok(String::from("None")),
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
     let args = Args::parse();
@@ -63,22 +118,7 @@ fn main() -> Result<()> {
     let base_dev = build_block_device(&options.path, &options, true)?;
     let data_size = base_dev.sector_count() * SECTOR_SIZE as u64;
 
-    // image device if provided
-    let (image_path_display, image_size) = if let Some(ref image_path) = options.raw_image_path() {
-        let dev = block_device::UringBlockDevice::new(
-            PathBuf::from(image_path),
-            options.queue_size,
-            true,
-            true,
-            options.write_through,
-        )?;
-        (
-            image_path.to_string_lossy().to_string(),
-            dev.sector_count() * SECTOR_SIZE as u64,
-        )
-    } else {
-        (String::from("None"), 0)
-    };
+    let source_info = format_source_info(&options)?;
 
     // metadata device
     let metadata_path = options
@@ -116,7 +156,7 @@ fn main() -> Result<()> {
         .collect();
 
     println!("data file: {} ({} bytes)", options.path, data_size);
-    println!("base image file: {image_path_display} ({image_size} bytes)");
+    println!("source: {source_info}");
     println!("metadata version: {metadata_version}");
     println!("stripe size: {stripe_size} bytes");
     println!("fetched stripes: {}", format_list(&fetched));

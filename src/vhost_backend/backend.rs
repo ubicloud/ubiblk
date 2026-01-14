@@ -214,8 +214,11 @@ impl VhostUserBackend for UbiBlkBackend {
             .map_err(|_| std::io::Error::other("Thread lock poisoned"))?;
 
         if let Some(cpus) = &self.options.cpus {
-            thread.pin_to_cpu(cpus[thread_id]);
+            if let Err(e) = thread.pin_to_cpu(cpus[thread_id]) {
+                error!("Failed to pin thread to cpu {}: {e}", cpus[thread_id]);
+            }
         }
+
         match device_event {
             0 => {
                 let mut vring = vrings[0].get_mut();

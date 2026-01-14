@@ -58,6 +58,11 @@ pub enum UbiblkError {
     ArchiveError { description: String },
     #[error("Cryptography error: {description}")]
     CryptoError { description: String },
+    #[error("CPU pinning error: {source}")]
+    CpuPinning {
+        #[source]
+        source: nix::Error,
+    },
 }
 
 pub type Error = UbiblkError;

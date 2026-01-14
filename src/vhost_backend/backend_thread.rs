@@ -51,7 +51,7 @@ pub struct UbiBlkBackendThread {
     request_slots: Vec<RequestSlot>,
     device_id: String,
     alignment: usize,
-    pinned: bool,
+    pin_attempted: bool,
     ios_pending_signal: bool,
     io_tracker: IoTracker,
 }
@@ -104,7 +104,7 @@ impl UbiBlkBackendThread {
             request_slots,
             device_id: options.device_id.clone(),
             alignment,
-            pinned: false,
+            pin_attempted: false,
             ios_pending_signal: false,
             io_tracker,
         })
@@ -151,21 +151,24 @@ impl UbiBlkBackendThread {
         self.io_tracker.clear(idx);
     }
 
-    pub(crate) fn pin_to_cpu(&mut self, cpu: usize) {
-        if self.pinned {
-            return;
+    pub(crate) fn pin_to_cpu(&mut self, cpu: usize) -> Result<()> {
+        if self.pin_attempted {
+            return Ok(());
         }
-        self.pinned = true;
+        // Mark that we have attempted to pin, regardless of success or failure
+        self.pin_attempted = true;
         let mut set = CpuSet::new();
         if let Err(e) = set.set(cpu) {
             error!("failed to configure CPU set for cpu {cpu}: {e}");
-            return;
+            return Err(UbiblkError::CpuPinning { source: e });
         }
         if let Err(e) = sched_setaffinity(Pid::from_raw(0), &set) {
             error!("failed to pin thread to cpu {cpu}: {e}");
+            Err(UbiblkError::CpuPinning { source: e })
         } else {
             let thread_id = std::thread::current().id();
             info!("pinned thread {thread_id:?} to cpu {cpu}");
+            Ok(())
         }
     }
 
@@ -440,3 +443,5 @@ impl UbiBlkBackendThread {
 
 unsafe impl Sync for UbiBlkBackendThread {}
 unsafe impl Send for UbiBlkBackendThread {}
+
+mod backend_thread_tests;

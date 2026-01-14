@@ -1,5 +1,7 @@
 #[cfg(test)]
 mod tests {
+    use nix::sched::{sched_getaffinity, sched_setaffinity};
+    use nix::unistd::Pid;
     use smallvec::smallvec;
     use vhost_user_backend::{bitmap::BitmapMmapRegion, VringRwLock, VringT};
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
@@ -375,5 +377,32 @@ mod tests {
         assert_eq!(status_val, VIRTIO_BLK_S_IOERR as u8);
         let metrics = device.metrics.read().unwrap();
         assert_eq!(metrics.reads, 0);
+    }
+
+    #[test]
+    fn pin_cpu_returns_early_if_pin_attempted() {
+        let (mut thread, _mem) = create_thread();
+        thread.pin_attempted = true;
+        let result = thread.pin_to_cpu(0);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn pin_cpu_fails_on_invalid_cpu() {
+        let (mut thread, _mem) = create_thread();
+        let result = thread.pin_to_cpu(9999); // assuming this CPU doesn't exist
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pin_cpu_succeeds_on_valid_cpu() {
+        let orig_affinity = sched_getaffinity(Pid::from_raw(0)).unwrap();
+
+        let (mut thread, _mem) = create_thread();
+        let result = thread.pin_to_cpu(0); // assuming CPU 0 exists
+        assert!(result.is_ok());
+
+        // restore original affinity
+        sched_setaffinity(Pid::from_raw(0), &orig_affinity).unwrap();
     }
 }

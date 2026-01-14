@@ -57,6 +57,7 @@ pub struct UbiBlkBackendThread {
 }
 
 impl UbiBlkBackendThread {
+    /// Complete a descriptor chain that could not be parsed, without a status byte.
     fn complete_bad_chain(&mut self, vring: &mut Vring<'_>, desc_chain: &DescChain) {
         let mem = desc_chain.memory();
         if let Err(e) = vring
@@ -172,6 +173,7 @@ impl UbiBlkBackendThread {
         }
     }
 
+    /// Complete a descriptor chain and write a status byte to guest memory.
     fn complete_io(
         &mut self,
         vring: &mut Vring<'_>,
@@ -214,6 +216,7 @@ impl UbiBlkBackendThread {
         Ok(())
     }
 
+    /// Drain completed I/O, update guest buffers, and signal used descriptors.
     fn poll_io(&mut self, vring: &mut Vring<'_>) {
         let mut finished_reads = vec![];
         for (request_id, success) in self.io_channel.poll() {
@@ -373,6 +376,7 @@ impl UbiBlkBackendThread {
         self.io_tracker.snapshot()
     }
 
+    /// Handle available requests and complete I/O, returning whether the queue is busy.
     pub fn process_queue(&mut self, vring: &mut Vring<'_>) -> bool {
         let mut busy = false;
 

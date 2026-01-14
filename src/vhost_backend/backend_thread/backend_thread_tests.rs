@@ -6,7 +6,8 @@ mod tests {
     use vhost_user_backend::{bitmap::BitmapMmapRegion, VringRwLock, VringT};
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
     use virtio_bindings::virtio_blk::{
-        VIRTIO_BLK_ID_BYTES, VIRTIO_BLK_S_IOERR, VIRTIO_BLK_S_OK, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT,
+        VIRTIO_BLK_ID_BYTES, VIRTIO_BLK_S_IOERR, VIRTIO_BLK_S_OK, VIRTIO_BLK_S_UNSUPP,
+        VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT,
     };
     use virtio_queue::{
         desc::{split::Descriptor as SplitDescriptor, RawDescriptor},
@@ -79,6 +80,24 @@ mod tests {
             .expect("set_queue_info failed");
         vring.set_queue_ready(true);
         vring
+    }
+
+    fn setup_vring_with_invalid_used(
+        mem: &GuestMemory,
+    ) -> VringRwLock<GuestMemoryAtomic<GuestMemory>> {
+        let vring =
+            VringRwLock::new(GuestMemoryAtomic::new(mem.clone()), 16).expect("vring new failed");
+        vring.set_queue_size(16);
+        vring
+            .set_queue_info(0x1000, 0x2000, 0x20000)
+            .expect("set_queue_info failed");
+        vring.set_queue_ready(true);
+        vring
+    }
+
+    fn read_used_idx(mem: &GuestMemory, used_addr: GuestAddress) -> u16 {
+        mem.read_obj::<u16>(used_addr.unchecked_add(2))
+            .expect("read used idx")
     }
 
     struct QueueRequestAddrs {
@@ -273,6 +292,197 @@ mod tests {
         let snapshot = thread.io_tracker_snapshot();
         assert_eq!(snapshot.len(), 1);
         assert!(matches!(snapshot[0].0, IoKind::Flush));
+    }
+
+    #[test]
+    fn complete_bad_chain_adds_used_entry() {
+        let (mut thread, mem) = create_thread();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let descs = [RawDescriptor::from(SplitDescriptor::new(
+            0x1000,
+            16,
+            VRING_DESC_F_NEXT as u16,
+            0,
+        ))];
+        queue.add_desc_chains(&descs, 0).unwrap();
+        let mut queue_state: Queue = queue.create_queue().unwrap();
+        let atomic = GuestMemoryAtomic::new(mem.clone());
+        let mut iter = queue_state.iter(atomic.memory()).unwrap();
+        let chain = iter.next().unwrap();
+
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let used_idx_addr = queue.used_addr();
+        let mut vring_guard = vring.get_mut();
+
+        thread.complete_bad_chain(&mut vring_guard, &chain);
+
+        let used_idx = read_used_idx(&mem, used_idx_addr);
+        assert_eq!(used_idx, 1);
+    }
+
+    #[test]
+    fn complete_bad_chain_logs_on_used_ring_error() {
+        let (mut thread, mem) = create_thread();
+        let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
+        let chain = build_chain(&mem, &[desc]);
+        let vring = setup_vring_with_invalid_used(&mem);
+        let mut vring_guard = vring.get_mut();
+
+        // The used ring points outside guest memory, so add_used fails and is logged.
+        thread.complete_bad_chain(&mut vring_guard, &chain);
+    }
+
+    #[test]
+    fn complete_io_returns_early_on_status_write_error() {
+        let (mut thread, mem) = create_thread();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
+        let chain = build_chain(&mem, &[desc]);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let mut vring_guard = vring.get_mut();
+
+        thread.complete_io(
+            &mut vring_guard,
+            &chain,
+            GuestAddress(0x20000),
+            VIRTIO_BLK_S_OK as u8,
+        );
+
+        // Status write fails because the status address is outside guest memory.
+        let used_idx = read_used_idx(&mem, queue.used_addr());
+        assert_eq!(used_idx, 0);
+    }
+
+    #[test]
+    fn complete_io_logs_on_used_ring_error() {
+        let (mut thread, mem) = create_thread();
+        let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
+        let chain = build_chain(&mem, &[desc]);
+        let status_addr = GuestAddress(0x5000);
+        let vring = setup_vring_with_invalid_used(&mem);
+        let mut vring_guard = vring.get_mut();
+
+        thread.complete_io(&mut vring_guard, &chain, status_addr, VIRTIO_BLK_S_OK as u8);
+
+        // Used ring is invalid, so add_used fails but the status write still succeeds.
+        let status = mem.read_obj::<u8>(status_addr).unwrap();
+        assert_eq!(status, VIRTIO_BLK_S_OK as u8);
+    }
+
+    #[test]
+    fn poll_io_skips_missing_desc_chain() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
+        let chain = build_chain(&mem, &[desc]);
+        let request = Request {
+            request_type: RequestType::Out,
+            sector: 0,
+            data_descriptors: smallvec![(GuestAddress(0x2000), SECTOR_SIZE as u32)],
+            status_addr: GuestAddress(0x3000),
+        };
+        let id = thread.get_request_slot(SECTOR_SIZE, &request, &chain);
+        thread.request_slots[id].desc_chain = None;
+        thread.io_channel.add_write(
+            request.sector,
+            1,
+            thread.request_slots[id].buffer.clone(),
+            id,
+        );
+
+        let vring = setup_vring(&mem);
+        let mut vring_guard = vring.get_mut();
+
+        thread.poll_io(&mut vring_guard);
+
+        // The desc_chain is missing, so the completion is skipped and the slot stays in-use.
+        assert!(thread.request_slots[id].used);
+        let metrics = device.metrics.read().unwrap();
+        assert_eq!(metrics.writes, 1);
+    }
+
+    #[test]
+    fn poll_io_reports_write_to_guest_error() {
+        let (mut thread, mem, _device) = create_thread_with_device();
+        let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
+        let chain = build_chain(&mem, &[desc]);
+        let status_addr = GuestAddress(0x5000);
+        let request = Request {
+            request_type: RequestType::In,
+            sector: 0,
+            data_descriptors: smallvec![(GuestAddress(0x20000), SECTOR_SIZE as u32)],
+            status_addr,
+        };
+        let id = thread.get_request_slot(SECTOR_SIZE, &request, &chain);
+        thread.io_channel.add_read(
+            request.sector,
+            1,
+            thread.request_slots[id].buffer.clone(),
+            id,
+        );
+
+        let vring = setup_vring(&mem);
+        let mut vring_guard = vring.get_mut();
+
+        thread.poll_io(&mut vring_guard);
+
+        // Writing into guest memory fails due to an invalid data address, so IOERR is reported.
+        let status = mem.read_obj::<u8>(status_addr).unwrap();
+        assert_eq!(status, VIRTIO_BLK_S_IOERR as u8);
+        assert!(!thread.request_slots[id].used);
+    }
+
+    #[test]
+    fn process_queue_completes_bad_chain() {
+        let (mut thread, mem, _device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let hdr = GuestAddress(0x1000);
+        mem.write_obj::<u32>(VIRTIO_BLK_T_IN, hdr).unwrap();
+        mem.write_obj::<u32>(0, hdr.unchecked_add(4)).unwrap();
+        mem.write_obj::<u64>(0, hdr.unchecked_add(8)).unwrap();
+        let descs = [
+            RawDescriptor::from(SplitDescriptor::new(
+                hdr.0,
+                16,
+                (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT) as u16,
+                1,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                0x2000,
+                SECTOR_SIZE as u32,
+                VRING_DESC_F_NEXT as u16,
+                2,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                0x3000,
+                1,
+                VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+        ];
+        queue.add_desc_chains(&descs, 0).unwrap();
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let mut vring_guard = vring.get_mut();
+
+        assert!(thread.process_queue(&mut vring_guard));
+
+        // The head descriptor is write-only for a read request, so parsing fails and it is completed.
+        let used_idx = read_used_idx(&mem, queue.used_addr());
+        assert_eq!(used_idx, 1);
+    }
+
+    #[test]
+    fn process_queue_rejects_unsupported_request() {
+        let (mut thread, mem, _device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let addrs = setup_queue_request(&mem, &queue, 0x1600, 0xdead, 0, 0, 0);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let mut vring_guard = vring.get_mut();
+
+        assert!(thread.process_queue(&mut vring_guard));
+
+        // Unsupported request types are completed with VIRTIO_BLK_S_UNSUPP.
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_UNSUPP as u8);
     }
 
     #[test]

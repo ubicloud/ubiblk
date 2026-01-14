@@ -12,13 +12,12 @@ responds to requests from remote clients.
 
 **Usage:**
 ```bash
-remote-stripe-server --config <CONFIG_YAML> [--bind <IP:PORT>] [--kek <KEK_FILE>] \
-  [--unlink-kek] [--psk-identity <IDENTITY>] [--psk-secret <PSK_SECRET>]
+remote-stripe-server --config <CONFIG_YAML> --listen-config <LISTEN_CONFIG_YAML> \
+  [--kek <KEK_FILE>] [--unlink-kek]
 ```
 
 **Notes:**
-- `--bind` defaults to `127.0.0.1:4555`.
-- `--psk-identity` and `--psk-secret` must be set together to enable TLS-PSK.
+- `--listen-config` supplies the bind address and optional PSK credentials.
 
 ### `remote-stripe-shell`
 
@@ -27,9 +26,23 @@ server.
 
 **Usage:**
 ```bash
-remote-stripe-shell <IP:PORT> [--kek <KEK_FILE>] [--unlink-kek] \
-  [--psk-identity <IDENTITY>] [--psk-secret <PSK_SECRET>]
+remote-stripe-shell --server-config <SERVER_CONFIG_YAML> \
+  [--kek <KEK_FILE>] [--unlink-kek]
 ```
+
+### Listen/Server config format
+
+The listen and server config YAML files uses the same format as the
+`stripe_source: remote` configuration. Secrets are encrypted using the KEK if
+provided.
+
+```yaml
+address: "127.0.0.1:4555"
+psk_identity: "client1"
+psk_secret: "<base64-encrypted-secret>"
+```
+
+`psk_identity` and `psk_secret` must be set together to enable TLS-PSK.
 
 **Commands:**
 - `help` – show command list.

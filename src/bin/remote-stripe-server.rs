@@ -4,12 +4,10 @@ use clap::Parser;
 use log::{error, info};
 
 use ubiblk::{
-    cli::CommonArgs,
-    stripe_server::{
-        parse_psk_credentials, prepare_stripe_server, wrap_psk_server_stream, DynStream,
-    },
-    vhost_backend::Options,
-    Error, KeyEncryptionCipher, Result,
+    cli::{load_options_and_kek, CommonArgs},
+    stripe_server::{prepare_stripe_server, wrap_psk_server_stream, DynStream, PskCredentials},
+    vhost_backend::RemoteStripeSourceConfig,
+    Error, Result,
 };
 
 #[derive(Parser)]
@@ -21,17 +19,9 @@ struct Args {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Address to listen on, e.g. 127.0.0.1:4555.
-    #[arg(long, default_value = "127.0.0.1:4555")]
-    bind: String,
-
-    /// PSK identity (required if --psk-secret is set).
-    #[arg(long = "psk-identity")]
-    psk_identity: Option<String>,
-
-    /// Base64-encoded PSK secret encrypted with the KEK (required if --psk-identity is set).
-    #[arg(long = "psk-secret")]
-    psk_secret: Option<String>,
+    /// Config YAML file containing listening address and PSK details.
+    #[arg(long = "listen-config", value_name = "CONFIG_YAML")]
+    listen_config_path: std::path::PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -44,19 +34,11 @@ fn main() -> Result<()> {
 
 fn run(args: Args) -> Result<()> {
     let Args {
-        common: CommonArgs {
-            config,
-            kek,
-            unlink_kek,
-        },
-        bind,
-        psk_identity,
-        psk_secret,
+        common,
+        listen_config_path,
     } = args;
 
-    let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
-
-    let options = Options::load_from_file_with_kek(&config, &kek)?;
+    let (options, kek) = load_options_and_kek(&common)?;
     if options.has_stripe_source() {
         return Err(Error::InvalidParameter {
             description:
@@ -65,10 +47,16 @@ fn run(args: Args) -> Result<()> {
         });
     }
 
+    let listen_config =
+        RemoteStripeSourceConfig::load_from_file_with_kek(&listen_config_path, &kek)?;
     let stripe_server = prepare_stripe_server(&options)?;
-    let psk = parse_psk_credentials(psk_identity, psk_secret, &kek)?;
+    let psk = listen_config
+        .psk_identity
+        .zip(listen_config.psk_secret)
+        .map(|(identity, secret)| PskCredentials::new(identity, secret))
+        .transpose()?;
 
-    let listener = TcpListener::bind(&bind)?;
+    let listener = TcpListener::bind(&listen_config.address)?;
     info!("listening on {}", listener.local_addr()?);
 
     loop {

@@ -76,13 +76,10 @@ fn format_source_info(options: &ubiblk::vhost_backend::Options) -> Result<String
                 image_size
             ))
         }
-        Some(StripeSourceConfig::Remote {
-            address,
-            psk_identity,
-            ..
-        }) => Ok(format!(
-            "remote (address: {address}, psk_identity: {})",
-            format_optional(psk_identity.as_deref())
+        Some(StripeSourceConfig::Remote { config }) => Ok(format!(
+            "remote (address: {}, psk_identity: {})",
+            config.address,
+            format_optional(config.psk_identity.as_deref())
         )),
         Some(StripeSourceConfig::Archive { config }) => match config {
             ArchiveStripeSourceConfig::Filesystem { path, .. } => {

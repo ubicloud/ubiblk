@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use clap::Parser;
 
@@ -6,8 +6,9 @@ use ubiblk::{
     archive::StripeArchiver,
     block_device::UbiMetadata,
     cli::{load_options_and_kek, CommonArgs},
+    config::ArchiveStripeSourceConfig,
     stripe_source::StripeSourceBuilder,
-    vhost_backend::{build_block_device, ArchiveStripeSourceConfig},
+    vhost_backend::build_block_device,
     Result, UbiblkError,
 };
 
@@ -63,8 +64,8 @@ fn main() -> Result<()> {
 
     let stripe_source = StripeSourceBuilder::new(options.clone(), stripe_sector_count).build()?;
 
-    let mut target_config = load_target_config(&args.target_config_path)?;
-    target_config.decrypt_with_kek(&config_kek)?;
+    let target_config =
+        ArchiveStripeSourceConfig::load_from_file_with_kek(&args.target_config_path, &config_kek)?;
     let store = StripeSourceBuilder::build_archive_store(&target_config)?;
 
     let mut archiver = StripeArchiver::new(
@@ -80,21 +81,4 @@ fn main() -> Result<()> {
     archiver.archive_all()?;
 
     Ok(())
-}
-
-fn load_target_config(path: &Path) -> Result<ArchiveStripeSourceConfig> {
-    let contents = std::fs::read_to_string(path).map_err(|e| UbiblkError::InvalidParameter {
-        description: format!(
-            "Failed to read archive target config {}: {}",
-            path.display(),
-            e
-        ),
-    })?;
-    serde_yaml::from_str(&contents).map_err(|e| UbiblkError::InvalidParameter {
-        description: format!(
-            "Failed to parse archive target config {}: {}",
-            path.display(),
-            e
-        ),
-    })
 }

@@ -1,9 +1,8 @@
 use clap::Parser;
 use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
 use ubiblk::cli::{load_options, CommonArgs};
-use ubiblk::vhost_backend::{
-    build_block_device, ArchiveStripeSourceConfig, StripeSourceConfig, SECTOR_SIZE,
-};
+use ubiblk::config::{ArchiveStripeSourceConfig, DeviceConfig, StripeSourceConfig};
+use ubiblk::vhost_backend::{build_block_device, SECTOR_SIZE};
 use ubiblk::{Error, Result};
 
 #[derive(Parser)]
@@ -58,12 +57,12 @@ fn format_optional(value: Option<&str>) -> &str {
     value.unwrap_or("None")
 }
 
-fn format_source_info(options: &ubiblk::vhost_backend::Options) -> Result<String> {
+fn format_source_info(options: &DeviceConfig) -> Result<String> {
     #[allow(deprecated)]
     match options.resolved_stripe_source() {
-        Some(StripeSourceConfig::Raw { path }) => {
+        Some(StripeSourceConfig::Raw { config }) => {
             let dev = block_device::UringBlockDevice::new(
-                path.clone(),
+                config.path.clone(),
                 options.queue_size,
                 true,
                 true,
@@ -72,7 +71,7 @@ fn format_source_info(options: &ubiblk::vhost_backend::Options) -> Result<String
             let image_size = dev.sector_count() * SECTOR_SIZE as u64;
             Ok(format!(
                 "raw (path: {}, size: {} bytes)",
-                path.display(),
+                config.path.display(),
                 image_size
             ))
         }

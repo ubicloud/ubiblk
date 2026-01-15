@@ -4,8 +4,8 @@ use std::{collections::HashMap, io, path::PathBuf};
 
 use ubiblk::{
     block_device::metadata_flags,
+    config::RemoteStripeSourceConfig,
     stripe_server::{connect_to_stripe_server, RemoteStripeProvider},
-    vhost_backend::RemoteStripeSourceConfig,
     KeyEncryptionCipher, Result, UbiblkError,
 };
 

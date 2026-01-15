@@ -2,7 +2,7 @@ use std::net::{SocketAddr, TcpStream};
 
 use log::info;
 
-use crate::{vhost_backend::RemoteStripeSourceConfig, UbiblkError};
+use crate::{config::RemoteStripeSourceConfig, UbiblkError};
 
 use super::*;
 

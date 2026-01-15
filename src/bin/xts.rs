@@ -9,7 +9,8 @@ use clap::{Parser, ValueEnum};
 
 use ubiblk::{
     block_device::{self, shared_buffer, wait_for_completion, BlockDevice},
-    vhost_backend::{Options, SECTOR_SIZE},
+    config::DeviceConfig,
+    vhost_backend::SECTOR_SIZE,
     Error, KeyEncryptionCipher, Result,
 };
 
@@ -214,7 +215,7 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let kek_path = args.kek.as_ref().map(PathBuf::from);
     let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;
-    let options = Options::load_from_file_with_kek(&PathBuf::from(&args.config), &kek)?;
+    let options = DeviceConfig::load_from_file_with_kek(&PathBuf::from(&args.config), &kek)?;
 
     let (key1, key2) = options
         .encryption_key

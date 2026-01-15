@@ -1,15 +1,10 @@
 mod backend;
 mod backend_loop;
 mod io_tracking;
-mod options;
 mod request;
 mod rpc;
 pub use backend_loop::{
     block_backend_loop, build_block_device, build_source_device, init_metadata,
-};
-pub use options::{
-    ArchiveStripeSourceConfig, AwsCredentials, IoEngine, Options, RemoteStripeSourceConfig,
-    StripeSourceConfig,
 };
 mod backend_thread;
 

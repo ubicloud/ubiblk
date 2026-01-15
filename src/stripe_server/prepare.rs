@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use crate::{
     block_device::{metadata_flags, UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT},
+    config::DeviceConfig,
     stripe_server::StripeServer,
-    vhost_backend::{build_block_device, Options},
+    vhost_backend::build_block_device,
     Result,
 };
 
-pub fn prepare_stripe_server(options: &Options) -> Result<Arc<StripeServer>> {
+pub fn prepare_stripe_server(options: &DeviceConfig) -> Result<Arc<StripeServer>> {
     let stripe_device = build_block_device(&options.path, options, false)?;
     let metadata: Arc<UbiMetadata> = if let Some(metadata_path) = options.metadata_path.as_deref() {
         let metadata_device = build_block_device(metadata_path, options, false)?;
@@ -40,8 +41,8 @@ mod tests {
 
     const STRIPE_SIZE: u64 = (1 << DEFAULT_STRIPE_SECTOR_COUNT_SHIFT) * SECTOR_SIZE as u64;
 
-    fn options(path: String, metadata_path: Option<String>) -> Options {
-        Options {
+    fn options(path: String, metadata_path: Option<String>) -> DeviceConfig {
+        DeviceConfig {
             path,
             metadata_path,
             queue_size: 128,

@@ -12,12 +12,13 @@ use nix::sys::statfs::statfs;
 use vhost_user_backend::VhostUserDaemon;
 use vm_memory::GuestMemoryAtomic;
 
-use super::{backend::UbiBlkBackend, rpc, IoEngine, Options};
+use super::{backend::UbiBlkBackend, rpc};
 use crate::{
     block_device::{
         self, BgWorker, BgWorkerRequest, BlockDevice, SharedMetadataState, StatusReporter,
         UbiMetadata, UringBlockDevice,
     },
+    config::{DeviceConfig, IoEngine},
     stripe_source::StripeSourceBuilder,
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     vhost_backend::io_tracking::IoTracker,
@@ -42,13 +43,13 @@ struct BackendEnv {
     bgworker_ch: Option<Sender<BgWorkerRequest>>,
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
-    options: Options,
+    options: DeviceConfig,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
 }
 
 impl BackendEnv {
-    fn build(options: &Options) -> Result<Self> {
+    fn build(options: &DeviceConfig) -> Result<Self> {
         let base_device = build_block_device(&options.path, options, false)?;
         let alignment = Self::determine_alignment(&options.path)?;
 
@@ -85,7 +86,7 @@ impl BackendEnv {
 
     fn build_devices(
         base_device: Box<dyn BlockDevice>,
-        options: &Options,
+        options: &DeviceConfig,
         alignment: usize,
     ) -> Result<BgWorkerSetup> {
         if let Some(metadata_path) = options.metadata_path.as_ref() {
@@ -103,7 +104,7 @@ impl BackendEnv {
     #[allow(clippy::too_many_arguments)]
     fn build_lazy_device(
         base_device: Box<dyn BlockDevice>,
-        options: &Options,
+        options: &DeviceConfig,
         alignment: usize,
         metadata_path: &str,
     ) -> Result<BgWorkerSetup> {
@@ -270,7 +271,7 @@ struct BgWorkerSetup {
     status_reporter: Option<StatusReporter>,
 }
 
-pub fn block_backend_loop(config: &Options) -> Result<()> {
+pub fn block_backend_loop(config: &DeviceConfig) -> Result<()> {
     info!(
         "Starting vhost-user-blk backend. Process ID: {}",
         std::process::id()
@@ -294,7 +295,7 @@ pub fn block_backend_loop(config: &Options) -> Result<()> {
     // TODO: Graceful shutdown handling
 }
 
-pub fn init_metadata(config: &Options, stripe_sector_count_shift: u8) -> Result<()> {
+pub fn init_metadata(config: &DeviceConfig, stripe_sector_count_shift: u8) -> Result<()> {
     let metadata_path =
         config
             .metadata_path
@@ -356,7 +357,7 @@ fn create_io_engine_device(
     }
 }
 
-pub fn build_source_device(options: &Options) -> Result<Box<dyn BlockDevice>> {
+pub fn build_source_device(options: &DeviceConfig) -> Result<Box<dyn BlockDevice>> {
     let source: Box<dyn BlockDevice> = if let Some(path) = options.raw_image_path() {
         let readonly = true;
         create_io_engine_device(
@@ -375,7 +376,7 @@ pub fn build_source_device(options: &Options) -> Result<Box<dyn BlockDevice>> {
 
 pub fn build_block_device(
     path: &str,
-    options: &Options,
+    options: &DeviceConfig,
     readonly: bool,
 ) -> Result<Box<dyn BlockDevice>> {
     let mut block_device: Box<dyn BlockDevice> = create_io_engine_device(
@@ -402,14 +403,14 @@ pub fn build_block_device(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vhost_backend::StripeSourceConfig;
+    use crate::config::{RawStripeSourceConfig, StripeSourceConfig};
 
     #[test]
     fn build_backend_env_no_metadata() {
         let disk_file = tempfile::NamedTempFile::new().unwrap();
         disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
 
-        let options = Options {
+        let options = DeviceConfig {
             path: disk_file.path().to_str().unwrap().to_string(),
             socket: "/tmp/ubiblk-test.sock".to_string(),
             queue_size: 128,
@@ -422,7 +423,7 @@ mod tests {
 
     #[test]
     fn build_backend_env_with_invalid_path() {
-        let options = Options {
+        let options = DeviceConfig {
             path: "/non/existent/path".to_string(),
             socket: "/tmp/ubiblk-test.sock".to_string(),
             queue_size: 128,
@@ -444,10 +445,12 @@ mod tests {
         let metadata_path = tempfile::NamedTempFile::new().unwrap();
         metadata_path.as_file().set_len(1024 * 1024).unwrap();
 
-        let options = Options {
+        let options = DeviceConfig {
             path: disk_file.path().to_str().unwrap().to_string(),
             stripe_source: Some(StripeSourceConfig::Raw {
-                path: image_file.path().to_path_buf(),
+                config: RawStripeSourceConfig {
+                    path: image_file.path().to_path_buf(),
+                },
             }),
             metadata_path: Some(metadata_path.path().to_str().unwrap().to_string()),
             socket: "/tmp/ubiblk-test.sock".to_string(),

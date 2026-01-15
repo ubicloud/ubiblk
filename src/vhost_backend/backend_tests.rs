@@ -2,8 +2,9 @@
 mod tests {
     use crate::{
         block_device::bdev_test::TestBlockDevice,
+        config::DeviceConfig,
         utils::{aligned_buffer::BUFFER_ALIGNMENT, block::VirtioBlockConfig},
-        vhost_backend::{init_metadata, Options, UbiBlkBackend, SECTOR_SIZE},
+        vhost_backend::{init_metadata, UbiBlkBackend, SECTOR_SIZE},
         UbiblkError,
     };
 
@@ -13,8 +14,8 @@ mod tests {
     use vm_memory::{ByteValued, GuestMemoryAtomic, GuestMemoryMmap};
     use vmm_sys_util::epoll::EventSet;
 
-    fn default_options(path: String) -> Options {
-        Options {
+    fn default_options(path: String) -> DeviceConfig {
+        DeviceConfig {
             path,
             socket: "sock".to_string(),
             num_queues: 1,
@@ -23,7 +24,7 @@ mod tests {
             seg_count_max: 4,
             write_through: true,
             device_id: "ubiblk".to_string(),
-            io_engine: crate::vhost_backend::IoEngine::IoUring,
+            io_engine: crate::config::IoEngine::IoUring,
             ..Default::default()
         }
     }

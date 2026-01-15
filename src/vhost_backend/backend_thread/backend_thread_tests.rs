@@ -21,12 +21,13 @@ mod tests {
 
     use crate::{
         block_device::{bdev_test::TestBlockDevice, BlockDevice},
+        config::DeviceConfig,
         utils::aligned_buffer::BUFFER_ALIGNMENT,
         vhost_backend::{
             backend_thread::UbiBlkBackendThread,
             io_tracking::{IoKind, IoTracker},
             request::{Request, RequestType},
-            Options, SECTOR_SIZE,
+            SECTOR_SIZE,
         },
     };
 
@@ -141,8 +142,8 @@ mod tests {
         QueueRequestAddrs { data, status }
     }
 
-    fn default_options(path: &str) -> Options {
-        Options {
+    fn default_options(path: &str) -> DeviceConfig {
+        DeviceConfig {
             path: path.to_string(),
             socket: "sock".to_string(),
             num_queues: 1,
@@ -151,7 +152,7 @@ mod tests {
             seg_count_max: 1,
             write_through: true,
             device_id: "ubiblk".to_string(),
-            io_engine: crate::vhost_backend::IoEngine::IoUring,
+            io_engine: crate::config::IoEngine::IoUring,
             ..Default::default()
         }
     }

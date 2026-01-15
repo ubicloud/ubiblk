@@ -5,8 +5,8 @@ use log::{error, info};
 
 use ubiblk::{
     cli::{load_options_and_kek, CommonArgs},
+    config::RemoteStripeSourceConfig,
     stripe_server::{prepare_stripe_server, wrap_psk_server_stream, DynStream, PskCredentials},
-    vhost_backend::RemoteStripeSourceConfig,
     Error, Result,
 };
 

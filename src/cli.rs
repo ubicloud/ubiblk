@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 
-use crate::{vhost_backend::Options, KeyEncryptionCipher, Result};
+use crate::{config::DeviceConfig, KeyEncryptionCipher, Result};
 
 #[derive(Args, Debug, Clone)]
 /// Common command-line arguments used in most of the binaries.
@@ -25,13 +25,13 @@ pub struct CommonArgs {
     pub unlink_kek: bool,
 }
 
-pub fn load_options(common: &CommonArgs) -> Result<Options> {
+pub fn load_options(common: &CommonArgs) -> Result<DeviceConfig> {
     let (options, _kek) = load_options_and_kek(common)?;
     Ok(options)
 }
 
-pub fn load_options_and_kek(common: &CommonArgs) -> Result<(Options, KeyEncryptionCipher)> {
+pub fn load_options_and_kek(common: &CommonArgs) -> Result<(DeviceConfig, KeyEncryptionCipher)> {
     let kek = KeyEncryptionCipher::load(common.kek.as_ref(), common.unlink_kek)?;
-    let options = Options::load_from_file_with_kek(&common.config, &kek)?;
+    let options = DeviceConfig::load_from_file_with_kek(&common.config, &kek)?;
     Ok((options, kek))
 }

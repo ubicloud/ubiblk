@@ -2,10 +2,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::{ops::Deref, sync::RwLockWriteGuard};
 
-use super::Options;
 use super::{request::*, SECTOR_SIZE};
 use crate::block_device::IoChannel;
 use crate::block_device::SharedBuffer;
+use crate::config::DeviceConfig;
 use crate::utils::aligned_buffer::AlignedBuf;
 #[cfg(test)]
 use crate::vhost_backend::io_tracking::IoKind;
@@ -70,7 +70,7 @@ impl UbiBlkBackendThread {
     pub fn new(
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         io_channel: Box<dyn IoChannel>,
-        options: &Options,
+        options: &DeviceConfig,
         alignment: usize,
         io_tracker: IoTracker,
     ) -> Result<Self> {

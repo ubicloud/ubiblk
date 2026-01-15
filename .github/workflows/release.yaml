@@ -23,7 +23,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf libtool nasm clang build-essential
+          sudo apt-get install -y autoconf libtool nasm clang build-essential musl-tools
 
       - name: Clone and build isa-l_crypto
         run: |
@@ -51,10 +51,16 @@ jobs:
         run: |
           cargo build --release --target=${{ matrix.target }}
 
+      - name: Strip debug info
+        run: |
+          cd target/${{ matrix.target }}/release
+          strip init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata
+          cd -
+
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend init-metadata
+          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata
           cd -
 
       - uses: ncipollo/release-action@v1

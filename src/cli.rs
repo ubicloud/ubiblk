@@ -47,6 +47,7 @@ mod tests {
         let mut file = NamedTempFile::new().expect("create temp file");
         file.write_all(contents.as_bytes())
             .expect("write temp file contents");
+        file.flush().expect("flush temp file");
         file
     }
 

@@ -7,6 +7,7 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 pub mod archive;
 pub mod block_device;
 pub mod cli;
+pub mod config;
 pub mod crypt;
 pub mod error;
 pub mod stripe_server;

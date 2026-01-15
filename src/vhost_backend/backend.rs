@@ -2,12 +2,13 @@ use std::{ops::Deref, sync::Mutex, time::Instant};
 
 use crate::{
     block_device::BlockDevice,
+    config::DeviceConfig,
     utils::block::{features_to_str, VirtioBlockConfig},
     vhost_backend::{io_tracking::IoTracker, SECTOR_SIZE},
     Result, UbiblkError,
 };
 
-use super::{backend_thread::UbiBlkBackendThread, Options};
+use super::backend_thread::UbiBlkBackendThread;
 use log::{debug, error, info};
 use vhost::vhost_user::message::*;
 use vhost_user_backend::{bitmap::BitmapMmapRegion, VhostUserBackend, VringRwLock, VringT};
@@ -27,7 +28,7 @@ pub struct UbiBlkBackend {
     config: VirtioBlockConfig,
     queues_per_thread: Vec<u64>,
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    options: Options,
+    options: DeviceConfig,
 }
 
 impl UbiBlkBackend {
@@ -35,7 +36,7 @@ impl UbiBlkBackend {
         &self.threads
     }
 
-    fn validate_options(options: &Options) -> Result<()> {
+    fn validate_options(options: &DeviceConfig) -> Result<()> {
         if options.queue_size == 0 || !options.queue_size.is_power_of_two() {
             return Err(UbiblkError::InvalidParameter {
                 description: format!(
@@ -57,7 +58,7 @@ impl UbiBlkBackend {
     }
 
     pub fn new(
-        options: &Options,
+        options: &DeviceConfig,
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         block_device: Box<dyn BlockDevice>,
         alignment: usize,

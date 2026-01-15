@@ -1,22 +1,21 @@
 use crate::{
     archive::{ArchiveStore, FileSystemStore, S3Store},
+    config::{ArchiveStripeSourceConfig, AwsCredentials, DeviceConfig, StripeSourceConfig},
     stripe_server::connect_to_stripe_server,
     utils::s3::{build_s3_client, create_runtime},
-    vhost_backend::{
-        build_source_device, ArchiveStripeSourceConfig, AwsCredentials, Options, StripeSourceConfig,
-    },
+    vhost_backend::build_source_device,
     Result, UbiblkError,
 };
 
 use super::*;
 
 pub struct StripeSourceBuilder {
-    options: Options,
+    options: DeviceConfig,
     stripe_sector_count: u64,
 }
 
 impl StripeSourceBuilder {
-    pub fn new(options: Options, stripe_sector_count: u64) -> Self {
+    pub fn new(options: DeviceConfig, stripe_sector_count: u64) -> Self {
         Self {
             options,
             stripe_sector_count,
@@ -117,15 +116,17 @@ impl StripeSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vhost_backend::RemoteStripeSourceConfig;
+    use crate::config::{RawStripeSourceConfig, RemoteStripeSourceConfig};
     use crate::KeyEncryptionCipher;
     use std::fs::File;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    fn create_test_options(remote: Option<String>, path: Option<PathBuf>) -> Options {
+    fn create_test_options(remote: Option<String>, path: Option<PathBuf>) -> DeviceConfig {
         let stripe_source = if let Some(path) = path {
-            Some(StripeSourceConfig::Raw { path })
+            Some(StripeSourceConfig::Raw {
+                config: RawStripeSourceConfig { path },
+            })
         } else {
             remote.map(|remote| StripeSourceConfig::Remote {
                 config: RemoteStripeSourceConfig {
@@ -136,7 +137,7 @@ mod tests {
             })
         };
 
-        Options {
+        DeviceConfig {
             stripe_source,
             queue_size: 64,
             ..Default::default()

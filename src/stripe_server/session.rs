@@ -136,3 +136,152 @@ impl StripeServerSession {
         Ok(buffer)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Read, Write};
+    use std::sync::{Arc, Mutex};
+
+    use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::stripe_server::StripeServer;
+    use crate::vhost_backend::SECTOR_SIZE;
+
+    use super::*;
+
+    struct TestStream {
+        read: Cursor<Vec<u8>>,
+        writes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Read for TestStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.read.read(buf)
+        }
+    }
+
+    impl Write for TestStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn make_session(
+        input: Vec<u8>,
+        metadata: Arc<UbiMetadata>,
+        device: Arc<TestBlockDevice>,
+    ) -> (StripeServerSession, Arc<Mutex<Vec<u8>>>) {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let stream = TestStream {
+            read: Cursor::new(input),
+            writes: writes.clone(),
+        };
+        let server = StripeServer::new(device, metadata);
+        let session = server.start_session(Box::new(stream)).unwrap();
+        (session, writes)
+    }
+
+    #[test]
+    fn test_handle_metadata_request() {
+        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, 2, 0));
+        let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
+        let (mut session, writes) = make_session(vec![METADATA_CMD], metadata.clone(), device);
+
+        session.handle_single_request().unwrap();
+
+        let metadata_size = metadata.metadata_size();
+        let mut metadata_buf = vec![0u8; metadata_size];
+        metadata.write_to_buf(&mut metadata_buf);
+
+        let mut expected = vec![STATUS_OK];
+        expected.extend_from_slice(&(metadata_size as u64).to_le_bytes());
+        expected.extend_from_slice(&metadata_buf);
+
+        assert_eq!(*writes.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_handle_read_stripe_invalid_stripe() {
+        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, 1, 0));
+        let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
+        let mut input = vec![READ_STRIPE_CMD];
+        input.extend_from_slice(&1u64.to_le_bytes());
+        let (mut session, writes) = make_session(input, metadata, device);
+
+        session.handle_single_request().unwrap();
+
+        assert_eq!(*writes.lock().unwrap(), vec![STATUS_INVALID_STRIPE]);
+    }
+
+    #[test]
+    fn test_handle_read_stripe_unwritten() {
+        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, 1, 0));
+        let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
+        let mut input = vec![READ_STRIPE_CMD];
+        input.extend_from_slice(&0u64.to_le_bytes());
+        let (mut session, writes) = make_session(input, metadata, device);
+
+        session.handle_single_request().unwrap();
+
+        assert_eq!(*writes.lock().unwrap(), vec![STATUS_UNWRITTEN]);
+    }
+
+    #[test]
+    fn test_handle_read_stripe_ok() {
+        let mut metadata = UbiMetadata::new(0, 1, 0);
+        metadata.set_stripe_header(0, metadata_flags::WRITTEN);
+        let metadata: Arc<UbiMetadata> = Arc::from(metadata);
+
+        let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
+        let stripe_size = metadata.stripe_size();
+        let pattern = vec![0x5Au8; stripe_size];
+        device.write(0, &pattern, stripe_size);
+
+        let mut input = vec![READ_STRIPE_CMD];
+        input.extend_from_slice(&0u64.to_le_bytes());
+        let (mut session, writes) = make_session(input, metadata, device);
+
+        session.handle_single_request().unwrap();
+
+        let mut expected = vec![STATUS_OK];
+        expected.extend_from_slice(&(stripe_size as u64).to_le_bytes());
+        expected.extend_from_slice(&pattern);
+
+        assert_eq!(*writes.lock().unwrap(), expected);
+    }
+
+    #[test]
+    fn test_handle_read_stripe_server_error() {
+        let mut metadata = UbiMetadata::new(0, 1, 0);
+        metadata.set_stripe_header(0, metadata_flags::WRITTEN);
+        let metadata: Arc<UbiMetadata> = Arc::from(metadata);
+
+        let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
+        device
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut input = vec![READ_STRIPE_CMD];
+        input.extend_from_slice(&0u64.to_le_bytes());
+        let (mut session, writes) = make_session(input, metadata, device);
+
+        assert!(session.handle_single_request().is_err());
+
+        assert_eq!(*writes.lock().unwrap(), vec![STATUS_SERVER_ERROR]);
+    }
+
+    #[test]
+    fn test_handle_unknown_opcode() {
+        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, 1, 0));
+        let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
+        let (mut session, writes) = make_session(vec![0xAA], metadata, device);
+
+        session.handle_single_request().unwrap();
+
+        assert_eq!(*writes.lock().unwrap(), vec![STATUS_INVALID_COMMAND]);
+    }
+}

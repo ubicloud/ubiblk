@@ -164,12 +164,17 @@ mod tests {
 
     fn create_thread_with_device() -> (UbiBlkBackendThread, GuestMemory, TestBlockDevice) {
         let (gm, mem) = setup_mem();
-        let opts = default_options("img");
+        let config = default_options("img");
         let device = TestBlockDevice::new(SECTOR_SIZE as u64 * 8);
         let io_channel = device.create_channel().unwrap();
-        let thread =
-            UbiBlkBackendThread::new(gm, io_channel, &opts, BUFFER_ALIGNMENT, IoTracker::new(64))
-                .unwrap();
+        let thread = UbiBlkBackendThread::new(
+            gm,
+            io_channel,
+            &config,
+            BUFFER_ALIGNMENT,
+            IoTracker::new(64),
+        )
+        .unwrap();
         (thread, mem, device)
     }
 

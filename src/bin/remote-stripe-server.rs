@@ -38,8 +38,8 @@ fn run(args: Args) -> Result<()> {
         listen_config_path,
     } = args;
 
-    let (options, kek) = load_options_and_kek(&common)?;
-    if options.has_stripe_source() {
+    let (config, kek) = load_options_and_kek(&common)?;
+    if config.has_stripe_source() {
         return Err(Error::InvalidParameter {
             description:
                 "config must not specify a stripe source when used with remote-stripe-server"
@@ -49,7 +49,7 @@ fn run(args: Args) -> Result<()> {
 
     let listen_config =
         RemoteStripeSourceConfig::load_from_file_with_kek(&listen_config_path, &kek)?;
-    let stripe_server = prepare_stripe_server(&options)?;
+    let stripe_server = prepare_stripe_server(&config)?;
     let psk = listen_config
         .psk_identity
         .zip(listen_config.psk_secret)

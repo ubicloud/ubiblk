@@ -8,10 +8,10 @@ use crate::{
     Result,
 };
 
-pub fn prepare_stripe_server(options: &DeviceConfig) -> Result<Arc<StripeServer>> {
-    let stripe_device = build_block_device(&options.path, options, false)?;
-    let metadata: Arc<UbiMetadata> = if let Some(metadata_path) = options.metadata_path.as_deref() {
-        let metadata_device = build_block_device(metadata_path, options, false)?;
+pub fn prepare_stripe_server(config: &DeviceConfig) -> Result<Arc<StripeServer>> {
+    let stripe_device = build_block_device(&config.path, config, false)?;
+    let metadata: Arc<UbiMetadata> = if let Some(metadata_path) = config.metadata_path.as_deref() {
+        let metadata_device = build_block_device(metadata_path, config, false)?;
         let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
         Arc::from(metadata)
     } else {
@@ -41,7 +41,7 @@ mod tests {
 
     const STRIPE_SIZE: u64 = (1 << DEFAULT_STRIPE_SECTOR_COUNT_SHIFT) * SECTOR_SIZE as u64;
 
-    fn options(path: String, metadata_path: Option<String>) -> DeviceConfig {
+    fn config(path: String, metadata_path: Option<String>) -> DeviceConfig {
         DeviceConfig {
             path,
             metadata_path,
@@ -56,9 +56,9 @@ mod tests {
         let storage_file = NamedTempFile::new()?;
         storage_file.as_file().set_len(stripe_count * STRIPE_SIZE)?;
 
-        let options = options(storage_file.path().to_str().unwrap().to_string(), None);
+        let config = config(storage_file.path().to_str().unwrap().to_string(), None);
 
-        let server = prepare_stripe_server(&options)?;
+        let server = prepare_stripe_server(&config)?;
 
         let metadata = server.metadata.as_ref();
         assert_eq!(metadata.stripe_headers.len(), stripe_count as usize);
@@ -92,12 +92,12 @@ mod tests {
         metadata.write_to_buf(&mut buf);
         metadata_file.as_file().write_all(&buf)?;
 
-        let options = options(
+        let config = config(
             storage_file.path().to_str().unwrap().to_string(),
             Some(metadata_file.path().to_str().unwrap().to_string()),
         );
 
-        let server = prepare_stripe_server(&options)?;
+        let server = prepare_stripe_server(&config)?;
 
         let loaded_metadata = server.metadata.as_ref();
         for i in 0..stripe_count as usize {

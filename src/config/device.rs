@@ -309,8 +309,8 @@ mod tests {
             STANDARD.encode(enc1),
             STANDARD.encode(enc2),
         );
-        let options = DeviceConfig::load_from_str_with_kek(&yaml, &kek).unwrap();
-        assert_eq!(options.encryption_key, Some((key1, key2)));
+        let config = DeviceConfig::load_from_str_with_kek(&yaml, &kek).unwrap();
+        assert_eq!(config.encryption_key, Some((key1, key2)));
     }
 
     #[test]
@@ -319,8 +319,8 @@ mod tests {
         path: "/path/to/disk"
         socket: "/path/to/socket"
         "#;
-        let options = DeviceConfig::load_from_str(yaml).unwrap();
-        assert!(options.encryption_key.is_none());
+        let config = DeviceConfig::load_from_str(yaml).unwrap();
+        assert!(config.encryption_key.is_none());
     }
 
     #[test]
@@ -329,14 +329,14 @@ mod tests {
         path: "/path/to/disk"
         socket: "/path/to/socket"
         "#;
-        let options = DeviceConfig::load_from_str(yaml).unwrap();
-        assert!(!options.copy_on_read);
-        assert!(!options.track_written);
-        assert!(!options.write_through);
-        assert_eq!(options.device_id, "ubiblk".to_string());
-        assert!(options.rpc_socket_path.is_none());
-        assert!(!options.autofetch);
-        assert_eq!(options.io_engine, IoEngine::IoUring);
+        let config = DeviceConfig::load_from_str(yaml).unwrap();
+        assert!(!config.copy_on_read);
+        assert!(!config.track_written);
+        assert!(!config.write_through);
+        assert_eq!(config.device_id, "ubiblk".to_string());
+        assert!(config.rpc_socket_path.is_none());
+        assert!(!config.autofetch);
+        assert_eq!(config.io_engine, IoEngine::IoUring);
     }
 
     #[test]
@@ -346,8 +346,8 @@ mod tests {
         socket: "/path/to/socket"
         device_id: "12345678901234567890"
         "#;
-        let options = DeviceConfig::load_from_str(yaml).unwrap();
-        assert_eq!(options.device_id, "12345678901234567890".to_string());
+        let config = DeviceConfig::load_from_str(yaml).unwrap();
+        assert_eq!(config.device_id, "12345678901234567890".to_string());
 
         let yaml_too_long = r#"
         path: "/path/to/disk"
@@ -364,8 +364,8 @@ mod tests {
         socket: "/path/to/socket"
         write_through: true
         "#;
-        let options = DeviceConfig::load_from_str(yaml).unwrap();
-        assert!(options.write_through);
+        let config = DeviceConfig::load_from_str(yaml).unwrap();
+        assert!(config.write_through);
     }
 
     #[test]
@@ -378,8 +378,8 @@ mod tests {
           - 1
           - 2
         "#;
-        let options = DeviceConfig::load_from_str(yaml).unwrap();
-        assert_eq!(options.cpus, Some(vec![1, 2]));
+        let config = DeviceConfig::load_from_str(yaml).unwrap();
+        assert_eq!(config.cpus, Some(vec![1, 2]));
     }
 
     #[test]
@@ -389,16 +389,16 @@ mod tests {
         socket: "/path/to/socket"
         io_engine: io_uring
         "#;
-        let options_uring = DeviceConfig::load_from_str(yaml_uring).unwrap();
-        assert_eq!(options_uring.io_engine, IoEngine::IoUring);
+        let config_uring = DeviceConfig::load_from_str(yaml_uring).unwrap();
+        assert_eq!(config_uring.io_engine, IoEngine::IoUring);
 
         let yaml_sync = r#"
         path: "/path/to/disk"
         socket: "/path/to/socket"
         io_engine: sync
         "#;
-        let options_sync = DeviceConfig::load_from_str(yaml_sync).unwrap();
-        assert_eq!(options_sync.io_engine, IoEngine::Sync);
+        let config_sync = DeviceConfig::load_from_str(yaml_sync).unwrap();
+        assert_eq!(config_sync.io_engine, IoEngine::Sync);
     }
 
     #[test]
@@ -441,12 +441,12 @@ mod tests {
         "#;
         let result = DeviceConfig::load_from_str(yaml);
         assert!(result.is_ok());
-        let options = result.unwrap();
+        let config = result.unwrap();
         assert!(matches!(
-            options.resolved_stripe_source(),
+            config.resolved_stripe_source(),
             Some(StripeSourceConfig::Remote { .. })
         ));
-        assert_eq!(options.raw_image_path(), None);
+        assert_eq!(config.raw_image_path(), None);
     }
 
     #[test]
@@ -499,9 +499,9 @@ mod tests {
         metadata_path: "/path/to/metadata"
         image_path: "/path/to/image"
         "#;
-        let options = DeviceConfig::load_from_str(yaml).unwrap();
+        let config = DeviceConfig::load_from_str(yaml).unwrap();
         assert_eq!(
-            options.resolved_stripe_source(),
+            config.resolved_stripe_source(),
             Some(StripeSourceConfig::Raw {
                 config: RawStripeSourceConfig {
                     path: PathBuf::from("/path/to/image")
@@ -509,7 +509,7 @@ mod tests {
             })
         );
         assert_eq!(
-            options.raw_image_path(),
+            config.raw_image_path(),
             Some(PathBuf::from("/path/to/image"))
         );
     }
@@ -524,9 +524,9 @@ mod tests {
             source: raw
             path: "/path/to/image"
         "#;
-        let options = DeviceConfig::load_from_str(yaml).unwrap();
+        let config = DeviceConfig::load_from_str(yaml).unwrap();
         assert_eq!(
-            options.resolved_stripe_source(),
+            config.resolved_stripe_source(),
             Some(StripeSourceConfig::Raw {
                 config: RawStripeSourceConfig {
                     path: PathBuf::from("/path/to/image")
@@ -534,7 +534,7 @@ mod tests {
             })
         );
         assert_eq!(
-            options.raw_image_path(),
+            config.raw_image_path(),
             Some(PathBuf::from("/path/to/image"))
         );
     }

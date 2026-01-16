@@ -26,14 +26,14 @@ pub struct CommonArgs {
 }
 
 pub fn load_options(common: &CommonArgs) -> Result<DeviceConfig> {
-    let (options, _kek) = load_options_and_kek(common)?;
-    Ok(options)
+    let (config, _kek) = load_options_and_kek(common)?;
+    Ok(config)
 }
 
 pub fn load_options_and_kek(common: &CommonArgs) -> Result<(DeviceConfig, KeyEncryptionCipher)> {
     let kek = KeyEncryptionCipher::load(common.kek.as_ref(), common.unlink_kek)?;
-    let options = DeviceConfig::load_from_file_with_kek(&common.config, &kek)?;
-    Ok((options, kek))
+    let config = DeviceConfig::load_from_file_with_kek(&common.config, &kek)?;
+    Ok((config, kek))
 }
 
 #[cfg(test)]

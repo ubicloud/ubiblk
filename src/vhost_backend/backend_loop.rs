@@ -43,34 +43,34 @@ struct BackendEnv {
     bgworker_ch: Option<Sender<BgWorkerRequest>>,
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
-    options: DeviceConfig,
+    config: DeviceConfig,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
 }
 
 impl BackendEnv {
-    fn build(options: &DeviceConfig) -> Result<Self> {
-        let base_device = build_block_device(&options.path, options, false)?;
-        let alignment = Self::determine_alignment(&options.path)?;
+    fn build(config: &DeviceConfig) -> Result<Self> {
+        let base_device = build_block_device(&config.path, config, false)?;
+        let alignment = Self::determine_alignment(&config.path)?;
 
         let BgWorkerSetup {
             block_device,
-            config,
+            config: bgworker_config,
             channel,
             status_reporter,
-        } = Self::build_devices(base_device, options, alignment)?;
+        } = Self::build_devices(base_device, config, alignment)?;
 
-        let io_trackers = (0..options.num_queues)
-            .map(|_| IoTracker::new(options.queue_size))
+        let io_trackers = (0..config.num_queues)
+            .map(|_| IoTracker::new(config.queue_size))
             .collect();
 
         Ok(BackendEnv {
             bdev: block_device,
-            bgworker_config: config,
+            bgworker_config,
             bgworker_ch: channel,
             bgworker_thread: None,
             alignment,
-            options: options.clone(),
+            config: config.clone(),
             status_reporter,
             io_trackers,
         })
@@ -86,11 +86,11 @@ impl BackendEnv {
 
     fn build_devices(
         base_device: Box<dyn BlockDevice>,
-        options: &DeviceConfig,
+        config: &DeviceConfig,
         alignment: usize,
     ) -> Result<BgWorkerSetup> {
-        if let Some(metadata_path) = options.metadata_path.as_ref() {
-            Self::build_lazy_device(base_device, options, alignment, metadata_path)
+        if let Some(metadata_path) = config.metadata_path.as_ref() {
+            Self::build_lazy_device(base_device, config, alignment, metadata_path)
         } else {
             Ok(BgWorkerSetup {
                 block_device: base_device,
@@ -104,18 +104,18 @@ impl BackendEnv {
     #[allow(clippy::too_many_arguments)]
     fn build_lazy_device(
         base_device: Box<dyn BlockDevice>,
-        options: &DeviceConfig,
+        config: &DeviceConfig,
         alignment: usize,
         metadata_path: &str,
     ) -> Result<BgWorkerSetup> {
-        let metadata_dev = build_block_device(metadata_path, options, false)?;
+        let metadata_dev = build_block_device(metadata_path, config, false)?;
         let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
         let shared_state = SharedMetadataState::new(&metadata);
 
-        let maybe_image_bdev = if options.copy_on_read {
+        let maybe_image_bdev = if config.copy_on_read {
             None
         } else {
-            Some(build_source_device(options)?)
+            Some(build_source_device(config)?)
         };
 
         let target_clone = base_device.clone();
@@ -127,11 +127,11 @@ impl BackendEnv {
             maybe_image_bdev,
             bgworker_tx.clone(),
             shared_state.clone(),
-            options.track_written,
+            config.track_written,
         )?;
 
         let stripe_source_builder = Box::new(StripeSourceBuilder::new(
-            options.clone(),
+            config.clone(),
             shared_state.stripe_sector_count(),
         ));
 
@@ -140,7 +140,7 @@ impl BackendEnv {
             stripe_source_builder,
             metadata_dev,
             alignment,
-            autofetch: options.autofetch,
+            autofetch: config.autofetch,
             shared_state: shared_state.clone(),
             receiver: bgworker_rx,
         };
@@ -227,7 +227,7 @@ impl BackendEnv {
         info!("Creating backend ...");
 
         let backend = Arc::new(UbiBlkBackend::new(
-            &self.options,
+            &self.config,
             mem.clone(),
             self.bdev.clone(),
             self.alignment,
@@ -242,7 +242,7 @@ impl BackendEnv {
         info!("Daemon is created!");
 
         daemon
-            .serve(&self.options.socket)
+            .serve(&self.config.socket)
             .map_err(|e| UbiblkError::VhostUserBackendError { reason: e })?;
 
         info!("Finished serving socket!");
@@ -357,16 +357,16 @@ fn create_io_engine_device(
     }
 }
 
-pub fn build_source_device(options: &DeviceConfig) -> Result<Box<dyn BlockDevice>> {
-    let source: Box<dyn BlockDevice> = if let Some(path) = options.raw_image_path() {
+pub fn build_source_device(config: &DeviceConfig) -> Result<Box<dyn BlockDevice>> {
+    let source: Box<dyn BlockDevice> = if let Some(path) = config.raw_image_path() {
         let readonly = true;
         create_io_engine_device(
-            options.io_engine.clone(),
+            config.io_engine.clone(),
             path,
             64,
             readonly,
             true,
-            options.write_through,
+            config.write_through,
         )?
     } else {
         block_device::NullBlockDevice::new()
@@ -376,23 +376,23 @@ pub fn build_source_device(options: &DeviceConfig) -> Result<Box<dyn BlockDevice
 
 pub fn build_block_device(
     path: &str,
-    options: &DeviceConfig,
+    config: &DeviceConfig,
     readonly: bool,
 ) -> Result<Box<dyn BlockDevice>> {
     let mut block_device: Box<dyn BlockDevice> = create_io_engine_device(
-        options.io_engine.clone(),
+        config.io_engine.clone(),
         PathBuf::from(path),
-        options.queue_size,
+        config.queue_size,
         readonly,
         true,
-        options.write_through,
+        config.write_through,
     )
     .map_err(|e| {
         error!("Failed to create block device at {path}: {e:?}");
         e
     })?;
 
-    if let Some((key1, key2)) = &options.encryption_key {
+    if let Some((key1, key2)) = &config.encryption_key {
         block_device =
             block_device::CryptBlockDevice::new(block_device, key1.clone(), key2.clone())?;
     }
@@ -410,27 +410,27 @@ mod tests {
         let disk_file = tempfile::NamedTempFile::new().unwrap();
         disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
 
-        let options = DeviceConfig {
+        let config = DeviceConfig {
             path: disk_file.path().to_str().unwrap().to_string(),
             socket: "/tmp/ubiblk-test.sock".to_string(),
             queue_size: 128,
             ..Default::default()
         };
 
-        let result = BackendEnv::build(&options);
+        let result = BackendEnv::build(&config);
         assert!(result.is_ok());
     }
 
     #[test]
     fn build_backend_env_with_invalid_path() {
-        let options = DeviceConfig {
+        let config = DeviceConfig {
             path: "/non/existent/path".to_string(),
             socket: "/tmp/ubiblk-test.sock".to_string(),
             queue_size: 128,
             ..Default::default()
         };
 
-        let result = BackendEnv::build(&options);
+        let result = BackendEnv::build(&config);
         assert!(result.is_err());
     }
 
@@ -445,7 +445,7 @@ mod tests {
         let metadata_path = tempfile::NamedTempFile::new().unwrap();
         metadata_path.as_file().set_len(1024 * 1024).unwrap();
 
-        let options = DeviceConfig {
+        let config = DeviceConfig {
             path: disk_file.path().to_str().unwrap().to_string(),
             stripe_source: Some(StripeSourceConfig::Raw {
                 config: RawStripeSourceConfig {
@@ -458,9 +458,9 @@ mod tests {
             ..Default::default()
         };
 
-        init_metadata(&options, 11).unwrap();
+        init_metadata(&config, 11).unwrap();
 
-        let result = BackendEnv::build(&options);
+        let result = BackendEnv::build(&config);
         assert!(result.is_ok());
     }
 }

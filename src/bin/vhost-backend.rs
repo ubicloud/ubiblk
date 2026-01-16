@@ -20,6 +20,6 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let options = load_options(&args.common)?;
-    block_backend_loop(&options)
+    let config = load_options(&args.common)?;
+    block_backend_loop(&config)
 }

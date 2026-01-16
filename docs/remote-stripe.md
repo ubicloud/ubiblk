@@ -32,9 +32,9 @@ remote-stripe-shell --server-config <SERVER_CONFIG_YAML> \
 
 ### Listen/Server config format
 
-The listen and server config YAML files uses the same format as the
-`stripe_source: remote` configuration. Secrets are encrypted using the KEK if
-provided.
+The listen and server config YAML files use the same fields as the
+`stripe_source: remote` configuration, but without the `source` key. Secrets
+are encrypted using the KEK if provided.
 
 ```yaml
 address: "127.0.0.1:4555"
@@ -51,7 +51,8 @@ psk_secret: "<base64-encrypted-secret>"
 - `fetch_stripe <stripe_index>` – fetch the stripe from the server and cache it.
 - `dump_stripe <stripe_index> <offset> <length>` – print hex data from the
   cached stripe. If the stripe is unwritten, the shell returns zero bytes for
-  the requested range.
+  the requested range. For written stripes that have not been fetched, the shell
+  returns `NOT_FETCHED_FROM_REMOTE`.
 
 ## Remote stripe protocol
 

@@ -52,17 +52,18 @@ vhost-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek]
 
 **Configuration:**
 The configuration YAML must define:
-- `path`: Base disk image path.
-- `stripe_source`: (Optional) Stripe source configuration (local image, remote server, or archive).
+- `path`: Base device path.
+- `stripe_source`: (Optional) Stripe source configuration (local raw image, remote server, or archive).
 - `image_path`: (Optional, deprecated) Image path for lazy stripe fetch.
-- `metadata_path`: (Optional) Metadata file path used for lazy fetch. Required when a local stripe source (or legacy `image_path`) is set.
+- `metadata_path`: Metadata file path. **Required** whenever `stripe_source` or legacy `image_path` is set.
 - `rpc_socket_path`: (Optional) Path to a Unix domain socket for runtime RPC commands.
 - `socket`: vhost-user socket path.
 - `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
-- `copy_on_read`: (Optional) Copy stripes from the image only when accessed.
+- `copy_on_read`: (Optional) Copy stripes from the stripe source only when accessed.
+  **Required** to be set to true for `remote` and `archive` stripe sources.
 - `track_written`: (Optional) Track stripes that have been written.
 - `write_through`: (Optional) Enable the write-through mode.
-- `autofetch`: (Optional) Automatically fetch stripes from the image in the background.
+- `autofetch`: (Optional) Automatically fetch stripes from the stripe source in the background.
 - `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
 - `device_id`: (Optional) Identifier returned to the guest for GET_ID.
 - `io_engine`: (Optional) I/O engine to use for file operations. Allowed values: `io_uring` (default), `sync`.
@@ -104,20 +105,20 @@ $ echo '{"command": "status"}' | socat - UNIX-CONNECT:/tmp/ubiblk-rpc.sock | jq 
 The backend configuration YAML must match the `Options` struct fields:
 
 ```yaml
-path: "/path/to/block-device.raw"        # String: base disk image path
+path: "/path/to/block-device.raw"        # String: base device path
 stripe_source:                           # Optional: stripe source configuration
   source: raw                            # raw | remote | archive
   path: "/path/to/ubi-image.raw"         # Local stripe source path
-metadata_path: "/path/to/metadata"       # Optional: metadata path for lazy fetch
+metadata_path: "/path/to/metadata"       # Required when stripe_source or image_path is set
 rpc_socket_path: "/tmp/ubiblk-rpc.sock"  # Optional: RPC Unix socket path
 socket: "/tmp/vhost.sock"                # String: vhost‐user socket path
-num_queues: 4                            # Integer: number of virtqueues
-cpus: [0, 1, 2, 3]                       # Optional: CPU list matching num_queues
-queue_size: 256                          # Integer: size of each virtqueue
-seg_size_max: 4096                       # Integer: max IO segment size (bytes)
-seg_count_max: 1                         # Integer: max segments per IO
-poll_queue_timeout_us: 500               # Integer: poll timeout in microseconds
-copy_on_read: false                      # Optional: copy stripes on first read
+num_queues: 1                            # Integer: number of virtqueues
+cpus: [0]                                # Optional: CPU list matching num_queues
+queue_size: 64                           # Integer: size of each virtqueue
+seg_size_max: 65536                      # Integer: max IO segment size (bytes)
+seg_count_max: 4                         # Integer: max segments per IO
+poll_queue_timeout_us: 1000              # Integer: poll timeout in microseconds
+copy_on_read: false                      # Optional: copy stripes on first read (must be true for remote/archive sources)
 track_written: false                     # Optional: track written stripes
 write_through: false                     # Optional: enable write-through mode
 autofetch: false                         # Optional: fetch stripes automatically
@@ -168,17 +169,18 @@ The legacy `image_path` option is still accepted for backward compatibility, but
 ## Lazy Stripe Fetching
 
 When a stripe source and `metadata_path` are provided, the backend copies data
-from the image to the base device in units called *stripes*. The size of a
+from the stripe source to the base device in units called *stripes*. The size of a
 stripe is `2^stripe-sector-count-shift` sectors and the status of every stripe
 is recorded in the metadata file.
 
 If a write operation is issued to a stripe that has not been fetched yet, the
-backend will first copy the stripe from the image to the base device and then
-perform the write operation. However, reads are handled differently based on
-`copy_on_read`:
+backend will first copy the stripe from the stripe source to the base device and
+then perform the write operation. However, reads are handled differently based
+on `copy_on_read`:
 
 - **`copy_on_read = false`** – A read never triggers a fetch. Read from an
-  unfetched stripe will read directly from the image.
+  unfetched stripe will read directly from the stripe source. This mode is only
+  supported when the stripe source is a local raw image file.
 - **`copy_on_read = true`** – A read from an unfetched stripe triggers a fetch
   and completes once the stripe has been copied to the base device.
 
@@ -188,8 +190,8 @@ each stripe indicating whether that stripe has been fetched.
 
 Setting `autofetch` to `true` instructs the backend to keep fetching stripes in
 the background whenever no manual fetch requests are pending. This can be used
-to progressively catch up with the base image even if the guest only accesses a
-small portion of the device.
+to progressively catch up with the stripe source even if the guest only accesses
+a small portion of the device.
 
 ## Key Encryption Key (KEK) File
 The keys in the configuration file can be encrypted using a KEK file. The KEK file should contain the encryption key in base64 format. The backend will use this key to decrypt the block device keys at runtime.
@@ -225,8 +227,8 @@ init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \
 
 #### dump-metadata
 
-`dump-metadata` inspects the metadata file referenced by a backend
-configuration and prints a summary of fetched and written stripes. Provide the
+`dump-metadata` inspects the metadata file referenced by a backend configuration
+and prints a summary of fetched, written, and has-source stripes. Provide the
 same configuration file that the backend uses, plus an optional KEK file when
 working with encrypted metadata.
 

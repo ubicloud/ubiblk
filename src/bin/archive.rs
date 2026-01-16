@@ -5,7 +5,7 @@ use clap::Parser;
 use ubiblk::{
     archive::StripeArchiver,
     block_device::UbiMetadata,
-    cli::{load_options_and_kek, CommonArgs},
+    cli::{load_config_and_kek, CommonArgs},
     config::ArchiveStripeSourceConfig,
     stripe_source::StripeSourceBuilder,
     vhost_backend::build_block_device,
@@ -48,7 +48,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let (config, config_kek) = load_options_and_kek(&args.common)?;
+    let (config, config_kek) = load_config_and_kek(&args.common)?;
     let metadata_path = config
         .metadata_path
         .as_ref()

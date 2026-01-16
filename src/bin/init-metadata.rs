@@ -1,5 +1,5 @@
 use clap::Parser;
-use ubiblk::cli::{load_options, CommonArgs};
+use ubiblk::cli::{load_config, CommonArgs};
 use ubiblk::vhost_backend::*;
 use ubiblk::{Error, Result};
 
@@ -27,7 +27,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let config = load_options(&args.common)?;
+    let config = load_config(&args.common)?;
 
     let stripe_sector_count_shift = args.stripe_sector_count_shift;
 

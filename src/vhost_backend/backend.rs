@@ -36,7 +36,7 @@ impl UbiBlkBackend {
         &self.threads
     }
 
-    fn validate_options(device_config: &DeviceConfig) -> Result<()> {
+    fn validate_config(device_config: &DeviceConfig) -> Result<()> {
         if device_config.queue_size == 0 || !device_config.queue_size.is_power_of_two() {
             return Err(UbiblkError::InvalidParameter {
                 description: format!(
@@ -64,7 +64,7 @@ impl UbiBlkBackend {
         alignment: usize,
         io_trackers: Vec<IoTracker>,
     ) -> Result<Self> {
-        Self::validate_options(device_config)?;
+        Self::validate_config(device_config)?;
 
         let writeback = if device_config.write_through { 0 } else { 1 };
 

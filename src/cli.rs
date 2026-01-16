@@ -25,12 +25,12 @@ pub struct CommonArgs {
     pub unlink_kek: bool,
 }
 
-pub fn load_options(common: &CommonArgs) -> Result<DeviceConfig> {
-    let (config, _kek) = load_options_and_kek(common)?;
+pub fn load_config(common: &CommonArgs) -> Result<DeviceConfig> {
+    let (config, _kek) = load_config_and_kek(common)?;
     Ok(config)
 }
 
-pub fn load_options_and_kek(common: &CommonArgs) -> Result<(DeviceConfig, KeyEncryptionCipher)> {
+pub fn load_config_and_kek(common: &CommonArgs) -> Result<(DeviceConfig, KeyEncryptionCipher)> {
     let kek = KeyEncryptionCipher::load(common.kek.as_ref(), common.unlink_kek)?;
     let config = DeviceConfig::load_from_file_with_kek(&common.config, &kek)?;
     Ok((config, kek))
@@ -52,7 +52,7 @@ mod tests {
     }
 
     #[test]
-    fn load_options_reads_config() {
+    fn load_config_reads_config() {
         let config_file = write_temp_file(
             r#"
 path: /dev/null
@@ -66,14 +66,14 @@ socket: /tmp/ubiblk.sock
             unlink_kek: false,
         };
 
-        let config = load_options(&args).expect("load options");
+        let config = load_config(&args).expect("load config");
 
         assert_eq!(config.path, "/dev/null");
         assert_eq!(config.socket, "/tmp/ubiblk.sock");
     }
 
     #[test]
-    fn load_options_and_kek_unlinks_kek() {
+    fn load_config_and_kek_unlinks_kek() {
         let config_file = write_temp_file(
             r#"
 path: /dev/null
@@ -93,7 +93,7 @@ method: none
             unlink_kek: true,
         };
 
-        let (_config, kek) = load_options_and_kek(&args).expect("load options and kek");
+        let (_config, kek) = load_config_and_kek(&args).expect("load config and kek");
 
         assert_eq!(kek.method, CipherMethod::None);
         assert!(

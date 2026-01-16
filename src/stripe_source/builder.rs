@@ -122,7 +122,7 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    fn create_test_options(remote: Option<String>, path: Option<PathBuf>) -> DeviceConfig {
+    fn create_test_config(remote: Option<String>, path: Option<PathBuf>) -> DeviceConfig {
         let stripe_source = if let Some(path) = path {
             Some(StripeSourceConfig::Raw {
                 config: RawStripeSourceConfig { path },
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_build_defaults_to_null_device() {
-        let config = create_test_options(None, None);
+        let config = create_test_config(None, None);
         let builder = StripeSourceBuilder::new(config, 4096);
 
         let result = builder.build();
@@ -166,7 +166,7 @@ mod tests {
         let f = File::create(&file_path).unwrap();
         f.set_len(1024 * 1024).unwrap();
 
-        let config = create_test_options(None, Some(file_path));
+        let config = create_test_config(None, Some(file_path));
         let builder = StripeSourceBuilder::new(config, 4096);
 
         let result = builder.build();
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn test_build_local_block_device_fails_on_missing_file() {
         let bad_path = PathBuf::from("/path/to/nonexistent/file.img");
-        let config = create_test_options(None, Some(bad_path));
+        let config = create_test_config(None, Some(bad_path));
         let builder = StripeSourceBuilder::new(config, 4096);
 
         let result = builder.build();
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_connect_to_invalid_remote_server() {
-        let config = create_test_options(Some("127.0.0.1:99999".to_string()), None);
+        let config = create_test_config(Some("127.0.0.1:99999".to_string()), None);
         let builder = StripeSourceBuilder::new(config, 4096);
 
         let result = builder.build();

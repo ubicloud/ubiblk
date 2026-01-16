@@ -142,7 +142,7 @@ mod tests {
         QueueRequestAddrs { data, status }
     }
 
-    fn default_options(path: &str) -> DeviceConfig {
+    fn default_config(path: &str) -> DeviceConfig {
         DeviceConfig {
             path: path.to_string(),
             socket: "sock".to_string(),
@@ -164,7 +164,7 @@ mod tests {
 
     fn create_thread_with_device() -> (UbiBlkBackendThread, GuestMemory, TestBlockDevice) {
         let (gm, mem) = setup_mem();
-        let config = default_options("img");
+        let config = default_config("img");
         let device = TestBlockDevice::new(SECTOR_SIZE as u64 * 8);
         let io_channel = device.create_channel().unwrap();
         let thread = UbiBlkBackendThread::new(

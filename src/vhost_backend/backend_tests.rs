@@ -14,7 +14,7 @@ mod tests {
     use vm_memory::{ByteValued, GuestMemoryAtomic, GuestMemoryMmap};
     use vmm_sys_util::epoll::EventSet;
 
-    fn default_options(path: String) -> DeviceConfig {
+    fn default_config(path: String) -> DeviceConfig {
         DeviceConfig {
             path,
             socket: "sock".to_string(),
@@ -32,7 +32,7 @@ mod tests {
     /// Building the backend with a queue size that is not a power of two should fail.
     #[test]
     fn invalid_queue_size() {
-        let mut config = default_options("test.img".to_string());
+        let mut config = default_config("test.img".to_string());
         config.queue_size = 30;
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
@@ -43,7 +43,7 @@ mod tests {
     /// Ensure a backend can be created with valid parameters and exposes expected features.
     #[test]
     fn backend_features_and_protocol() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend =
@@ -60,7 +60,7 @@ mod tests {
     /// Updating event index should propagate to all worker threads.
     #[test]
     fn set_event_index() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend =
@@ -74,7 +74,7 @@ mod tests {
     /// handle_event should reject unexpected event sets.
     #[test]
     fn handle_event_invalid_eventset() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend =
@@ -86,7 +86,7 @@ mod tests {
     /// handle_event should reject device events other than 0.
     #[test]
     fn handle_event_invalid_device() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend =
@@ -98,7 +98,7 @@ mod tests {
     /// init_metadata should fail when metadata_path is missing.
     #[test]
     fn init_metadata_missing_path() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let res = init_metadata(&config, 4);
         assert!(res.is_err());
     }
@@ -106,7 +106,7 @@ mod tests {
     /// The features method should advertise common virtio features.
     #[test]
     fn features_advertise_bits() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend =
@@ -122,7 +122,7 @@ mod tests {
     /// acked_features should accept arbitrary feature flags without panicking.
     #[test]
     fn acked_features_noop() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend =
@@ -134,7 +134,7 @@ mod tests {
     /// set_event_idx(false) should clear the flag on all worker threads.
     #[test]
     fn clear_event_index() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend =
@@ -149,7 +149,7 @@ mod tests {
     /// get_config should return a valid VirtioBlockConfig structure.
     #[test]
     fn get_config_returns_struct() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend =
@@ -169,7 +169,7 @@ mod tests {
     /// queues_per_thread should reflect the number of queues configured.
     #[test]
     fn queues_per_thread_multiple() {
-        let mut config = default_options("img".to_string());
+        let mut config = default_config("img".to_string());
         config.num_queues = 3;
         config.cpus = None;
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn cpus_mismatch() {
-        let mut config = default_options("img".to_string());
+        let mut config = default_config("img".to_string());
         config.num_queues = 2;
         config.cpus = Some(vec![0]);
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
@@ -194,7 +194,7 @@ mod tests {
     /// update_memory is currently a no-op and should succeed.
     #[test]
     fn update_memory_nop() {
-        let config = default_options("img".to_string());
+        let config = default_config("img".to_string());
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let mem2 = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));

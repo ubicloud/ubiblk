@@ -1,5 +1,5 @@
 use clap::Parser;
-use ubiblk::cli::{load_options, CommonArgs};
+use ubiblk::cli::{load_config, CommonArgs};
 use ubiblk::vhost_backend::*;
 use ubiblk::Result;
 
@@ -20,6 +20,6 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let config = load_options(&args.common)?;
+    let config = load_config(&args.common)?;
     block_backend_loop(&config)
 }

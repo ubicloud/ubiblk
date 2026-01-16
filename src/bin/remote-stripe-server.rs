@@ -4,7 +4,7 @@ use clap::Parser;
 use log::{error, info};
 
 use ubiblk::{
-    cli::{load_options_and_kek, CommonArgs},
+    cli::{load_config_and_kek, CommonArgs},
     config::RemoteStripeSourceConfig,
     stripe_server::{prepare_stripe_server, wrap_psk_server_stream, DynStream, PskCredentials},
     Error, Result,
@@ -38,7 +38,7 @@ fn run(args: Args) -> Result<()> {
         listen_config_path,
     } = args;
 
-    let (config, kek) = load_options_and_kek(&common)?;
+    let (config, kek) = load_config_and_kek(&common)?;
     if config.has_stripe_source() {
         return Err(Error::InvalidParameter {
             description:

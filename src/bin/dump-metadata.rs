@@ -1,6 +1,6 @@
 use clap::Parser;
 use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
-use ubiblk::cli::{load_options, CommonArgs};
+use ubiblk::cli::{load_config, CommonArgs};
 use ubiblk::config::{ArchiveStripeSourceConfig, DeviceConfig, StripeSourceConfig};
 use ubiblk::vhost_backend::{build_block_device, SECTOR_SIZE};
 use ubiblk::{Error, Result};
@@ -108,7 +108,7 @@ fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
     let args = Args::parse();
 
-    let config = load_options(&args.common)?;
+    let config = load_config(&args.common)?;
 
     // base data device
     let base_dev = build_block_device(&config.path, &config, true)?;

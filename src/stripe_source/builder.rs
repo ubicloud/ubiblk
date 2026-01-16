@@ -10,20 +10,20 @@ use crate::{
 use super::*;
 
 pub struct StripeSourceBuilder {
-    options: DeviceConfig,
+    device_config: DeviceConfig,
     stripe_sector_count: u64,
 }
 
 impl StripeSourceBuilder {
-    pub fn new(options: DeviceConfig, stripe_sector_count: u64) -> Self {
+    pub fn new(device_config: DeviceConfig, stripe_sector_count: u64) -> Self {
         Self {
-            options,
+            device_config,
             stripe_sector_count,
         }
     }
 
     pub fn build(&self) -> Result<Box<dyn StripeSource>> {
-        if let Some(stripe_source) = self.options.resolved_stripe_source() {
+        if let Some(stripe_source) = self.device_config.resolved_stripe_source() {
             match stripe_source {
                 StripeSourceConfig::Archive { config } => {
                     let store = Self::build_archive_store(&config)?;
@@ -41,7 +41,7 @@ impl StripeSourceBuilder {
             }
         }
 
-        let block_device = build_source_device(&self.options)?;
+        let block_device = build_source_device(&self.device_config)?;
 
         let stripe_source = BlockDeviceStripeSource::new(block_device, self.stripe_sector_count)?;
         Ok(Box::new(stripe_source))
@@ -146,8 +146,8 @@ mod tests {
 
     #[test]
     fn test_build_defaults_to_null_device() {
-        let options = create_test_options(None, None);
-        let builder = StripeSourceBuilder::new(options, 4096);
+        let config = create_test_options(None, None);
+        let builder = StripeSourceBuilder::new(config, 4096);
 
         let result = builder.build();
 
@@ -166,8 +166,8 @@ mod tests {
         let f = File::create(&file_path).unwrap();
         f.set_len(1024 * 1024).unwrap();
 
-        let options = create_test_options(None, Some(file_path));
-        let builder = StripeSourceBuilder::new(options, 4096);
+        let config = create_test_options(None, Some(file_path));
+        let builder = StripeSourceBuilder::new(config, 4096);
 
         let result = builder.build();
         assert!(
@@ -179,8 +179,8 @@ mod tests {
     #[test]
     fn test_build_local_block_device_fails_on_missing_file() {
         let bad_path = PathBuf::from("/path/to/nonexistent/file.img");
-        let options = create_test_options(None, Some(bad_path));
-        let builder = StripeSourceBuilder::new(options, 4096);
+        let config = create_test_options(None, Some(bad_path));
+        let builder = StripeSourceBuilder::new(config, 4096);
 
         let result = builder.build();
 
@@ -196,8 +196,8 @@ mod tests {
 
     #[test]
     fn test_connect_to_invalid_remote_server() {
-        let options = create_test_options(Some("127.0.0.1:99999".to_string()), None);
-        let builder = StripeSourceBuilder::new(options, 4096);
+        let config = create_test_options(Some("127.0.0.1:99999".to_string()), None);
+        let builder = StripeSourceBuilder::new(config, 4096);
 
         let result = builder.build();
 

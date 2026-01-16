@@ -215,9 +215,9 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let kek_path = args.kek.as_ref().map(PathBuf::from);
     let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;
-    let options = DeviceConfig::load_from_file_with_kek(&PathBuf::from(&args.config), &kek)?;
+    let config = DeviceConfig::load_from_file_with_kek(&PathBuf::from(&args.config), &kek)?;
 
-    let (key1, key2) = options
+    let (key1, key2) = config
         .encryption_key
         .clone()
         .ok_or_else(|| Error::InvalidParameter {

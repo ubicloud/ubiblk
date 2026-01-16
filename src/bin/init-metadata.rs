@@ -27,7 +27,7 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let options = load_options(&args.common)?;
+    let config = load_options(&args.common)?;
 
     let stripe_sector_count_shift = args.stripe_sector_count_shift;
 
@@ -41,5 +41,5 @@ fn main() -> Result<()> {
         });
     }
 
-    init_metadata(&options, stripe_sector_count_shift)
+    init_metadata(&config, stripe_sector_count_shift)
 }

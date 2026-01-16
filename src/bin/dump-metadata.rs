@@ -57,21 +57,21 @@ fn format_optional(value: Option<&str>) -> &str {
     value.unwrap_or("None")
 }
 
-fn format_source_info(options: &DeviceConfig) -> Result<String> {
+fn format_source_info(config: &DeviceConfig) -> Result<String> {
     #[allow(deprecated)]
-    match options.resolved_stripe_source() {
-        Some(StripeSourceConfig::Raw { config }) => {
+    match config.resolved_stripe_source() {
+        Some(StripeSourceConfig::Raw { config: raw_config }) => {
             let dev = block_device::UringBlockDevice::new(
-                config.path.clone(),
-                options.queue_size,
+                raw_config.path.clone(),
+                config.queue_size,
                 true,
                 true,
-                options.write_through,
+                config.write_through,
             )?;
             let image_size = dev.sector_count() * SECTOR_SIZE as u64;
             Ok(format!(
                 "raw (path: {}, size: {} bytes)",
-                config.path.display(),
+                raw_config.path.display(),
                 image_size
             ))
         }
@@ -108,22 +108,22 @@ fn main() -> Result<()> {
     env_logger::builder().format_timestamp(None).init();
     let args = Args::parse();
 
-    let options = load_options(&args.common)?;
+    let config = load_options(&args.common)?;
 
     // base data device
-    let base_dev = build_block_device(&options.path, &options, true)?;
+    let base_dev = build_block_device(&config.path, &config, true)?;
     let data_size = base_dev.sector_count() * SECTOR_SIZE as u64;
 
-    let source_info = format_source_info(&options)?;
+    let source_info = format_source_info(&config)?;
 
     // metadata device
-    let metadata_path = options
+    let metadata_path = config
         .metadata_path
         .as_ref()
         .ok_or_else(|| Error::InvalidParameter {
             description: "metadata_path is none".to_string(),
         })?;
-    let metadata_dev = build_block_device(metadata_path, &options, true)?;
+    let metadata_dev = build_block_device(metadata_path, &config, true)?;
     let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
 
     let stripe_size = metadata.stripe_size();
@@ -151,7 +151,7 @@ fn main() -> Result<()> {
         .filter_map(|(i, h)| (h & metadata_flags::HAS_SOURCE != 0).then_some(i))
         .collect();
 
-    println!("data file: {} ({} bytes)", options.path, data_size);
+    println!("data file: {} ({} bytes)", config.path, data_size);
     println!("source: {source_info}");
     println!("metadata version: {metadata_version}");
     println!("stripe size: {stripe_size} bytes");

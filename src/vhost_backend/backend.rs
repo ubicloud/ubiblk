@@ -28,7 +28,7 @@ pub struct UbiBlkBackend {
     config: VirtioBlockConfig,
     queues_per_thread: Vec<u64>,
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    options: DeviceConfig,
+    device_config: DeviceConfig,
 }
 
 impl UbiBlkBackend {
@@ -36,18 +36,18 @@ impl UbiBlkBackend {
         &self.threads
     }
 
-    fn validate_options(options: &DeviceConfig) -> Result<()> {
-        if options.queue_size == 0 || !options.queue_size.is_power_of_two() {
+    fn validate_options(device_config: &DeviceConfig) -> Result<()> {
+        if device_config.queue_size == 0 || !device_config.queue_size.is_power_of_two() {
             return Err(UbiblkError::InvalidParameter {
                 description: format!(
                     "queue_size {} is not a non-zero power of two",
-                    options.queue_size
+                    device_config.queue_size
                 ),
             });
         }
 
-        if let Some(ref cpus) = options.cpus {
-            if cpus.len() != options.num_queues {
+        if let Some(ref cpus) = device_config.cpus {
+            if cpus.len() != device_config.num_queues {
                 return Err(UbiblkError::InvalidParameter {
                     description: "cpus length must equal num_queues".to_string(),
                 });
@@ -58,44 +58,50 @@ impl UbiBlkBackend {
     }
 
     pub fn new(
-        options: &DeviceConfig,
+        device_config: &DeviceConfig,
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         block_device: Box<dyn BlockDevice>,
         alignment: usize,
         io_trackers: Vec<IoTracker>,
     ) -> Result<Self> {
-        Self::validate_options(options)?;
+        Self::validate_options(device_config)?;
 
-        let writeback = if options.write_through { 0 } else { 1 };
+        let writeback = if device_config.write_through { 0 } else { 1 };
 
         let nsectors = block_device.sector_count();
         let virtio_config = VirtioBlockConfig {
-            capacity: nsectors,             /* The capacity (in SECTOR_SIZE-byte sectors). */
-            blk_size: SECTOR_SIZE as u32,   /* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
-            size_max: options.seg_size_max, /* The maximum segment size (if VIRTIO_BLK_F_SIZE_MAX) */
-            seg_max: options.seg_count_max, /* The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX) */
+            capacity: nsectors,           /* The capacity (in SECTOR_SIZE-byte sectors). */
+            blk_size: SECTOR_SIZE as u32, /* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
+            size_max: device_config.seg_size_max, /* The maximum segment size (if VIRTIO_BLK_F_SIZE_MAX) */
+            seg_max: device_config.seg_count_max, /* The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX) */
             min_io_size: 1, /* minimum I/O size without performance penalty in logical blocks. */
             opt_io_size: 1, /* optimal sustained I/O size in logical blocks. */
-            num_queues: options.num_queues as u16,
+            num_queues: device_config.num_queues as u16,
             writeback,
             ..Default::default()
         };
 
         info!("virtio_config: {virtio_config:?}");
 
-        let threads = (0..options.num_queues)
+        let threads = (0..device_config.num_queues)
             .map(|idx| {
                 let io_channel = block_device.create_channel()?;
                 let io_tracker = io_trackers
                     .get(idx)
                     .cloned()
-                    .unwrap_or_else(|| IoTracker::new(options.queue_size));
-                UbiBlkBackendThread::new(mem.clone(), io_channel, options, alignment, io_tracker)
-                    .map(Mutex::new)
+                    .unwrap_or_else(|| IoTracker::new(device_config.queue_size));
+                UbiBlkBackendThread::new(
+                    mem.clone(),
+                    io_channel,
+                    device_config,
+                    alignment,
+                    io_tracker,
+                )
+                .map(Mutex::new)
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let queues_per_thread = (0..options.num_queues).map(|i| 1 << i).collect();
+        let queues_per_thread = (0..device_config.num_queues).map(|i| 1 << i).collect();
 
         debug!("queues_per_thread: {queues_per_thread:?}");
 
@@ -104,7 +110,7 @@ impl UbiBlkBackend {
             config: virtio_config,
             queues_per_thread,
             mem,
-            options: options.clone(),
+            device_config: device_config.clone(),
         })
     }
 }
@@ -135,7 +141,7 @@ impl VhostUserBackend for UbiBlkBackend {
     }
 
     fn max_queue_size(&self) -> usize {
-        self.options.queue_size
+        self.device_config.queue_size
     }
 
     fn features(&self) -> u64 {
@@ -214,7 +220,7 @@ impl VhostUserBackend for UbiBlkBackend {
             .lock()
             .map_err(|_| std::io::Error::other("Thread lock poisoned"))?;
 
-        if let Some(cpus) = &self.options.cpus {
+        if let Some(cpus) = &self.device_config.cpus {
             if let Err(e) = thread.pin_to_cpu(cpus[thread_id]) {
                 error!("Failed to pin thread to cpu {}: {e}", cpus[thread_id]);
             }
@@ -230,7 +236,7 @@ impl VhostUserBackend for UbiBlkBackend {
                 loop {
                     if thread.process_queue(&mut vring) {
                         now = Instant::now();
-                    } else if now.elapsed().as_micros() > self.options.poll_queue_timeout_us {
+                    } else if now.elapsed().as_micros() > self.device_config.poll_queue_timeout_us {
                         break;
                     }
                 }

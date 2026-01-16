@@ -70,12 +70,12 @@ impl UbiBlkBackendThread {
     pub fn new(
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         io_channel: Box<dyn IoChannel>,
-        options: &DeviceConfig,
+        config: &DeviceConfig,
         alignment: usize,
         io_tracker: IoTracker,
     ) -> Result<Self> {
-        let buf_size = options.seg_count_max * options.seg_size_max;
-        let request_slots: Vec<RequestSlot> = (0..options.queue_size)
+        let buf_size = config.seg_count_max * config.seg_size_max;
+        let request_slots: Vec<RequestSlot> = (0..config.queue_size)
             .map(|_| RequestSlot {
                 used: false,
                 request_type: RequestType::None,
@@ -103,7 +103,7 @@ impl UbiBlkBackendThread {
             mem,
             io_channel,
             request_slots,
-            device_id: options.device_id.clone(),
+            device_id: config.device_id.clone(),
             alignment,
             pin_attempted: false,
             ios_pending_signal: false,

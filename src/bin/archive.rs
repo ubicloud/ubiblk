@@ -48,21 +48,21 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let (options, config_kek) = load_options_and_kek(&args.common)?;
-    let metadata_path = options
+    let (config, config_kek) = load_options_and_kek(&args.common)?;
+    let metadata_path = config
         .metadata_path
         .as_ref()
         .ok_or(UbiblkError::InvalidParameter {
             description: "Metadata path is missing".to_string(),
         })?;
-    let metadata_dev = build_block_device(metadata_path, &options, true)?;
+    let metadata_dev = build_block_device(metadata_path, &config, true)?;
     let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
 
-    let disk_dev = build_block_device(&options.path, &options, true)?;
+    let disk_dev = build_block_device(&config.path, &config, true)?;
 
     let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
 
-    let stripe_source = StripeSourceBuilder::new(options.clone(), stripe_sector_count).build()?;
+    let stripe_source = StripeSourceBuilder::new(config.clone(), stripe_sector_count).build()?;
 
     let target_config =
         ArchiveStripeSourceConfig::load_from_file_with_kek(&args.target_config_path, &config_kek)?;

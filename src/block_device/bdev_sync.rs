@@ -174,10 +174,7 @@ mod tests {
     #[test]
     // Verify basic read and write operations succeed on a read/write device.
     fn create_channel_and_basic_io() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
 
         let path = tmpfile.path().to_path_buf();
         let device = SyncBlockDevice::new(path.clone(), false, false, false)?;
@@ -210,10 +207,7 @@ mod tests {
     #[test]
     // Ensure writes fail when the device is opened read-only.
     fn create_channel_and_basic_io_readonly() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
 
         let path = tmpfile.path().to_path_buf();
         let device = SyncBlockDevice::new(path.clone(), true, false, false)?;
@@ -244,24 +238,22 @@ mod tests {
 
     #[test]
     // Creating a device with a size not aligned to sectors should error.
-    fn device_new_invalid_size() {
-        let tmpfile = NamedTempFile::new().unwrap();
-        tmpfile.as_file().write_all(&[0u8; 1]).unwrap();
+    fn device_new_invalid_size() -> Result<()> {
+        let tmpfile = NamedTempFile::new()?;
+        tmpfile.as_file().write_all(&[0u8; 1])?;
         let path = tmpfile.path().to_path_buf();
         assert!(matches!(
             SyncBlockDevice::new(path, false, false, false),
             Err(UbiblkError::InvalidParameter { .. })
         ));
+        Ok(())
     }
 
     #[test]
     // Trigger error paths for out-of-bounds reads and writes.
     fn read_and_write_error_paths() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
-        tmpfile.as_file().set_len(SECTOR_SIZE as u64).unwrap();
+        let tmpfile = NamedTempFile::new()?;
+        tmpfile.as_file().set_len(SECTOR_SIZE as u64)?;
 
         let path = tmpfile.path();
         let mut chan = SyncIoChannel::new(path, false, false, false)?;
@@ -309,10 +301,7 @@ mod tests {
     #[test]
     // Test successful flush operations and that the channel never reports busy.
     fn flush_and_busy() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path();
         let mut chan = SyncIoChannel::new(path, false, false, false)?;
         assert!(!chan.busy());
@@ -330,26 +319,23 @@ mod tests {
 
     #[test]
     // Validate error handling on device creation and sector count reporting.
-    fn block_device_error_and_sector_count() {
+    fn block_device_error_and_sector_count() -> Result<()> {
         let path = PathBuf::from("/no/such/file");
         assert!(matches!(
             SyncBlockDevice::new(path, false, false, false),
             Err(UbiblkError::IoError { .. })
         ));
 
-        let tmpfile = NamedTempFile::new().unwrap();
-        tmpfile.as_file().set_len((SECTOR_SIZE * 2) as u64).unwrap();
-        let device =
-            SyncBlockDevice::new(tmpfile.path().to_path_buf(), false, false, false).unwrap();
+        let tmpfile = NamedTempFile::new()?;
+        tmpfile.as_file().set_len((SECTOR_SIZE * 2) as u64)?;
+        let device = SyncBlockDevice::new(tmpfile.path().to_path_buf(), false, false, false)?;
         assert_eq!(device.sector_count(), 2);
+        Ok(())
     }
     #[test]
     // Verify that direct I/O works for basic read and write operations.
     fn direct_io_basic_io() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let device = SyncBlockDevice::new(path.clone(), false, true, false)?;
         let mut chan = device.create_channel()?;
@@ -381,10 +367,7 @@ mod tests {
     // For SyncIoChannel, flush calls file.sync_all() anyway, but we want to ensure
     // the flag is accepted and doesn't cause errors.
     fn sync_flush_noop() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let device = SyncBlockDevice::new(path.clone(), false, false, true)?;
         let mut chan = device.create_channel()?;
@@ -397,16 +380,16 @@ mod tests {
     }
 
     #[test]
-    fn test_clone() {
-        let tmpfile = NamedTempFile::new().unwrap();
+    fn test_clone() -> Result<()> {
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_path_buf();
-        let device = SyncBlockDevice::new(path.clone(), false, true, true).unwrap();
+        let device = SyncBlockDevice::new(path.clone(), false, true, true)?;
         let device_clone = device.clone();
         assert_eq!(device.sector_count(), device_clone.sector_count());
 
         // Write to the clone & read from the original to verify they access the
         // same file.
-        let mut chan_clone = device_clone.create_channel().unwrap();
+        let mut chan_clone = device_clone.create_channel()?;
         let pattern = vec![0xDEu8; SECTOR_SIZE];
         let write_buf = shared_buffer(SECTOR_SIZE);
         write_buf
@@ -414,17 +397,18 @@ mod tests {
             .as_mut_slice()
             .copy_from_slice(&pattern);
         chan_clone.add_write(0, 1, write_buf.clone(), 1);
-        chan_clone.submit().unwrap();
+        chan_clone.submit()?;
         assert_eq!(chan_clone.poll(), vec![(1, true)]);
         chan_clone.add_flush(0);
-        chan_clone.submit().unwrap();
+        chan_clone.submit()?;
         assert_eq!(chan_clone.poll(), vec![(0, true)]);
 
-        let mut chan = device.create_channel().unwrap();
+        let mut chan = device.create_channel()?;
         let read_buf = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 2);
-        chan.submit().unwrap();
+        chan.submit()?;
         assert_eq!(chan.poll(), vec![(2, true)]);
         assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
+        Ok(())
     }
 }

@@ -245,7 +245,6 @@ mod tests {
 
     use super::*;
 
-    use log::error;
     use std::{thread::sleep, time::Duration};
     use tempfile::NamedTempFile;
 
@@ -262,10 +261,7 @@ mod tests {
     // complete write followed by a read of the same sector.
     #[test]
     fn create_channel_and_basic_io() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, false, false, false)?;
         let mut chan = block_dev.create_channel()?;
@@ -297,10 +293,7 @@ mod tests {
     // writes are rejected.
     #[test]
     fn create_channel_and_basic_io_readonly() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, true, false, false)?;
         let mut chan = block_dev.create_channel()?;
@@ -327,17 +320,8 @@ mod tests {
     // sector size should fail.
     #[test]
     fn new_with_unaligned_size_fails() -> Result<()> {
-        let mut tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
-        tmpfile
-            .as_file_mut()
-            .set_len(SECTOR_SIZE as u64 + 1)
-            .map_err(|e| {
-                error!("Failed to set temporary file size: {e}");
-                UbiblkError::IoError { source: e }
-            })?;
+        let mut tmpfile = NamedTempFile::new()?;
+        tmpfile.as_file_mut().set_len(SECTOR_SIZE as u64 + 1)?;
         let path = tmpfile.path().to_owned();
         let result = UringBlockDevice::new(path, 8, false, false, false);
         assert!(result.is_err());
@@ -357,10 +341,7 @@ mod tests {
     // Providing a queue size that is not a positive power of two should fail.
     #[test]
     fn new_invalid_queue_size_fails() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let result = UringBlockDevice::new(path, 3, false, false, false);
         assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
@@ -370,10 +351,7 @@ mod tests {
     // Queue size zero should also be rejected.
     #[test]
     fn new_zero_queue_size_fails() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let result = UringBlockDevice::new(path, 0, false, false, false);
         assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
@@ -383,10 +361,7 @@ mod tests {
     // Verify that `busy` reports queued IO and that a flush request is handled.
     #[test]
     fn busy_and_flush() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, false, false, false)?;
         let mut chan = block_dev.create_channel()?;
@@ -409,10 +384,7 @@ mod tests {
     // an fsync operation.
     #[test]
     fn sync_flush_noop() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, false, false, true)?;
         let mut chan = block_dev.create_channel()?;
@@ -429,10 +401,7 @@ mod tests {
     // reported as failed.
     #[test]
     fn queue_overflow() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         // Queue size of one allows only a single in-flight request.
         let block_dev = UringBlockDevice::new(path.clone(), 1, false, false, false)?;
@@ -456,10 +425,7 @@ mod tests {
     // should still return true so the caller knows to poll for them.
     #[test]
     fn busy_reports_finished_requests() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let mut chan = UringIoChannel::new(path.to_str().unwrap(), 8, false, false, false)?;
 
@@ -477,10 +443,7 @@ mod tests {
     // Verify that direct I/O works for basic read and write operations.
     #[test]
     fn direct_io_basic_io() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, false, true, false)?;
         let mut chan = block_dev.create_channel()?;
@@ -509,10 +472,7 @@ mod tests {
     // Ensure queue overflow handling also works when direct I/O is enabled.
     #[test]
     fn direct_io_queue_overflow() -> Result<()> {
-        let tmpfile = NamedTempFile::new().map_err(|e| {
-            error!("Failed to create temporary file: {e}");
-            UbiblkError::IoError { source: e }
-        })?;
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 1, false, true, false)?;
         let mut chan = block_dev.create_channel()?;
@@ -532,16 +492,16 @@ mod tests {
     }
 
     #[test]
-    fn test_clone() {
-        let tmpfile = NamedTempFile::new().unwrap();
+    fn test_clone() -> Result<()> {
+        let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_path_buf();
-        let device = UringBlockDevice::new(path, 8, false, true, true).unwrap();
+        let device = UringBlockDevice::new(path, 8, false, true, true)?;
         let device_clone = device.clone();
         assert_eq!(device.sector_count(), device_clone.sector_count());
 
         // Write to the clone & read from the original to verify they access the
         // same file.
-        let mut chan_clone = device_clone.create_channel().unwrap();
+        let mut chan_clone = device_clone.create_channel()?;
         let pattern = vec![0xDEu8; SECTOR_SIZE];
         let write_buf = shared_buffer(SECTOR_SIZE);
         write_buf
@@ -549,17 +509,17 @@ mod tests {
             .as_mut_slice()
             .copy_from_slice(&pattern);
         chan_clone.add_write(0, 1, write_buf.clone(), 1);
-        chan_clone.submit().unwrap();
-        wait_for_completion(chan_clone.as_mut(), 1, Duration::from_secs(5)).unwrap();
+        chan_clone.submit()?;
+        wait_for_completion(chan_clone.as_mut(), 1, Duration::from_secs(5))?;
         chan_clone.add_flush(0);
-        chan_clone.submit().unwrap();
-        wait_for_completion(chan_clone.as_mut(), 0, Duration::from_secs(5)).unwrap();
-
-        let mut chan = device.create_channel().unwrap();
+        chan_clone.submit()?;
+        wait_for_completion(chan_clone.as_mut(), 0, Duration::from_secs(5))?;
+        let mut chan = device.create_channel()?;
         let read_buf = shared_buffer(SECTOR_SIZE);
         chan.add_read(0, 1, read_buf.clone(), 2);
-        chan.submit().unwrap();
-        wait_for_completion(chan.as_mut(), 2, Duration::from_secs(5)).unwrap();
+        chan.submit()?;
+        wait_for_completion(chan.as_mut(), 2, Duration::from_secs(5))?;
         assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
+        Ok(())
     }
 }

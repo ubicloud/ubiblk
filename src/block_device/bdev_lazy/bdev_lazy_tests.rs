@@ -368,4 +368,25 @@ mod tests {
 
         assert_eq!(results, vec![(2, false)]);
     }
+
+    #[test]
+    fn test_clone() {
+        let env = setup_env(true, false, b"image_read");
+        let lazy_clone = env.lazy.clone();
+
+        assert_eq!(lazy_clone.sector_count(), env.lazy.sector_count());
+
+        let mut chan = lazy_clone.create_channel().unwrap();
+
+        let read_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
+        chan.add_read(0, 1, read_buf.clone(), 1);
+        chan.submit().unwrap();
+
+        let results = drive(&env.bgworker, &mut chan);
+        assert_eq!(results, vec![(1, true)]);
+        assert_eq!(
+            &read_buf.borrow().as_slice()[.."image_read".len()],
+            b"image_read"
+        );
+    }
 }

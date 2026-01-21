@@ -3,7 +3,7 @@ use log::info;
 use crate::{
     block_device::{shared_buffer, wait_for_completion, BlockDevice, UbiMetadata},
     vhost_backend::SECTOR_SIZE,
-    Result, UbiblkError,
+    Result,
 };
 
 pub const METADATA_WRITE_ID: usize = 0;
@@ -14,27 +14,26 @@ impl UbiMetadata {
     pub fn save_to_bdev(&self, bdev: &dyn BlockDevice) -> Result<()> {
         let mut ch = bdev.create_channel()?;
         let metadata_size = self.metadata_size();
-        let sector_count: u32 =
-            bdev.sector_count()
-                .try_into()
-                .map_err(|_| UbiblkError::InvalidParameter {
-                    description: "Device sector count exceeds u32".to_string(),
-                })?;
+        let sector_count: u32 = bdev.sector_count().try_into().map_err(|_| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: "Device sector count exceeds u32".to_string(),
+            })
+        })?;
 
         let total_size = bdev
             .sector_count()
             .checked_mul(SECTOR_SIZE as u64)
             .and_then(|size| usize::try_from(size).ok())
-            .ok_or(UbiblkError::InvalidParameter {
+            .ok_or(crate::ubiblk_error!(InvalidParameter {
                 description: "Metadata device too large".to_string(),
-            })?;
+            }))?;
 
         if metadata_size > total_size {
-            return Err(UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: format!(
                     "Metadata size {metadata_size} exceeds device capacity {total_size}"
                 ),
-            });
+            }));
         }
 
         let buf = shared_buffer(total_size);

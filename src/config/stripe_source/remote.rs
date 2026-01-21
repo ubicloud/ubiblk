@@ -16,22 +16,24 @@ pub struct RemoteStripeSourceConfig {
 
 impl RemoteStripeSourceConfig {
     pub fn load_from_file_with_kek(path: &Path, kek: &KeyEncryptionCipher) -> crate::Result<Self> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|e| crate::UbiblkError::InvalidParameter {
+        let contents = std::fs::read_to_string(path).map_err(|e| {
+            crate::ubiblk_error!(InvalidParameter {
                 description: format!(
                     "Failed to read remote config file {}: {}",
                     path.display(),
                     e
                 ),
-            })?;
+            })
+        })?;
         Self::load_from_str_with_kek(&contents, kek)
     }
 
     fn load_from_str_with_kek(yaml_str: &str, kek: &KeyEncryptionCipher) -> crate::Result<Self> {
-        let mut config: RemoteStripeSourceConfig =
-            serde_yaml::from_str(yaml_str).map_err(|e| crate::UbiblkError::InvalidParameter {
+        let mut config: RemoteStripeSourceConfig = serde_yaml::from_str(yaml_str).map_err(|e| {
+            crate::ubiblk_error!(InvalidParameter {
                 description: format!("Failed to parse remote config YAML: {}", e),
-            })?;
+            })
+        })?;
         config.decrypt_with_kek(kek)?;
         config.validate()?;
         Ok(config)
@@ -46,10 +48,10 @@ impl RemoteStripeSourceConfig {
 
     pub(crate) fn validate(&self) -> crate::Result<()> {
         if self.psk_identity.is_some() ^ self.psk_secret.is_some() {
-            return Err(crate::UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "Both psk_identity and psk_secret must be specified together."
                     .to_string(),
-            });
+            }));
         }
         Ok(())
     }

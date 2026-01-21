@@ -12,7 +12,7 @@ use std::{
 
 use crate::{
     vhost_backend::io_tracking::{IoKind, IoTracker},
-    Result, UbiblkError,
+    Result,
 };
 use log::{error, info, warn};
 use serde::Deserialize;
@@ -48,8 +48,10 @@ impl RpcServerHandle {
         // connect to the socket to unblock the listener
         UnixStream::connect(&self.path)?;
 
-        self.join_handle.join().map_err(|_| UbiblkError::RpcError {
-            description: "failed to join RPC server thread".to_string(),
+        self.join_handle.join().map_err(|_| {
+            crate::ubiblk_error!(RpcError {
+                description: "failed to join RPC server thread".to_string(),
+            })
         })?;
 
         Ok(())
@@ -64,14 +66,16 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
         if e.kind() != io::ErrorKind::NotFound {
-            return Err(UbiblkError::RpcError {
+            return Err(crate::ubiblk_error!(RpcError {
                 description: format!("failed to remove existing RPC socket {:?}: {e}", path),
-            });
+            }));
         }
     }
 
-    let listener = UnixListener::bind(&path).map_err(|e| UbiblkError::RpcError {
-        description: format!("failed to bind RPC socket {:?}: {e}", path),
+    let listener = UnixListener::bind(&path).map_err(|e| {
+        crate::ubiblk_error!(RpcError {
+            description: format!("failed to bind RPC socket {:?}: {e}", path),
+        })
     })?;
     let state = Arc::new(RpcState {
         status_reporter,
@@ -86,7 +90,7 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     let join_handle = std::thread::Builder::new()
         .name("ubiblk-rpc-listener".to_string())
         .spawn(move || run_listener(listener, state, path_clone, stop_requested_clone))
-        .map_err(|e| UbiblkError::ThreadCreation { source: e })?;
+        .map_err(|e| crate::ubiblk_error!(ThreadCreation { source: e }))?;
 
     Ok(RpcServerHandle {
         join_handle,

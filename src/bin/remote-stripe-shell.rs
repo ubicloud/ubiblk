@@ -6,7 +6,7 @@ use ubiblk::{
     block_device::metadata_flags,
     config::RemoteStripeSourceConfig,
     stripe_server::{connect_to_stripe_server, RemoteStripeProvider},
-    KeyEncryptionCipher, Result, UbiblkError,
+    KeyEncryptionCipher, Result,
 };
 
 #[derive(Parser)]
@@ -59,9 +59,9 @@ fn main() -> Result<()> {
             }
             Err(ReadlineError::Eof) => break,
             Err(err) => {
-                return Err(UbiblkError::IoError {
+                return Err(ubiblk::ubiblk_error!(IoError {
                     source: readline_err_to_io(err),
-                })
+                }))
             }
         };
 
@@ -193,14 +193,16 @@ fn readline_err_to_io(err: ReadlineError) -> io::Error {
 
 fn parse<T: std::str::FromStr>(input: Option<&str>) -> Result<T> {
     input
-        .ok_or_else(|| UbiblkError::InvalidParameter {
-            description: "MISSING_ARGUMENT".to_string(),
+        .ok_or_else(|| {
+            ubiblk::ubiblk_error!(InvalidParameter {
+                description: "MISSING_ARGUMENT".to_string(),
+            })
         })
         .and_then(|value| {
-            value
-                .parse::<T>()
-                .map_err(|_| UbiblkError::InvalidParameter {
+            value.parse::<T>().map_err(|_| {
+                ubiblk::ubiblk_error!(InvalidParameter {
                     description: format!("INVALID_NUMBER: {value}"),
                 })
+            })
         })
 }

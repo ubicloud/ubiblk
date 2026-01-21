@@ -2,7 +2,7 @@ use crate::{
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedMetadataState, UbiMetadata},
     utils::AlignedBufferPool,
     vhost_backend::SECTOR_SIZE,
-    Result, UbiblkError,
+    Result,
 };
 use log::{debug, error};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -57,13 +57,13 @@ impl MetadataFlusher {
         // Validate stripe count
         let source_stripe_count = source_sector_count.div_ceil(metadata.stripe_sector_count());
         if source_stripe_count > metadata.stripe_count() {
-            return Err(UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: format!(
                     "Source stripe count {} exceeds metadata stripe count {}",
                     source_stripe_count,
                     metadata.stripe_count()
                 ),
-            });
+            }));
         }
 
         Ok(MetadataFlusher {

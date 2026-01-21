@@ -1,7 +1,7 @@
 use clap::Parser;
 use ubiblk::cli::{load_config, CommonArgs};
 use ubiblk::vhost_backend::*;
-use ubiblk::{Error, Result};
+use ubiblk::Result;
 
 const STRIPE_SECTOR_COUNT_SHIFT_MIN: u8 = 6;
 const STRIPE_SECTOR_COUNT_SHIFT_MAX: u8 = 16;
@@ -34,11 +34,11 @@ fn main() -> Result<()> {
     if !(STRIPE_SECTOR_COUNT_SHIFT_MIN..=STRIPE_SECTOR_COUNT_SHIFT_MAX)
         .contains(&stripe_sector_count_shift)
     {
-        return Err(Error::InvalidParameter {
+        return Err(ubiblk::ubiblk_error!(InvalidParameter {
             description: format!(
                 "stripe-sector-count-shift must be between {STRIPE_SECTOR_COUNT_SHIFT_MIN} and {STRIPE_SECTOR_COUNT_SHIFT_MAX}."
             ),
-        });
+        }));
     }
 
     init_metadata(&config, stripe_sector_count_shift)

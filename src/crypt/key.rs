@@ -73,10 +73,11 @@ impl KeyEncryptionCipher {
         };
 
         let file = File::open(path)?;
-        let kek: KeyEncryptionCipher =
-            serde_yaml::from_reader(file).map_err(|e| UbiblkError::InvalidParameter {
+        let kek: KeyEncryptionCipher = serde_yaml::from_reader(file).map_err(|e| {
+            crate::ubiblk_error!(InvalidParameter {
                 description: format!("Error parsing KEK file {}: {e}", path.display()),
-            })?;
+            })
+        })?;
 
         if unlink {
             std::fs::remove_file(path)?;
@@ -193,9 +194,13 @@ fn ensure_32_bytes(data: Vec<u8>) -> Result<[u8; 32]> {
     })
 }
 
+#[track_caller]
 fn param_err(description: impl Into<String>) -> UbiblkError {
+    let location = std::panic::Location::caller();
     UbiblkError::InvalidParameter {
         description: description.into(),
+        file: location.file(),
+        line: location.line(),
     }
 }
 
@@ -317,7 +322,7 @@ mod tests {
         };
         let res = cipher.decrypt_psk_secret(vec![]);
         assert!(
-            matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description == "Key is required")
+            matches!(res, Err(UbiblkError::InvalidParameter { ref description, .. }) if description == "Key is required")
         );
     }
 
@@ -331,7 +336,7 @@ mod tests {
         };
         let res = cipher.decrypt_psk_secret(vec![]);
         assert!(
-            matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description.contains("12 bytes"))
+            matches!(res, Err(UbiblkError::InvalidParameter { ref description, .. }) if description.contains("12 bytes"))
         );
     }
 
@@ -355,7 +360,7 @@ mod tests {
         // Decryption succeeds, but length validation should fail
         let res = cipher.decrypt_xts_keys(enc.clone(), enc);
         assert!(
-            matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description.contains("exactly 32 bytes"))
+            matches!(res, Err(UbiblkError::InvalidParameter { ref description, .. }) if description.contains("exactly 32 bytes"))
         );
     }
 
@@ -501,7 +506,7 @@ mod tests {
         };
         let res = cipher.decrypt_aws_credential(enc_cred);
         assert!(
-            matches!(res, Err(UbiblkError::InvalidParameter { ref description }) if description.contains("valid UTF-8"))
+            matches!(res, Err(UbiblkError::InvalidParameter { ref description, .. }) if description.contains("valid UTF-8"))
         );
     }
 }

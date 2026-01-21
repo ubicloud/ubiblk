@@ -5,7 +5,7 @@ use crate::{
     block_device::SharedBuffer,
     crypt::XtsBlockCipher,
     utils::hash::sha256_hex,
-    KeyEncryptionCipher, Result, UbiblkError,
+    KeyEncryptionCipher, Result,
 };
 
 use super::StripeSource;
@@ -51,10 +51,11 @@ impl ArchiveStripeSource {
 
     fn fetch_metadata(store: &mut dyn ArchiveStore) -> Result<ArchiveMetadata> {
         let bytes = store.get_object("metadata.yaml")?;
-        let metadata: ArchiveMetadata =
-            serde_yaml::from_slice(&bytes).map_err(|e| UbiblkError::MetadataError {
+        let metadata: ArchiveMetadata = serde_yaml::from_slice(&bytes).map_err(|e| {
+            crate::ubiblk_error!(MetadataError {
                 description: format!("failed to parse archive metadata: {}", e),
-            })?;
+            })
+        })?;
         Ok(metadata)
     }
 
@@ -67,12 +68,12 @@ impl ArchiveStripeSource {
             }
             let (stripe_id, _sha256) = Self::parse_stripe_object_name(&object_name)?;
             if stripe_object_names.contains_key(&stripe_id) {
-                return Err(UbiblkError::ArchiveError {
+                return Err(crate::ubiblk_error!(ArchiveError {
                     description: format!(
                         "Duplicate stripe object for stripe ID {}: {}",
                         stripe_id, object_name
                     ),
-                });
+                }));
             }
             stripe_object_names.insert(stripe_id, object_name);
         }
@@ -82,15 +83,15 @@ impl ArchiveStripeSource {
     pub fn parse_stripe_object_name(object_name: &str) -> Result<(usize, String)> {
         let parts: Vec<&str> = object_name.split('_').collect();
         if parts.len() != 3 || parts[0] != "stripe" {
-            return Err(UbiblkError::ArchiveError {
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!("Invalid stripe object name: {}", object_name),
-            });
+            }));
         }
-        let stripe_id = parts[1]
-            .parse::<usize>()
-            .map_err(|_| UbiblkError::ArchiveError {
+        let stripe_id = parts[1].parse::<usize>().map_err(|_| {
+            crate::ubiblk_error!(ArchiveError {
                 description: format!("Invalid stripe object name: {}", object_name),
-            })?;
+            })
+        })?;
         let sha256 = parts[2].to_string();
         Ok((stripe_id, sha256))
     }
@@ -103,17 +104,17 @@ impl ArchiveStripeSource {
     ) -> Result<()> {
         let (stripe_id_parsed, expected_sha256) = Self::parse_stripe_object_name(&filename)?;
         if stripe_id_parsed != stripe_id {
-            return Err(UbiblkError::ArchiveError {
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!(
                     "Stripe ID {} does not match parsed ID {} from filename {}",
                     stripe_id, stripe_id_parsed, &filename
                 ),
-            });
+            }));
         }
         if self.pending_requests.contains_key(&filename) {
-            return Err(UbiblkError::ArchiveError {
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!("Stripe {} is already being fetched", stripe_id),
-            });
+            }));
         }
         self.store.start_get_object(&filename);
         self.pending_requests.insert(
@@ -139,14 +140,14 @@ impl ArchiveStripeSource {
         let mut buf_ref = buffer.borrow_mut();
         let buf = buf_ref.as_mut_slice();
         if data.len() > buf.len() {
-            return Err(UbiblkError::ArchiveError {
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!(
                     "Stripe {} data size {} exceeds buffer size {}",
                     stripe_id,
                     data.len(),
                     buf.len()
                 ),
-            });
+            }));
         }
         buf[..data.len()].copy_from_slice(data);
 
@@ -165,9 +166,9 @@ impl ArchiveStripeSource {
     fn verify_stripe_data(stripe_id: usize, data: &[u8], expected_sha256: &str) -> Result<()> {
         let computed_hash = sha256_hex(data);
         if computed_hash != expected_sha256 {
-            return Err(UbiblkError::ArchiveError {
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!("sha256 hash mismatch for stripe {}", stripe_id),
-            });
+            }));
         }
         Ok(())
     }
@@ -236,6 +237,7 @@ impl StripeSource for ArchiveStripeSource {
 mod tests {
     use std::rc::Rc;
 
+    use crate::UbiblkError;
     use crate::{
         block_device::{
             bdev_test::TestBlockDevice, metadata_flags, shared_buffer, BlockDevice, UbiMetadata,

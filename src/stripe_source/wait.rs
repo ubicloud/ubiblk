@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use crate::UbiblkError;
-
 use super::*;
 
 impl dyn StripeSource {
@@ -14,12 +12,16 @@ impl dyn StripeSource {
                     if success {
                         return Ok(());
                     } else {
-                        return Err(UbiblkError::StripeFetchFailed { stripe: stripe_id });
+                        return Err(crate::ubiblk_error!(StripeFetchFailed {
+                            stripe: stripe_id
+                        }));
                     }
                 }
             }
             if start.elapsed() >= timeout {
-                return Err(UbiblkError::StripeFetchTimeout { stripe: stripe_id });
+                return Err(crate::ubiblk_error!(StripeFetchTimeout {
+                    stripe: stripe_id
+                }));
             }
             if !self.busy() {
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -31,6 +33,7 @@ impl dyn StripeSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::UbiblkError;
 
     struct MockStripeSource {
         busy: bool,
@@ -82,7 +85,7 @@ mod tests {
         let result = source.wait_for_stripe(1, Duration::from_millis(1000));
         assert!(matches!(
             result,
-            Err(UbiblkError::StripeFetchFailed { stripe: 1 })
+            Err(UbiblkError::StripeFetchFailed { stripe: 1, .. })
         ));
     }
 
@@ -95,7 +98,7 @@ mod tests {
         let result = source.wait_for_stripe(1, Duration::from_millis(100));
         assert!(matches!(
             result,
-            Err(UbiblkError::StripeFetchTimeout { stripe: 1 })
+            Err(UbiblkError::StripeFetchTimeout { stripe: 1, .. })
         ));
     }
 
@@ -108,7 +111,7 @@ mod tests {
         let result = source.wait_for_stripe(1, Duration::from_millis(50));
         assert!(matches!(
             result,
-            Err(UbiblkError::StripeFetchTimeout { stripe: 1 })
+            Err(UbiblkError::StripeFetchTimeout { stripe: 1, .. })
         ));
     }
 }

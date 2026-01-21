@@ -7,7 +7,7 @@ use ubiblk::{
     cli::{load_config_and_kek, CommonArgs},
     config::RemoteStripeSourceConfig,
     stripe_server::{prepare_stripe_server, wrap_psk_server_stream, DynStream, PskCredentials},
-    Error, Result,
+    Result,
 };
 
 #[derive(Parser)]
@@ -40,11 +40,11 @@ fn run(args: Args) -> Result<()> {
 
     let (config, kek) = load_config_and_kek(&common)?;
     if config.has_stripe_source() {
-        return Err(Error::InvalidParameter {
+        return Err(ubiblk::ubiblk_error!(InvalidParameter {
             description:
                 "config must not specify a stripe source when used with remote-stripe-server"
                     .to_string(),
-        });
+        }));
     }
 
     let listen_config =

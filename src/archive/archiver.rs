@@ -10,7 +10,7 @@ use crate::{
     stripe_source::{ArchiveStripeSource, StripeSource},
     utils::{aligned_buffer::BUFFER_ALIGNMENT, hash::sha256_hex, AlignedBufferPool},
     vhost_backend::SECTOR_SIZE,
-    KeyEncryptionCipher, Result, UbiblkError,
+    KeyEncryptionCipher, Result,
 };
 
 struct StripeState {
@@ -129,9 +129,9 @@ impl StripeArchiver {
 
         for (stripe_id, success) in completed {
             if !success {
-                return Err(crate::UbiblkError::ArchiveError {
+                return Err(crate::ubiblk_error!(ArchiveError {
                     description: format!("I/O error while fetching stripe {}", stripe_id),
-                });
+                }));
             }
 
             debug!("Completed fetching stripe {}", stripe_id,);
@@ -144,9 +144,9 @@ impl StripeArchiver {
         let stripe_state = self
             .stripe_states
             .get(&stripe_id)
-            .ok_or(UbiblkError::ArchiveError {
+            .ok_or(crate::ubiblk_error!(ArchiveError {
                 description: format!("Stripe state for stripe {} not found", stripe_id),
-            })?;
+            }))?;
 
         let mut buffer = stripe_state.buffer.borrow_mut();
         let sector_offset = self.stripe_offset(stripe_id);
@@ -174,9 +174,9 @@ impl StripeArchiver {
             let stripe_state =
                 self.stripe_states
                     .remove(&stripe_id)
-                    .ok_or(UbiblkError::ArchiveError {
+                    .ok_or(crate::ubiblk_error!(ArchiveError {
                         description: format!("Stripe state for stripe {} not found", stripe_id),
-                    })?;
+                    }))?;
             self.buffer_pool.return_buffer(stripe_state.buffer_index);
         }
         Ok(())
@@ -213,9 +213,9 @@ impl StripeArchiver {
     fn put_metadata(&mut self) -> Result<()> {
         let archive_metadata = self.archive_metadata()?;
         let metadata_yaml = serde_yaml::to_string(&archive_metadata).map_err(|e| {
-            crate::UbiblkError::ArchiveError {
+            crate::ubiblk_error!(ArchiveError {
                 description: format!("Failed to serialize archive metadata: {}", e),
-            }
+            })
         })?;
         self.archive_store
             .put_object("metadata.yaml", metadata_yaml.as_bytes())?;

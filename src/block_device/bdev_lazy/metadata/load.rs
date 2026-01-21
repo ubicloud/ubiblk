@@ -4,7 +4,7 @@ use crate::{
         shared_buffer, wait_for_completion, BlockDevice, UbiMetadata,
     },
     vhost_backend::SECTOR_SIZE,
-    Result, UbiblkError,
+    Result,
 };
 use log::{error, info};
 
@@ -16,12 +16,11 @@ impl UbiMetadata {
         let sector_count = bdev.sector_count();
 
         let buf = shared_buffer(sector_count as usize * SECTOR_SIZE);
-        let sector_count_u32 =
-            sector_count
-                .try_into()
-                .map_err(|_| UbiblkError::InvalidParameter {
-                    description: "Metadata file too large".to_string(),
-                })?;
+        let sector_count_u32 = sector_count.try_into().map_err(|_| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: "Metadata file too large".to_string(),
+            })
+        })?;
 
         io_channel.add_read(0, sector_count_u32, buf.clone(), 0);
         io_channel.submit()?;
@@ -35,12 +34,12 @@ impl UbiMetadata {
                 "Metadata magic mismatch: expected {:?}, found {:?}",
                 UBI_MAGIC, metadata.magic
             );
-            return Err(UbiblkError::MetadataError {
+            return Err(crate::ubiblk_error!(MetadataError {
                 description: format!(
                     "Metadata magic mismatch! Expected: {:?}, Found: {:?}",
                     UBI_MAGIC, metadata.magic
                 ),
-            });
+            }));
         }
 
         let version_major = metadata.version_major_u16();
@@ -50,12 +49,12 @@ impl UbiMetadata {
                 "Metadata version mismatch: expected {}.{}, found {}.{}",
                 METADATA_VERSION_MAJOR, METADATA_VERSION_MINOR, version_major, version_minor
             );
-            return Err(UbiblkError::MetadataError {
+            return Err(crate::ubiblk_error!(MetadataError {
                 description: format!(
                     "Metadata version mismatch! Expected: {}.{}, Found: {}.{}",
                     METADATA_VERSION_MAJOR, METADATA_VERSION_MINOR, version_major, version_minor
                 ),
-            });
+            }));
         }
 
         info!("Metadata loaded successfully");

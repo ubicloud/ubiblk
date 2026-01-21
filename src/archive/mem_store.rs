@@ -39,13 +39,11 @@ impl MemStore {
     }
 
     fn try_get_object(&self, name: &str) -> Result<Vec<u8>> {
-        self.objects
-            .borrow()
-            .get(name)
-            .cloned()
-            .ok_or_else(|| crate::UbiblkError::ArchiveError {
+        self.objects.borrow().get(name).cloned().ok_or_else(|| {
+            crate::ubiblk_error!(ArchiveError {
                 description: format!("Object {} not found", name),
             })
+        })
     }
 }
 

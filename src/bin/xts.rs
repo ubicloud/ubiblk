@@ -11,7 +11,7 @@ use ubiblk::{
     block_device::{self, shared_buffer, wait_for_completion, BlockDevice},
     config::DeviceConfig,
     vhost_backend::SECTOR_SIZE,
-    Error, KeyEncryptionCipher, Result,
+    KeyEncryptionCipher, Result,
 };
 
 const MAX_CHUNK_SECTORS: u32 = 1024;
@@ -66,11 +66,11 @@ fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>) -> Result<()> {
     let total_sectors = crypt_device.sector_count();
     let start_sector = args.start_sector.unwrap_or(0);
     if start_sector >= total_sectors {
-        return Err(Error::InvalidParameter {
+        return Err(ubiblk::ubiblk_error!(InvalidParameter {
             description: format!(
                 "Start sector {start_sector} is out of range (device has {total_sectors} sectors)",
             ),
-        });
+        }));
     }
 
     let max_available = total_sectors - start_sector;
@@ -79,11 +79,11 @@ fn decode(args: &Args, key1: Vec<u8>, key2: Vec<u8>) -> Result<()> {
             if len == 0 {
                 0
             } else if len > max_available {
-                return Err(Error::InvalidParameter {
+                return Err(ubiblk::ubiblk_error!(InvalidParameter {
                     description: format!(
                         "Requested length {len} exceeds available sectors ({max_available})",
                     ),
-                });
+                }));
             } else {
                 len
             }
@@ -133,19 +133,19 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>) -> Result<()> {
 
     let input_len = input_metadata.len();
     if input_len % SECTOR_SIZE as u64 != 0 {
-        return Err(Error::InvalidParameter {
+        return Err(ubiblk::ubiblk_error!(InvalidParameter {
             description: format!("Input file size {input_len} is not a multiple of sector size",),
-        });
+        }));
     }
 
     let total_sectors = input_len / SECTOR_SIZE as u64;
     let start_sector = args.start_sector.unwrap_or(0);
     if start_sector >= total_sectors {
-        return Err(Error::InvalidParameter {
+        return Err(ubiblk::ubiblk_error!(InvalidParameter {
             description: format!(
                 "Start sector {start_sector} is out of range (input has {total_sectors} sectors)",
             ),
-        });
+        }));
     }
 
     let max_available = total_sectors - start_sector;
@@ -154,11 +154,11 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>) -> Result<()> {
             if len == 0 {
                 0
             } else if len > max_available {
-                return Err(Error::InvalidParameter {
+                return Err(ubiblk::ubiblk_error!(InvalidParameter {
                     description: format!(
                         "Requested length {len} exceeds available sectors ({max_available})",
                     ),
-                });
+                }));
             } else {
                 len
             }
@@ -217,12 +217,11 @@ fn main() -> Result<()> {
     let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;
     let config = DeviceConfig::load_from_file_with_kek(&PathBuf::from(&args.config), &kek)?;
 
-    let (key1, key2) = config
-        .encryption_key
-        .clone()
-        .ok_or_else(|| Error::InvalidParameter {
+    let (key1, key2) = config.encryption_key.clone().ok_or_else(|| {
+        ubiblk::ubiblk_error!(InvalidParameter {
             description: "Configuration does not contain encryption keys".to_string(),
-        })?;
+        })
+    })?;
 
     match args.action {
         Action::Decode => decode(&args, key1, key2),

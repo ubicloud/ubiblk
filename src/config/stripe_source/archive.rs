@@ -46,21 +46,24 @@ pub enum ArchiveStripeSourceConfig {
 
 impl ArchiveStripeSourceConfig {
     pub fn load_from_file_with_kek(path: &Path, kek: &KeyEncryptionCipher) -> crate::Result<Self> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|e| crate::UbiblkError::InvalidParameter {
+        let contents = std::fs::read_to_string(path).map_err(|e| {
+            crate::ubiblk_error!(InvalidParameter {
                 description: format!(
                     "Failed to read archive target config {}: {}",
                     path.display(),
                     e
                 ),
-            })?;
+            })
+        })?;
         Self::load_from_str_with_kek(&contents, kek)
     }
 
     fn load_from_str_with_kek(yaml_str: &str, kek: &KeyEncryptionCipher) -> crate::Result<Self> {
         let mut config: ArchiveStripeSourceConfig =
-            serde_yaml::from_str(yaml_str).map_err(|e| crate::UbiblkError::InvalidParameter {
-                description: format!("Failed to parse archive target config YAML: {}", e),
+            serde_yaml::from_str(yaml_str).map_err(|e| {
+                crate::ubiblk_error!(InvalidParameter {
+                    description: format!("Failed to parse archive target config YAML: {}", e),
+                })
             })?;
         config.decrypt_with_kek(kek)?;
         Ok(config)

@@ -15,7 +15,7 @@ impl StripeServerSession {
         while !done {
             if let Err(e) = self.handle_single_request() {
                 match e {
-                    UbiblkError::IoError { source } => {
+                    UbiblkError::IoError { source, .. } => {
                         let kind = source.kind();
                         if kind == ErrorKind::UnexpectedEof || kind == ErrorKind::ConnectionReset {
                             info!("Connection closed by peer");

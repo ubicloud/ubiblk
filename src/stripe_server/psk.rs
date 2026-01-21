@@ -25,18 +25,18 @@ impl PskCredentials {
 
     fn validate_identity(identity: &str) -> Result<()> {
         if identity.is_empty() {
-            return Err(UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "PSK identity must not be empty".to_string(),
-            });
+            }));
         }
         Ok(())
     }
 
     fn validate_secret(secret: &[u8]) -> Result<()> {
         if secret.len() < 16 {
-            return Err(UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "PSK secret must be at least 16 bytes long".to_string(),
-            });
+            }));
         }
         Ok(())
     }
@@ -52,20 +52,19 @@ pub fn parse_psk_credentials(
 ) -> Result<Option<PskCredentials>> {
     match (identity, secret_b64) {
         (Some(identity), Some(secret_b64)) => {
-            let encrypted_secret =
-                STANDARD
-                    .decode(secret_b64)
-                    .map_err(|e| UbiblkError::InvalidParameter {
-                        description: format!("Failed to decode psk_secret: {e}"),
-                    })?;
+            let encrypted_secret = STANDARD.decode(secret_b64).map_err(|e| {
+                crate::ubiblk_error!(InvalidParameter {
+                    description: format!("Failed to decode psk_secret: {e}"),
+                })
+            })?;
             let decrypted_secret = kek.decrypt_psk_secret(encrypted_secret)?;
             Ok(Some(PskCredentials::new(identity, decrypted_secret)?))
         }
         (None, None) => Ok(None),
-        _ => Err(UbiblkError::InvalidParameter {
+        _ => Err(crate::ubiblk_error!(InvalidParameter {
             description: "psk_secret and psk_identity must both be set or both be unset"
                 .to_string(),
-        }),
+        })),
     }
 }
 
@@ -142,9 +141,13 @@ fn build_psk_context() -> Result<SslContextBuilder> {
     Ok(builder)
 }
 
+#[track_caller]
 fn to_tls_error<E: ToString>(err: E) -> UbiblkError {
+    let location = std::panic::Location::caller();
     UbiblkError::TlsError {
         description: err.to_string(),
+        file: location.file(),
+        line: location.line(),
     }
 }
 
@@ -189,7 +192,7 @@ mod tests {
         )
         .unwrap_err();
 
-        if let UbiblkError::InvalidParameter { description } = err {
+        if let UbiblkError::InvalidParameter { description, .. } = err {
             assert!(description.contains("Failed to decode psk_secret"));
         } else {
             panic!("Wrong error type, got {:?}", err);

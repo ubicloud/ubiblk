@@ -9,7 +9,7 @@ use ubiblk::{
     config::ArchiveStripeSourceConfig,
     stripe_source::StripeSourceBuilder,
     vhost_backend::build_block_device,
-    Result, UbiblkError,
+    Result,
 };
 
 #[derive(Parser)]
@@ -49,12 +49,13 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     let (config, config_kek) = load_config_and_kek(&args.common)?;
-    let metadata_path = config
-        .metadata_path
-        .as_ref()
-        .ok_or(UbiblkError::InvalidParameter {
-            description: "Metadata path is missing".to_string(),
-        })?;
+    let metadata_path =
+        config
+            .metadata_path
+            .as_ref()
+            .ok_or(ubiblk::ubiblk_error!(InvalidParameter {
+                description: "Metadata path is missing".to_string(),
+            }))?;
     let metadata_dev = build_block_device(metadata_path, &config, true)?;
     let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
 

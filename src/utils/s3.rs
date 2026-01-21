@@ -2,15 +2,17 @@ use std::sync::Arc;
 
 use aws_config::{BehaviorVersion, Region};
 
-use crate::{Result, UbiblkError};
+use crate::Result;
 
 pub fn create_runtime() -> Result<Arc<tokio::runtime::Runtime>> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map(Arc::new)
-        .map_err(|err| UbiblkError::ArchiveError {
-            description: format!("Failed to create Tokio runtime for S3 operations: {err}"),
+        .map_err(|err| {
+            crate::ubiblk_error!(ArchiveError {
+                description: format!("Failed to create Tokio runtime for S3 operations: {err}"),
+            })
         })
 }
 

@@ -1,5 +1,5 @@
 use crate::utils::aligned_buffer::AlignedBuf;
-use crate::{Result, UbiblkError};
+use crate::Result;
 use std::{cell::RefCell, rc::Rc};
 
 pub type SharedBuffer = Rc<RefCell<AlignedBuf>>;

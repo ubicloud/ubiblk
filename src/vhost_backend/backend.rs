@@ -5,7 +5,7 @@ use crate::{
     config::DeviceConfig,
     utils::block::{features_to_str, VirtioBlockConfig},
     vhost_backend::{io_tracking::IoTracker, SECTOR_SIZE},
-    Result, UbiblkError,
+    Result,
 };
 
 use super::backend_thread::UbiBlkBackendThread;
@@ -38,19 +38,19 @@ impl UbiBlkBackend {
 
     fn validate_config(device_config: &DeviceConfig) -> Result<()> {
         if device_config.queue_size == 0 || !device_config.queue_size.is_power_of_two() {
-            return Err(UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: format!(
                     "queue_size {} is not a non-zero power of two",
                     device_config.queue_size
                 ),
-            });
+            }));
         }
 
         if let Some(ref cpus) = device_config.cpus {
             if cpus.len() != device_config.num_queues {
-                return Err(UbiblkError::InvalidParameter {
+                return Err(crate::ubiblk_error!(InvalidParameter {
                     description: "cpus length must equal num_queues".to_string(),
-                });
+                }));
             }
         }
 

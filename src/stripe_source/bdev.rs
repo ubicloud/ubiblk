@@ -1,5 +1,5 @@
 use crate::block_device::{BlockDevice, IoChannel, SharedBuffer};
-use crate::{Result, UbiblkError};
+use crate::Result;
 
 use super::*;
 
@@ -23,9 +23,9 @@ impl StripeSource for BlockDeviceStripeSource {
     fn request(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
         let stripe_sector_offset = stripe_id as u64 * self.stripe_sector_count;
         if stripe_sector_offset >= self.source_sector_count {
-            return Err(UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: format!("Stripe {stripe_id} beyond end of source"),
-            });
+            }));
         }
 
         let stripe_sector_count = self
@@ -65,6 +65,7 @@ mod tests {
     use super::*;
     use crate::block_device::{bdev_test::TestBlockDevice, shared_buffer};
     use crate::vhost_backend::SECTOR_SIZE;
+    use crate::UbiblkError;
 
     #[test]
     fn test_request_beyond_end_errors() {

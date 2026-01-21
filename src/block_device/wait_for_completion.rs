@@ -13,9 +13,9 @@ pub fn wait_for_completion(
                 continue;
             }
             if !success {
-                return Err(UbiblkError::IoError {
+                return Err(crate::ubiblk_error!(IoError {
                     source: std::io::Error::other(format!("Failed request ID: {request_id}")),
-                });
+                }));
             }
             return Ok(());
         }
@@ -23,16 +23,17 @@ pub fn wait_for_completion(
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
     }
-    Err(UbiblkError::IoError {
+    Err(crate::ubiblk_error!(IoError {
         source: std::io::Error::new(
             std::io::ErrorKind::TimedOut,
             format!("Timeout while waiting for request ID {request_id}"),
         ),
-    })
+    }))
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::UbiblkError;
     use crate::{block_device::bdev_test::TestBlockDevice, vhost_backend::SECTOR_SIZE};
 
     use super::*;
@@ -56,7 +57,7 @@ mod tests {
         let err = wait_for_completion(channel.as_mut(), 7, std::time::Duration::from_millis(10))
             .unwrap_err();
         match err {
-            UbiblkError::IoError { source } => {
+            UbiblkError::IoError { source, .. } => {
                 assert_eq!(source.kind(), std::io::ErrorKind::Other);
                 assert!(
                     source.to_string().contains("Failed request ID: 7"),
@@ -74,7 +75,7 @@ mod tests {
         let err = wait_for_completion(channel.as_mut(), 1, std::time::Duration::from_millis(10))
             .unwrap_err();
         match err {
-            UbiblkError::IoError { source } => {
+            UbiblkError::IoError { source, .. } => {
                 assert_eq!(source.kind(), std::io::ErrorKind::TimedOut);
                 assert!(
                     source

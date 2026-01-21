@@ -36,8 +36,10 @@ impl XtsBlockCipher {
     }
 
     fn rand_bytes(buf: &mut [u8]) -> Result<()> {
-        rand_bytes(buf).map_err(|e| crate::UbiblkError::CryptoError {
-            description: format!("Failed to generate random bytes: {}", e),
+        rand_bytes(buf).map_err(|e| {
+            crate::ubiblk_error!(CryptoError {
+                description: format!("Failed to generate random bytes: {}", e),
+            })
         })
     }
 
@@ -116,10 +118,11 @@ impl XtsBlockCipher {
 }
 
 fn ensure_32_bytes(data: Vec<u8>) -> Result<[u8; 32]> {
-    data.try_into()
-        .map_err(|_| crate::UbiblkError::InvalidParameter {
+    data.try_into().map_err(|_| {
+        crate::ubiblk_error!(InvalidParameter {
             description: "Key length must be exactly 32 bytes".to_string(),
         })
+    })
 }
 
 #[cfg(test)]

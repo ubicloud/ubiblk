@@ -1,5 +1,5 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
-use crate::{vhost_backend::SECTOR_SIZE, Result, UbiblkError};
+use crate::{vhost_backend::SECTOR_SIZE, Result};
 use io_uring::IoUring;
 use log::error;
 use nix::errno::Errno;
@@ -42,17 +42,17 @@ impl UringIoChannel {
         }
         let file = opts.open(path).map_err(|e| {
             error!("Failed to open file {path}: {e}");
-            UbiblkError::IoError { source: e }
+            crate::ubiblk_error!(IoError { source: e })
         })?;
         let io_uring_entries: u32 = queue_size.try_into().map_err(|_| {
             error!("Invalid queue size: {queue_size}");
-            UbiblkError::InvalidParameter {
+            crate::ubiblk_error!(InvalidParameter {
                 description: "Invalid io_uring queue size".to_string(),
-            }
+            })
         })?;
         let ring = IoUring::new(io_uring_entries).map_err(|e| {
             error!("Failed to create io_uring: {e}");
-            UbiblkError::IoError { source: e }
+            crate::ubiblk_error!(IoError { source: e })
         })?;
         Ok(UringIoChannel {
             file,
@@ -124,7 +124,7 @@ impl IoChannel for UringIoChannel {
         self.pending = 0;
         if let Err(e) = self.ring.submit() {
             error!("Failed to submit IO request: {e}");
-            return Err(UbiblkError::IoError { source: e });
+            return Err(crate::ubiblk_error!(IoError { source: e }));
         }
         Ok(())
     }
@@ -205,9 +205,9 @@ impl UringBlockDevice {
     ) -> Result<Box<Self>> {
         if !queue_size.is_power_of_two() {
             error!("Invalid queue size: {queue_size}");
-            return Err(UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "queue_size must be a positive power of two".to_string(),
-            });
+            }));
         }
         match std::fs::metadata(&path) {
             Ok(metadata) => {
@@ -217,9 +217,9 @@ impl UringBlockDevice {
                         "File {} size is not a multiple of sector size",
                         path.display()
                     );
-                    return Err(UbiblkError::InvalidParameter {
+                    return Err(crate::ubiblk_error!(InvalidParameter {
                         description: "File size is not a multiple of sector size".to_string(),
-                    });
+                    }));
                 }
                 let sector_count = size / SECTOR_SIZE as u64;
                 Ok(Box::new(UringBlockDevice {
@@ -233,7 +233,7 @@ impl UringBlockDevice {
             }
             Err(e) => {
                 error!("Failed to get metadata for {}: {}", path.display(), e);
-                Err(UbiblkError::IoError { source: e })
+                Err(crate::ubiblk_error!(IoError { source: e }))
             }
         }
     }
@@ -242,6 +242,7 @@ impl UringBlockDevice {
 #[cfg(test)]
 mod tests {
     use crate::block_device::{shared_buffer, wait_for_completion};
+    use crate::UbiblkError;
 
     use super::*;
 

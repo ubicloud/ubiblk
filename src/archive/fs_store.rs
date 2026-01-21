@@ -24,12 +24,12 @@ impl FileSystemStore {
             || path.file_name() == Some(std::ffi::OsStr::new(".."))
             || path.parent() != Some(&self.base_path)
         {
-            return Err(crate::UbiblkError::ArchiveError {
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!(
                     "Invalid object name resulting in path not directly under base directory: {:?}",
                     path
                 ),
-            });
+            }));
         }
         Ok(())
     }
@@ -81,9 +81,9 @@ impl ArchiveStore for FileSystemStore {
             match entry.file_name().to_str() {
                 Some(name) => objects.push(name.to_string()),
                 None => {
-                    return Err(crate::UbiblkError::ArchiveError {
+                    return Err(crate::ubiblk_error!(ArchiveError {
                         description: format!("Invalid UTF-8 in file name: {:?}", entry.file_name()),
-                    });
+                    }));
                 }
             }
         }

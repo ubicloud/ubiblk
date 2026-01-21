@@ -22,7 +22,7 @@ use crate::{
     stripe_source::StripeSourceBuilder,
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     vhost_backend::io_tracking::IoTracker,
-    Result, UbiblkError,
+    Result,
 };
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
@@ -77,8 +77,10 @@ impl BackendEnv {
     }
 
     fn determine_alignment(path: &str) -> Result<usize> {
-        let stat = statfs(Path::new(path)).map_err(|e| UbiblkError::InvalidParameter {
-            description: format!("Failed to statfs {path}: {e}"),
+        let stat = statfs(Path::new(path)).map_err(|e| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: format!("Failed to statfs {path}: {e}"),
+            })
         })?;
 
         Ok(cmp::max(BUFFER_ALIGNMENT, stat.block_size() as usize))
@@ -194,7 +196,7 @@ impl BackendEnv {
                     })
                     .map_err(|e| {
                         error!("Failed to spawn bgworker thread: {e}");
-                        UbiblkError::ThreadCreation { source: e }
+                        crate::ubiblk_error!(ThreadCreation { source: e })
                     })?,
             );
         }
@@ -237,13 +239,13 @@ impl BackendEnv {
         info!("Backend is created!");
 
         let mut daemon = VhostUserDaemon::new("ubiblk-backend".to_string(), backend.clone(), mem)
-            .map_err(|e| UbiblkError::VhostUserBackendError { reason: e })?;
+            .map_err(|e| crate::ubiblk_error!(VhostUserBackendError { reason: e }))?;
 
         info!("Daemon is created!");
 
         daemon
             .serve(&self.config.socket)
-            .map_err(|e| UbiblkError::VhostUserBackendError { reason: e })?;
+            .map_err(|e| crate::ubiblk_error!(VhostUserBackendError { reason: e }))?;
 
         info!("Finished serving socket!");
 
@@ -296,13 +298,11 @@ pub fn block_backend_loop(config: &DeviceConfig) -> Result<()> {
 }
 
 pub fn init_metadata(config: &DeviceConfig, stripe_sector_count_shift: u8) -> Result<()> {
-    let metadata_path =
-        config
-            .metadata_path
-            .as_ref()
-            .ok_or_else(|| UbiblkError::InvalidParameter {
-                description: "metadata_path is none".to_string(),
-            })?;
+    let metadata_path = config.metadata_path.as_ref().ok_or_else(|| {
+        crate::ubiblk_error!(InvalidParameter {
+            description: "metadata_path is none".to_string(),
+        })
+    })?;
 
     let base_bdev = build_block_device(&config.path, config, false)?;
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;

@@ -2,7 +2,7 @@ use std::net::{SocketAddr, TcpStream};
 
 use log::info;
 
-use crate::{config::RemoteStripeSourceConfig, UbiblkError};
+use crate::config::RemoteStripeSourceConfig;
 
 use super::*;
 
@@ -26,7 +26,7 @@ impl StripeServerClient {
         self.stream.read_exact(&mut status)?;
 
         if status[0] != STATUS_OK {
-            return Err(UbiblkError::RemoteStatus { status: status[0] });
+            return Err(crate::ubiblk_error!(RemoteStatus { status: status[0] }));
         }
 
         // Read metadata size
@@ -63,7 +63,7 @@ impl RemoteStripeProvider for StripeServerClient {
         let metadata = self
             .metadata
             .as_ref()
-            .ok_or(UbiblkError::MissingStripeMetadata)?;
+            .ok_or(crate::ubiblk_error!(MissingStripeMetadata))?;
 
         // Prepare request
         let mut request = [0u8; 9];
@@ -88,11 +88,11 @@ impl RemoteStripeProvider for StripeServerClient {
                 let expected_stripe_size = metadata.stripe_size();
 
                 if stripe_size != expected_stripe_size {
-                    return Err(UbiblkError::StripeSizeMismatch {
+                    return Err(crate::ubiblk_error!(StripeSizeMismatch {
                         stripe: stripe_idx,
                         expected: expected_stripe_size,
                         actual: stripe_size,
-                    });
+                    }));
                 }
 
                 // Read stripe data
@@ -101,14 +101,14 @@ impl RemoteStripeProvider for StripeServerClient {
 
                 Ok(stripe_data)
             }
-            STATUS_INVALID_STRIPE => Err(UbiblkError::InvalidParameter {
+            STATUS_INVALID_STRIPE => Err(crate::ubiblk_error!(InvalidParameter {
                 description: format!("Invalid stripe index: {}", stripe_idx),
-            }),
-            STATUS_UNWRITTEN => Err(UbiblkError::UnwrittenStripe { stripe: stripe_idx }),
-            STATUS_SERVER_ERROR => Err(UbiblkError::RemoteStatus {
+            })),
+            STATUS_UNWRITTEN => Err(crate::ubiblk_error!(UnwrittenStripe { stripe: stripe_idx })),
+            STATUS_SERVER_ERROR => Err(crate::ubiblk_error!(RemoteStatus {
                 status: STATUS_SERVER_ERROR,
-            }),
-            _ => Err(UbiblkError::RemoteStatus { status: status[0] }),
+            })),
+            _ => Err(crate::ubiblk_error!(RemoteStatus { status: status[0] })),
         }
     }
 
@@ -123,12 +123,11 @@ pub fn connect_to_stripe_server(conf: &RemoteStripeSourceConfig) -> Result<Strip
     } else {
         None
     };
-    let server_addr: SocketAddr =
-        conf.address
-            .parse()
-            .map_err(|err| UbiblkError::InvalidParameter {
-                description: format!("invalid server address {}: {}", conf.address, err),
-            })?;
+    let server_addr: SocketAddr = conf.address.parse().map_err(|err| {
+        crate::ubiblk_error!(InvalidParameter {
+            description: format!("invalid server address {}: {}", conf.address, err),
+        })
+    })?;
 
     let stream: DynStream = Box::new(TcpStream::connect(server_addr)?);
     let stream = if let Some(creds) = psk {
@@ -152,6 +151,7 @@ mod tests {
     };
     use crate::stripe_server::StripeServer;
     use crate::vhost_backend::SECTOR_SIZE;
+    use crate::UbiblkError;
 
     use super::*;
 
@@ -272,7 +272,7 @@ mod tests {
         });
         assert!(matches!(
             err,
-            UbiblkError::UnwrittenStripe { stripe } if stripe == 1
+            UbiblkError::UnwrittenStripe { stripe, .. } if stripe == 1
         ));
     }
 
@@ -294,7 +294,8 @@ mod tests {
         });
         assert!(matches!(
             err,
-            UbiblkError::InvalidParameter { description } if description.contains("Invalid stripe index")
+            UbiblkError::InvalidParameter { description, .. }
+                if description.contains("Invalid stripe index")
         ));
     }
 

@@ -41,9 +41,9 @@ pub trait ArchiveStore {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
-        Err(crate::UbiblkError::ArchiveError {
+        Err(crate::ubiblk_error!(ArchiveError {
             description: format!("Timeout while putting object {}", name),
-        })
+        }))
     }
 
     /// Convenience method to synchronously get an object.
@@ -62,9 +62,9 @@ pub trait ArchiveStore {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
 
-        Err(crate::UbiblkError::ArchiveError {
+        Err(crate::ubiblk_error!(ArchiveError {
             description: format!("Timeout while getting object {}", name),
-        })
+        }))
     }
 }
 

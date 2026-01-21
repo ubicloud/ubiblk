@@ -8,7 +8,7 @@ use crossbeam_channel::{Receiver, Sender};
 use log::{debug, error, warn};
 
 use super::{S3ByteStream, S3Client, S3Request, S3Result};
-use crate::{Result, UbiblkError};
+use crate::Result;
 struct WorkerContext {
     client: S3Client,
     bucket: Arc<String>,
@@ -112,8 +112,10 @@ async fn upload_object(ctx: &WorkerContext, key: &str, data: Vec<u8>) -> Result<
         .body(S3ByteStream::from(data))
         .send()
         .await
-        .map_err(|err| UbiblkError::ArchiveError {
-            description: format!("Failed to upload object to S3: {err}"),
+        .map_err(|err| {
+            crate::ubiblk_error!(ArchiveError {
+                description: format!("Failed to upload object to S3: {err}"),
+            })
         })?;
     Ok(())
 }
@@ -126,17 +128,17 @@ async fn fetch_object(ctx: &WorkerContext, key: &str) -> Result<Vec<u8>> {
         .key(key)
         .send()
         .await
-        .map_err(|err| UbiblkError::ArchiveError {
-            description: format!("Failed to fetch object from S3: {err}"),
+        .map_err(|err| {
+            crate::ubiblk_error!(ArchiveError {
+                description: format!("Failed to fetch object from S3: {err}"),
+            })
         })?;
 
-    let bytes = output
-        .body
-        .collect()
-        .await
-        .map_err(|err| UbiblkError::ArchiveError {
+    let bytes = output.body.collect().await.map_err(|err| {
+        crate::ubiblk_error!(ArchiveError {
             description: format!("Failed to read object body: {err}"),
-        })?;
+        })
+    })?;
 
     Ok(bytes.to_vec())
 }
@@ -176,8 +178,10 @@ async fn list_objects_page_async(
         .set_continuation_token(continuation_token)
         .send()
         .await
-        .map_err(|e| UbiblkError::ArchiveError {
-            description: format!("Failed to list objects in S3: {e}"),
+        .map_err(|e| {
+            crate::ubiblk_error!(ArchiveError {
+                description: format!("Failed to list objects in S3: {e}"),
+            })
         })?;
 
     let page_keys = resp

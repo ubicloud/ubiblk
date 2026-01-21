@@ -117,9 +117,9 @@ impl DeviceConfig {
     #[allow(deprecated)]
     fn validate(&self) -> crate::Result<()> {
         if self.image_path.is_some() && self.stripe_source.is_some() {
-            return Err(crate::UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "Only one stripe source may be specified".to_string(),
-            });
+            }));
         }
 
         if let Some(stripe_source) = &self.stripe_source {
@@ -127,29 +127,29 @@ impl DeviceConfig {
                 StripeSourceConfig::Remote { config } => {
                     config.validate()?;
                     if !self.copy_on_read {
-                        return Err(crate::UbiblkError::InvalidParameter {
+                        return Err(crate::ubiblk_error!(InvalidParameter {
                             description:
                                 "copy_on_read must be enabled when using remote stripe source."
                                     .to_string(),
-                        });
+                        }));
                     }
                 }
                 StripeSourceConfig::Archive { .. } if !self.copy_on_read => {
-                    return Err(crate::UbiblkError::InvalidParameter {
+                    return Err(crate::ubiblk_error!(InvalidParameter {
                         description:
                             "copy_on_read must be enabled when using archive stripe source."
                                 .to_string(),
-                    });
+                    }));
                 }
                 _ => {}
             }
         }
 
         if self.resolved_stripe_source().is_some() && self.metadata_path.is_none() {
-            return Err(crate::UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "metadata_path must be specified when using a stripe source."
                     .to_string(),
-            });
+            }));
         }
 
         Ok(())
@@ -163,10 +163,11 @@ impl DeviceConfig {
         yaml_str: &str,
         kek: &KeyEncryptionCipher,
     ) -> crate::Result<Self> {
-        let mut config: DeviceConfig =
-            serde_yaml::from_str(yaml_str).map_err(|e| crate::UbiblkError::InvalidParameter {
+        let mut config: DeviceConfig = serde_yaml::from_str(yaml_str).map_err(|e| {
+            crate::ubiblk_error!(InvalidParameter {
                 description: format!("Failed to parse device config YAML: {}", e),
-            })?;
+            })
+        })?;
         config.decrypt_with_kek(kek)?;
         config.validate()?;
         Ok(config)
@@ -177,14 +178,15 @@ impl DeviceConfig {
     }
 
     pub fn load_from_file_with_kek(path: &Path, kek: &KeyEncryptionCipher) -> crate::Result<Self> {
-        let contents =
-            std::fs::read_to_string(path).map_err(|e| crate::UbiblkError::InvalidParameter {
+        let contents = std::fs::read_to_string(path).map_err(|e| {
+            crate::ubiblk_error!(InvalidParameter {
                 description: format!(
                     "Failed to read device config file {}: {}",
                     path.display(),
                     e
                 ),
-            })?;
+            })
+        })?;
         Self::load_from_str_with_kek(&contents, kek)
     }
 

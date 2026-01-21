@@ -4,7 +4,7 @@ use crate::{
     stripe_server::connect_to_stripe_server,
     utils::s3::{build_s3_client, create_runtime},
     vhost_backend::build_source_device,
-    Result, UbiblkError,
+    Result,
 };
 
 use super::*;
@@ -52,15 +52,15 @@ impl StripeSourceBuilder {
     ) -> Result<Option<aws_sdk_s3::config::Credentials>> {
         if let Some(creds) = credentials {
             let access_key_id = String::from_utf8(creds.access_key_id.clone()).map_err(|e| {
-                UbiblkError::InvalidParameter {
+                crate::ubiblk_error!(InvalidParameter {
                     description: format!("AWS access_key_id is not valid UTF-8: {e}"),
-                }
+                })
             })?;
             let secret_access_key =
                 String::from_utf8(creds.secret_access_key.clone()).map_err(|e| {
-                    UbiblkError::InvalidParameter {
+                    crate::ubiblk_error!(InvalidParameter {
                         description: format!("AWS secret_access_key is not valid UTF-8: {e}"),
-                    }
+                    })
                 })?;
             Ok(Some(
                 aws_sdk_s3::config::Credentials::builder()

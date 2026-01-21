@@ -4,7 +4,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{debug, error};
 
 use super::ArchiveStore;
-use crate::{Result, UbiblkError};
+use crate::Result;
 use s3_store_workers::spawn_workers;
 
 type S3Client = aws_sdk_s3::Client;
@@ -87,21 +87,21 @@ impl S3Store {
 
     fn validate_key_name(name: &str) -> Result<()> {
         if name.contains(['/', '\\']) {
-            return Err(UbiblkError::ArchiveError {
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!(
                     "Invalid object name '{name}': must not contain path separators"
                 ),
-            });
+            }));
         }
         if name == "." || name == ".." {
-            return Err(UbiblkError::ArchiveError {
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!("Invalid object name '{name}': cannot be '.' or '..'"),
-            });
+            }));
         }
         if name.is_empty() {
-            return Err(UbiblkError::ArchiveError {
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: "Invalid object name: cannot be empty".to_string(),
-            });
+            }));
         }
         Ok(())
     }
@@ -149,17 +149,17 @@ impl ArchiveStore for S3Store {
             if let Err(err) = sender.send(request) {
                 self.finished_puts.push((
                     name.to_string(),
-                    Err(UbiblkError::ArchiveError {
+                    Err(crate::ubiblk_error!(ArchiveError {
                         description: format!("Failed to enqueue S3 put request: {err}"),
-                    }),
+                    })),
                 ));
             }
         } else {
             self.finished_puts.push((
                 name.to_string(),
-                Err(UbiblkError::ArchiveError {
+                Err(crate::ubiblk_error!(ArchiveError {
                     description: "S3 worker queue is unavailable".to_string(),
-                }),
+                })),
             ));
         }
     }
@@ -179,17 +179,17 @@ impl ArchiveStore for S3Store {
             if let Err(err) = sender.send(request) {
                 self.finished_gets.push((
                     name.to_string(),
-                    Err(UbiblkError::ArchiveError {
+                    Err(crate::ubiblk_error!(ArchiveError {
                         description: format!("Failed to enqueue S3 get request: {err}"),
-                    }),
+                    })),
                 ));
             }
         } else {
             self.finished_gets.push((
                 name.to_string(),
-                Err(UbiblkError::ArchiveError {
+                Err(crate::ubiblk_error!(ArchiveError {
                     description: "S3 worker queue is unavailable".to_string(),
-                }),
+                })),
             ));
         }
     }
@@ -206,20 +206,27 @@ impl ArchiveStore for S3Store {
 
     fn list_objects(&self) -> Result<Vec<String>> {
         let (response_tx, response_rx) = unbounded();
-        let sender = self.request_tx.as_ref().ok_or(UbiblkError::ArchiveError {
-            description: "S3 worker queue is unavailable".to_string(),
-        })?;
+        let sender = self
+            .request_tx
+            .as_ref()
+            .ok_or(crate::ubiblk_error!(ArchiveError {
+                description: "S3 worker queue is unavailable".to_string(),
+            }))?;
         sender
             .send(S3Request::List {
                 respond_to: response_tx,
             })
-            .map_err(|err| UbiblkError::ArchiveError {
-                description: format!("Failed to enqueue S3 list request: {err}"),
+            .map_err(|err| {
+                crate::ubiblk_error!(ArchiveError {
+                    description: format!("Failed to enqueue S3 list request: {err}"),
+                })
             })?;
         response_rx
             .recv_timeout(Duration::from_secs(60))
-            .map_err(|err| UbiblkError::ArchiveError {
-                description: format!("Failed to receive S3 list response: {err}"),
+            .map_err(|err| {
+                crate::ubiblk_error!(ArchiveError {
+                    description: format!("Failed to receive S3 list response: {err}"),
+                })
             })?
     }
 }

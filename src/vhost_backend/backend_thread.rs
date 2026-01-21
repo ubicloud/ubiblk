@@ -10,7 +10,7 @@ use crate::utils::aligned_buffer::AlignedBuf;
 #[cfg(test)]
 use crate::vhost_backend::io_tracking::IoKind;
 use crate::vhost_backend::io_tracking::IoTracker;
-use crate::{Result, UbiblkError};
+use crate::Result;
 
 use libc::EFD_NONBLOCK;
 use log::{error, info};
@@ -94,7 +94,7 @@ impl UbiBlkBackendThread {
 
         let kill_evt = EventFd::new(EFD_NONBLOCK).map_err(|e| {
             error!("failed to create kill eventfd: {e:?}");
-            UbiblkError::ThreadCreation { source: e }
+            crate::ubiblk_error!(ThreadCreation { source: e })
         })?;
 
         Ok(UbiBlkBackendThread {
@@ -161,11 +161,11 @@ impl UbiBlkBackendThread {
         let mut set = CpuSet::new();
         if let Err(e) = set.set(cpu) {
             error!("failed to configure CPU set for cpu {cpu}: {e}");
-            return Err(UbiblkError::CpuPinning { source: e });
+            return Err(crate::ubiblk_error!(CpuPinning { source: e }));
         }
         if let Err(e) = sched_setaffinity(Pid::from_raw(0), &set) {
             error!("failed to pin thread to cpu {cpu}: {e}");
-            Err(UbiblkError::CpuPinning { source: e })
+            Err(crate::ubiblk_error!(CpuPinning { source: e }))
         } else {
             let thread_id = std::thread::current().id();
             info!("pinned thread {thread_id:?} to cpu {cpu}");
@@ -196,9 +196,12 @@ impl UbiBlkBackendThread {
     }
 
     fn write_to_guest(&self, req: &RequestSlot) -> Result<()> {
-        let desc_chain = req.desc_chain.clone().ok_or(UbiblkError::ChannelError {
-            reason: "request missing descriptor chain".to_string(),
-        })?;
+        let desc_chain = req
+            .desc_chain
+            .clone()
+            .ok_or(crate::ubiblk_error!(ChannelError {
+                reason: "request missing descriptor chain".to_string(),
+            }))?;
         let mem = desc_chain.memory();
         let borrow = req.buffer.borrow();
         let buf = borrow.as_slice();
@@ -208,7 +211,7 @@ impl UbiBlkBackendThread {
             mem.read_exact_volatile_from(*data_addr, &mut buf_chunk, *data_len as usize)
                 .map_err(|e| {
                     error!("read_exact_volatile_from failed: {e:?}");
-                    UbiblkError::GuestMemoryAccess { source: e }
+                    crate::ubiblk_error!(GuestMemoryAccess { source: e })
                 })?;
             pos += *data_len as usize;
         }

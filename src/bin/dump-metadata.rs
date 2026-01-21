@@ -3,7 +3,7 @@ use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
 use ubiblk::cli::{load_config, CommonArgs};
 use ubiblk::config::{ArchiveStripeSourceConfig, DeviceConfig, StripeSourceConfig};
 use ubiblk::vhost_backend::{build_block_device, SECTOR_SIZE};
-use ubiblk::{Error, Result};
+use ubiblk::Result;
 
 #[derive(Parser)]
 #[command(
@@ -117,12 +117,11 @@ fn main() -> Result<()> {
     let source_info = format_source_info(&config)?;
 
     // metadata device
-    let metadata_path = config
-        .metadata_path
-        .as_ref()
-        .ok_or_else(|| Error::InvalidParameter {
+    let metadata_path = config.metadata_path.as_ref().ok_or_else(|| {
+        ubiblk::ubiblk_error!(InvalidParameter {
             description: "metadata_path is none".to_string(),
-        })?;
+        })
+    })?;
     let metadata_dev = build_block_device(metadata_path, &config, true)?;
     let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
 

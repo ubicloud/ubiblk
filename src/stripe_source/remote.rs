@@ -5,7 +5,7 @@ use log::{error, warn};
 use crate::{
     block_device::{metadata_flags, SharedBuffer},
     stripe_server::RemoteStripeProvider,
-    Result, UbiblkError,
+    Result,
 };
 
 use super::StripeSource;
@@ -19,27 +19,29 @@ pub struct RemoteStripeSource {
 
 impl RemoteStripeSource {
     pub fn new(client: Box<dyn RemoteStripeProvider>, stripe_sector_count: u64) -> Result<Self> {
-        let metadata = client
-            .get_metadata()
-            .ok_or_else(|| UbiblkError::MetadataError {
+        let metadata = client.get_metadata().ok_or_else(|| {
+            crate::ubiblk_error!(MetadataError {
                 description: "metadata not fetched from remote server".to_string(),
-            })?;
+            })
+        })?;
         let remote_headers = metadata.stripe_headers.clone();
 
         let remote_stripe_sector_count = metadata.stripe_sector_count();
         if remote_stripe_sector_count != stripe_sector_count {
-            return Err(UbiblkError::InvalidParameter {
+            return Err(crate::ubiblk_error!(InvalidParameter {
                 description: format!(
                     "remote stripe sector count {remote_stripe_sector_count} does not match expected {stripe_sector_count}",
                 ),
-            });
+            }));
         }
 
         let source_sector_count = metadata
             .stripe_count()
             .checked_mul(remote_stripe_sector_count)
-            .ok_or_else(|| UbiblkError::InvalidParameter {
-                description: "remote stripe count too large (overflow)".to_string(),
+            .ok_or_else(|| {
+                crate::ubiblk_error!(InvalidParameter {
+                    description: "remote stripe count too large (overflow)".to_string(),
+                })
             })?;
 
         Ok(Self {
@@ -153,9 +155,9 @@ mod tests {
     impl RemoteStripeProvider for MockRemoteStripeProvider {
         fn fetch_stripe(&mut self, stripe_id: u64) -> Result<Vec<u8>> {
             if stripe_id % 2 == 1 {
-                return Err(UbiblkError::IoError {
+                return Err(crate::ubiblk_error!(IoError {
                     source: std::io::Error::other("simulated fetch error"),
-                });
+                }));
             }
             Ok(vec![stripe_id as u8; STRIPE_SIZE])
         }

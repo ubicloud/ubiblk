@@ -1,6 +1,6 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
 use crate::vhost_backend::SECTOR_SIZE;
-use crate::{Result, UbiblkError};
+use crate::Result;
 use log::error;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -33,7 +33,7 @@ impl SyncIoChannel {
 
         let file = opts.open(path).map_err(|e| {
             error!("Failed to open file {}: {}", path.display(), e);
-            UbiblkError::IoError { source: e }
+            crate::ubiblk_error!(IoError { source: e })
         })?;
         Ok(SyncIoChannel {
             file,
@@ -140,9 +140,9 @@ impl SyncBlockDevice {
                         "File {} size is not a multiple of sector size",
                         path.display()
                     );
-                    return Err(UbiblkError::InvalidParameter {
+                    return Err(crate::ubiblk_error!(InvalidParameter {
                         description: "File size is not a multiple of sector size".to_string(),
-                    });
+                    }));
                 }
                 let sector_count = size / SECTOR_SIZE as u64;
                 Ok(Box::new(SyncBlockDevice {
@@ -155,7 +155,7 @@ impl SyncBlockDevice {
             }
             Err(e) => {
                 error!("Failed to get metadata for file {}: {}", path.display(), e);
-                Err(UbiblkError::IoError { source: e })
+                Err(crate::ubiblk_error!(IoError { source: e }))
             }
         }
     }
@@ -168,6 +168,7 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use crate::block_device::shared_buffer;
+    use crate::UbiblkError;
 
     use super::*;
 
@@ -277,9 +278,9 @@ mod tests {
     fn seek_error_paths() -> Result<()> {
         let (read_fd, write_fd) = pipe().map_err(|e| {
             error!("Failed to create pipe: {e}");
-            UbiblkError::IoError {
+            crate::ubiblk_error!(IoError {
                 source: std::io::Error::from(e),
-            }
+            })
         })?;
         let file = File::from(write_fd);
         let _r = File::from(read_fd);

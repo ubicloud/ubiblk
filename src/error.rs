@@ -5,147 +5,137 @@ macro_rules! ubiblk_error {
     ($variant:ident { $($field:ident : $value:expr),* $(,)? }) => {{
         $crate::UbiblkError::$variant {
             $($field: $value,)*
-            file: file!(),
-            line: line!(),
+            context: $crate::ErrorLocation::new(file!(), line!()),
         }
     }};
     ($variant:ident) => {{
         $crate::UbiblkError::$variant {
-            file: file!(),
-            line: line!(),
+            context: $crate::ErrorLocation::new(file!(), line!()),
         }
     }};
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorLocation {
+    file: &'static str,
+    line: u32,
+}
+
+impl ErrorLocation {
+    pub const fn new(file: &'static str, line: u32) -> Self {
+        Self { file, line }
+    }
+}
+
+impl std::fmt::Display for ErrorLocation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.file, self.line)
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum UbiblkError {
-    #[error("Thread creation error: {source} (at {file}:{line})")]
+    #[error("Thread creation error: {source} (at {context})")]
     ThreadCreation {
         #[source]
         source: std::io::Error,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("I/O channel creation error: {source} (at {file}:{line})")]
+    #[error("I/O channel creation error: {source} (at {context})")]
     IoChannelCreation {
         #[source]
         source: std::io::Error,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Guest memory access error: {source} (at {file}:{line})")]
+    #[error("Guest memory access error: {source} (at {context})")]
     GuestMemoryAccess {
         #[source]
         source: vm_memory::GuestMemoryError,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("I/O error: {source} (at {file}:{line})")]
+    #[error("I/O error: {source} (at {context})")]
     IoError {
         source: std::io::Error,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Channel error: {reason} (at {file}:{line})")]
+    #[error("Channel error: {reason} (at {context})")]
     ChannelError {
         reason: String,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Invalid parameter error: {description} (at {file}:{line})")]
+    #[error("Invalid parameter error: {description} (at {context})")]
     InvalidParameter {
         description: String,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Metadata error: {description} (at {file}:{line})")]
+    #[error("Metadata error: {description} (at {context})")]
     MetadataError {
         description: String,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Protocol error: {description} (at {file}:{line})")]
+    #[error("Protocol error: {description} (at {context})")]
     ProtocolError {
         description: String,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Missing stripe metadata on client (at {file}:{line})")]
-    MissingStripeMetadata { file: &'static str, line: u32 },
-    #[error("Stripe {stripe} is unwritten (at {file}:{line})")]
-    UnwrittenStripe {
-        stripe: u64,
-        file: &'static str,
-        line: u32,
-    },
-    #[error("Stripe {stripe} size mismatch: expected {expected} bytes, got {actual} bytes (at {file}:{line})")]
+    #[error("Missing stripe metadata on client (at {context})")]
+    MissingStripeMetadata { context: ErrorLocation },
+    #[error("Stripe {stripe} is unwritten (at {context})")]
+    UnwrittenStripe { stripe: u64, context: ErrorLocation },
+    #[error("Stripe {stripe} size mismatch: expected {expected} bytes, got {actual} bytes (at {context})")]
     StripeSizeMismatch {
         stripe: u64,
         expected: usize,
         actual: usize,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Stripe fetch failed for stripe {stripe} (at {file}:{line})")]
+    #[error("Stripe fetch failed for stripe {stripe} (at {context})")]
     StripeFetchFailed {
         stripe: usize,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Stripe fetch timeout for stripe {stripe} (at {file}:{line})")]
+    #[error("Stripe fetch timeout for stripe {stripe} (at {context})")]
     StripeFetchTimeout {
         stripe: usize,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Remote server returned error status: {status} (at {file}:{line})")]
-    RemoteStatus {
-        status: u8,
-        file: &'static str,
-        line: u32,
-    },
-    #[error("TLS setup failed: {description} (at {file}:{line})")]
+    #[error("Remote server returned error status: {status} (at {context})")]
+    RemoteStatus { status: u8, context: ErrorLocation },
+    #[error("TLS setup failed: {description} (at {context})")]
     TlsError {
         description: String,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Background worker error: {description} (at {file}:{line})")]
+    #[error("Background worker error: {description} (at {context})")]
     BackgroundWorkerError {
         description: String,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("RPC error: {description} (at {file}:{line})")]
+    #[error("RPC error: {description} (at {context})")]
     RpcError {
         description: String,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Vhost user backend error: {reason} (at {file}:{line})")]
+    #[error("Vhost user backend error: {reason} (at {context})")]
     VhostUserBackendError {
         reason: vhost_user_backend::Error,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Archive error: {description} (at {file}:{line})")]
+    #[error("Archive error: {description} (at {context})")]
     ArchiveError {
         description: String,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("Cryptography error: {description} (at {file}:{line})")]
+    #[error("Cryptography error: {description} (at {context})")]
     CryptoError {
         description: String,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
-    #[error("CPU pinning error: {source} (at {file}:{line})")]
+    #[error("CPU pinning error: {source} (at {context})")]
     CpuPinning {
         #[source]
         source: nix::Error,
-        file: &'static str,
-        line: u32,
+        context: ErrorLocation,
     },
 }
 
@@ -158,8 +148,7 @@ impl From<std::io::Error> for UbiblkError {
         let location = std::panic::Location::caller();
         UbiblkError::IoError {
             source,
-            file: location.file(),
-            line: location.line(),
+            context: ErrorLocation::new(location.file(), location.line()),
         }
     }
 }

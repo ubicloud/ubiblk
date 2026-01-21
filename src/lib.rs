@@ -16,4 +16,4 @@ pub mod utils;
 pub mod vhost_backend;
 
 pub use crypt::{CipherMethod, KeyEncryptionCipher};
-pub use error::{Error, Result, UbiblkError};
+pub use error::{Error, ErrorLocation, Result, UbiblkError};

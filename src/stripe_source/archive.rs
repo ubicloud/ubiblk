@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    archive::{ArchiveMetadata, ArchiveStore},
+    archive::{ArchiveMetadata, ArchiveStore, DEFAULT_ARCHIVE_TIMEOUT},
     block_device::SharedBuffer,
     crypt::XtsBlockCipher,
     utils::hash::sha256_hex,
@@ -50,7 +50,7 @@ impl ArchiveStripeSource {
     }
 
     fn fetch_metadata(store: &mut dyn ArchiveStore) -> Result<ArchiveMetadata> {
-        let bytes = store.get_object("metadata.yaml")?;
+        let bytes = store.get_object("metadata.yaml", DEFAULT_ARCHIVE_TIMEOUT)?;
         let metadata: ArchiveMetadata = serde_yaml::from_slice(&bytes).map_err(|e| {
             crate::ubiblk_error!(MetadataError {
                 description: format!("failed to parse archive metadata: {}", e),
@@ -236,6 +236,7 @@ impl StripeSource for ArchiveStripeSource {
 #[cfg(test)]
 mod tests {
     use std::rc::Rc;
+    use std::time::Duration;
 
     use crate::UbiblkError;
     use crate::{
@@ -426,7 +427,10 @@ mod tests {
         let kek = KeyEncryptionCipher::default();
         let mut setup = prep(4, 2, false, &[0, 1], kek.clone());
         setup.archiver.archive_all().unwrap();
-        setup.store.put_object("unexpected_item", b"data").unwrap();
+        setup
+            .store
+            .put_object("unexpected_item", b"data", Duration::from_secs(5))
+            .unwrap();
         let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);
         assert!(
             result.is_err()
@@ -447,7 +451,11 @@ mod tests {
         // Corrupt one stripe object
         setup
             .store
-            .put_object("stripe_0000000002_invalidhash", b"corrupted data")
+            .put_object(
+                "stripe_0000000002_invalidhash",
+                b"corrupted data",
+                Duration::from_secs(5),
+            )
             .unwrap();
         let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);
         assert!(result.is_ok());
@@ -483,7 +491,11 @@ mod tests {
         // Add duplicate stripe object
         setup
             .store
-            .put_object("stripe_0000000001_somehash", b"some data")
+            .put_object(
+                "stripe_0000000001_somehash",
+                b"some data",
+                Duration::from_secs(5),
+            )
             .unwrap();
 
         let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);

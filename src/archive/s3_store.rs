@@ -269,7 +269,7 @@ mod tests {
 
         let mut store = prepare_s3_store("test-bucket", Some("test-prefix"), &[put_rule]);
 
-        let result = store.put_object("test-object", b"test-data");
+        let result = store.put_object("test-object", b"test-data", Duration::from_secs(5));
         assert!(result.is_ok());
     }
 
@@ -283,7 +283,7 @@ mod tests {
 
         let mut store = prepare_s3_store("test-bucket", Some("test-prefix"), &[get_rule]);
 
-        let result = store.get_object("test-object");
+        let result = store.get_object("test-object", Duration::from_secs(5));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), b"hello");
     }
@@ -309,7 +309,7 @@ mod tests {
     fn test_invalid_object_name() {
         let mut store = prepare_s3_store("test-bucket", Some("test-prefix"), &[]);
 
-        let result = store.put_object("invalid/name", b"data");
+        let result = store.put_object("invalid/name", b"data", Duration::from_secs(5));
         assert!(result.is_err());
         assert!(result
             .err()
@@ -317,7 +317,7 @@ mod tests {
             .to_string()
             .contains("must not contain path separators"));
 
-        let result = store.get_object("..");
+        let result = store.get_object("..", Duration::from_secs(5));
         assert!(result.is_err());
         assert!(result
             .err()
@@ -325,7 +325,7 @@ mod tests {
             .to_string()
             .contains("cannot be '.' or '..'"));
 
-        let result = store.put_object("", b"data");
+        let result = store.put_object("", b"data", Duration::from_secs(5));
         assert!(result.is_err());
         assert!(result
             .err()

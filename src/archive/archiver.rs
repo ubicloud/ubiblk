@@ -4,7 +4,7 @@ use log::{debug, info};
 
 use super::ArchiveStore;
 use crate::{
-    archive::ArchiveMetadata,
+    archive::{ArchiveMetadata, DEFAULT_ARCHIVE_TIMEOUT},
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedBuffer, UbiMetadata},
     crypt::XtsBlockCipher,
     stripe_source::{ArchiveStripeSource, StripeSource},
@@ -217,8 +217,11 @@ impl StripeArchiver {
                 description: format!("Failed to serialize archive metadata: {}", e),
             })
         })?;
-        self.archive_store
-            .put_object("metadata.yaml", metadata_yaml.as_bytes())?;
+        self.archive_store.put_object(
+            "metadata.yaml",
+            metadata_yaml.as_bytes(),
+            DEFAULT_ARCHIVE_TIMEOUT,
+        )?;
         Ok(())
     }
 
@@ -238,6 +241,8 @@ impl StripeArchiver {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use crate::{
         archive::mem_store::MemStore,
         block_device::{bdev_test::TestBlockDevice, BlockDevice},
@@ -263,7 +268,7 @@ mod tests {
         let bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(bdev_size));
         let stripe_source =
             BlockDeviceStripeSource::new(bdev.clone(), STRIPE_SECTOR_COUNT).unwrap();
-        let store = Box::new(MemStore::new());
+        let store = Box::new(MemStore::default());
 
         StripeArchiver::new(
             Box::new(stripe_source),
@@ -342,7 +347,10 @@ mod tests {
     fn test_archive_metadata_not_encrypted() {
         let mut archiver = prep(4, 4, false);
         archiver.archive_all().unwrap();
-        let metadata_bytes = archiver.archive_store.get_object("metadata.yaml").unwrap();
+        let metadata_bytes = archiver
+            .archive_store
+            .get_object("metadata.yaml", Duration::from_secs(5))
+            .unwrap();
         let metadata: ArchiveMetadata = serde_yaml::from_slice(&metadata_bytes).unwrap();
         assert_eq!(metadata.stripe_sector_count, STRIPE_SECTOR_COUNT);
         assert!(metadata.encryption_key.is_none());
@@ -352,7 +360,10 @@ mod tests {
     fn test_archive_metadata_encrypted() {
         let mut archiver = prep(4, 4, true);
         archiver.archive_all().unwrap();
-        let metadata_bytes = archiver.archive_store.get_object("metadata.yaml").unwrap();
+        let metadata_bytes = archiver
+            .archive_store
+            .get_object("metadata.yaml", Duration::from_secs(5))
+            .unwrap();
         let metadata: ArchiveMetadata = serde_yaml::from_slice(&metadata_bytes).unwrap();
         assert_eq!(metadata.stripe_sector_count, STRIPE_SECTOR_COUNT);
         assert!(metadata.encryption_key.is_some());

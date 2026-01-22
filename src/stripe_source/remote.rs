@@ -142,7 +142,9 @@ mod tests {
 
     impl MockRemoteStripeProvider {
         pub fn new() -> Self {
-            let metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, TOTAL_STRIPES, 0);
+            let mut metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, TOTAL_STRIPES, 0);
+            metadata.stripe_headers[2] = metadata_flags::WRITTEN;
+            metadata.stripe_headers[0] = metadata_flags::HAS_SOURCE;
             Self { metadata }
         }
 
@@ -232,5 +234,35 @@ mod tests {
                 assert_eq!(byte, 0u8);
             }
         }
+    }
+
+    #[test]
+    fn test_has_stripe() {
+        let source = prep();
+        assert!(source.has_stripe(0));
+        assert!(!source.has_stripe(1));
+        assert!(source.has_stripe(2));
+        assert!(!source.has_stripe(3));
+        assert!(!source.has_stripe(202020)); // out of bounds
+    }
+
+    #[test]
+    fn test_sector_count() {
+        let source = prep();
+        assert_eq!(
+            source.sector_count(),
+            (STRIPE_SECTORS as u64) * (TOTAL_STRIPES as u64)
+        );
+    }
+
+    #[test]
+    fn test_busy() {
+        let mut source = prep();
+        assert!(!source.busy());
+        let buffer = shared_buffer(STRIPE_SIZE);
+        source.request(2, buffer).unwrap();
+        assert!(source.busy());
+        let _ = source.poll();
+        assert!(!source.busy());
     }
 }

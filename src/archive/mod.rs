@@ -6,7 +6,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
-const TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Abstraction over a backend that can store and retrieve archived objects.
 pub trait ArchiveStore {
@@ -27,11 +27,11 @@ pub trait ArchiveStore {
 
     /// Convenience method to synchronously put an object.
     /// NOTE: Asynchronous and synchronous operations should not be mixed.
-    fn put_object(&mut self, name: &str, data: &[u8]) -> Result<()> {
+    fn put_object(&mut self, name: &str, data: &[u8], timeout: Duration) -> Result<()> {
         self.start_put_object(name, data);
         let start_time = Instant::now();
 
-        while start_time.elapsed() < TIMEOUT {
+        while start_time.elapsed() < timeout {
             let results = self.poll_puts();
             for (obj_name, result) in results {
                 if obj_name == name {
@@ -48,11 +48,11 @@ pub trait ArchiveStore {
 
     /// Convenience method to synchronously get an object.
     /// NOTE: Asynchronous and synchronous operations should not be mixed.
-    fn get_object(&mut self, name: &str) -> Result<Vec<u8>> {
+    fn get_object(&mut self, name: &str, timeout: Duration) -> Result<Vec<u8>> {
         self.start_get_object(name);
         let start_time = Instant::now();
 
-        while start_time.elapsed() < TIMEOUT {
+        while start_time.elapsed() < timeout {
             let results = self.poll_gets();
             for (obj_name, result) in results {
                 if obj_name == name {

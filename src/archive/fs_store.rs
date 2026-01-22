@@ -94,7 +94,7 @@ impl ArchiveStore for FileSystemStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::ffi::OsStringExt;
+    use std::{os::unix::ffi::OsStringExt, time::Duration};
     use tempfile::tempdir;
 
     #[test]
@@ -103,8 +103,8 @@ mod tests {
         let mut store = FileSystemStore::new(dir.path().to_path_buf())?;
         let object_name = "test_object";
         let object_data = b"Hello, Archive!";
-        store.put_object(object_name, object_data)?;
-        let retrieved_data = store.get_object(object_name)?;
+        store.put_object(object_name, object_data, Duration::from_secs(5))?;
+        let retrieved_data = store.get_object(object_name, Duration::from_secs(5))?;
         assert_eq!(object_data.to_vec(), retrieved_data);
         Ok(())
     }
@@ -115,7 +115,7 @@ mod tests {
         let mut store = FileSystemStore::new(dir.path().to_path_buf())?;
         let object_names = vec!["obj1", "obj2", "obj3"];
         for name in &object_names {
-            store.put_object(name, b"data")?;
+            store.put_object(name, b"data", Duration::from_secs(5))?;
         }
         let listed_objects = store.list_objects()?;
         assert_eq!(listed_objects.len(), object_names.len());
@@ -157,7 +157,9 @@ mod tests {
 
         let invalid_name = "../outside_object";
 
-        let err = store.put_object(invalid_name, b"data").unwrap_err();
+        let err = store
+            .put_object(invalid_name, b"data", Duration::from_secs(5))
+            .unwrap_err();
         assert!(err.to_string().contains("Invalid object name"));
 
         Ok(())
@@ -170,7 +172,9 @@ mod tests {
 
         let object_name = "subdir/object";
 
-        let err = store.put_object(object_name, b"data").unwrap_err();
+        let err = store
+            .put_object(object_name, b"data", Duration::from_secs(5))
+            .unwrap_err();
         assert!(err.to_string().contains("Invalid object name"));
 
         Ok(())
@@ -183,7 +187,9 @@ mod tests {
 
         let object_name = ".";
 
-        let err = store.put_object(object_name, b"data").unwrap_err();
+        let err = store
+            .put_object(object_name, b"data", Duration::from_secs(5))
+            .unwrap_err();
         assert!(err.to_string().contains("Invalid object name"));
 
         Ok(())
@@ -196,7 +202,9 @@ mod tests {
 
         let object_name = "..";
 
-        let err = store.put_object(object_name, b"data").unwrap_err();
+        let err = store
+            .put_object(object_name, b"data", Duration::from_secs(5))
+            .unwrap_err();
         assert!(err.to_string().contains("Invalid object name"));
 
         Ok(())

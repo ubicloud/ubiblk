@@ -115,6 +115,8 @@ impl CryptBlockDevice {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     use crate::{block_device::bdev_test::TestBlockDevice, vhost_backend::SECTOR_SIZE};
@@ -151,11 +153,7 @@ mod tests {
             buf.borrow_mut().as_mut_slice()[0..sample_data.len()].copy_from_slice(sample_data);
             channel.add_write(i, 1, buf.clone(), 12);
             channel.submit().expect("Failed to submit write request");
-            while channel.busy() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-            let poll_results = channel.poll();
-            assert_eq!(poll_results, vec![(12, true)]);
+            wait_for_completion(channel.as_mut(), 12, Duration::from_secs(5)).unwrap();
         }
 
         assert_eq!(metrics.read().unwrap().reads, 0);
@@ -167,13 +165,8 @@ mod tests {
             buf.borrow_mut().as_mut_slice().fill(0);
             channel.add_read(i, 1, buf.clone(), read_id);
             channel.submit().expect("Failed to submit read request");
+            wait_for_completion(channel.as_mut(), read_id, Duration::from_secs(5)).unwrap();
 
-            while channel.busy() {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-
-            let poll_results = channel.poll();
-            assert_eq!(poll_results, vec![(read_id, true)]);
             assert_eq!(&buf.borrow().as_slice()[0..sample_data.len()], sample_data);
         }
 
@@ -184,11 +177,9 @@ mod tests {
         let flush_id = 56;
         channel.add_flush(flush_id);
         channel.submit().expect("Failed to submit flush request");
-        while channel.busy() {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let poll_results = channel.poll();
-        assert_eq!(poll_results, vec![(flush_id, true)]);
+        assert!(channel.busy());
+        wait_for_completion(channel.as_mut(), flush_id, Duration::from_secs(5)).unwrap();
+        assert!(!channel.busy());
 
         assert_eq!(metrics.read().unwrap().reads, 2);
         assert_eq!(metrics.read().unwrap().writes, 2);

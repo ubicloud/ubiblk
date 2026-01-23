@@ -523,4 +523,32 @@ mod tests {
         assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());
         Ok(())
     }
+
+    #[test]
+    fn test_channel_errors_if_file_is_missing() {
+        let path = PathBuf::from("/nonexistent/file/for/testing");
+        let result = UringIoChannel::new(path.to_str().unwrap(), 8, false, false, false);
+        assert!(matches!(result, Err(crate::UbiblkError::IoError { .. })));
+    }
+
+    #[test]
+    fn test_channel_errors_if_queue_size_too_large() {
+        let tmpfile = NamedTempFile::new().unwrap();
+        let path = tmpfile.path().to_owned();
+        let queue_size: usize = 1 << 35; // excessively large
+        let result = UringIoChannel::new(path.to_str().unwrap(), queue_size, false, false, false);
+        assert!(matches!(
+            result,
+            Err(crate::UbiblkError::InvalidParameter { .. })
+        ));
+    }
+
+    #[test]
+    fn test_channel_errors_if_io_uring_new_fails() {
+        let tmpfile = NamedTempFile::new().unwrap();
+        let path = tmpfile.path().to_owned();
+        let queue_size: usize = 0; // invalid size to trigger io_uring::IoUring::new failure
+        let result = UringIoChannel::new(path.to_str().unwrap(), queue_size, false, false, false);
+        assert!(matches!(result, Err(crate::UbiblkError::IoError { .. })));
+    }
 }

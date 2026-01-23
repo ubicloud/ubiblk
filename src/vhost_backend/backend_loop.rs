@@ -135,6 +135,7 @@ impl BackendEnv {
         let stripe_source_builder = Box::new(StripeSourceBuilder::new(
             config.clone(),
             shared_state.stripe_sector_count(),
+            metadata.has_fetched_all_stripes(),
         ));
 
         let config = BgWorkerConfig {
@@ -313,7 +314,7 @@ pub fn init_metadata(config: &DeviceConfig, stripe_sector_count_shift: u8) -> Re
         UbiMetadata::new(stripe_sector_count_shift, base_stripe_count, 0)
     } else {
         let stripe_source =
-            StripeSourceBuilder::new(config.clone(), stripe_sector_count).build()?;
+            StripeSourceBuilder::new(config.clone(), stripe_sector_count, false).build()?;
         UbiMetadata::new_from_stripe_source(
             stripe_sector_count_shift,
             base_stripe_count,

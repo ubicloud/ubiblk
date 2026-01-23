@@ -1,5 +1,8 @@
+use log::info;
+
 use crate::{
     archive::{ArchiveStore, FileSystemStore, S3Store},
+    block_device::NullBlockDevice,
     config::{ArchiveStripeSourceConfig, AwsCredentials, DeviceConfig, StripeSourceConfig},
     stripe_server::connect_to_stripe_server,
     utils::s3::{build_s3_client, create_runtime},
@@ -12,17 +15,32 @@ use super::*;
 pub struct StripeSourceBuilder {
     device_config: DeviceConfig,
     stripe_sector_count: u64,
+    has_fetched_all_stripes: bool,
 }
 
 impl StripeSourceBuilder {
-    pub fn new(device_config: DeviceConfig, stripe_sector_count: u64) -> Self {
+    pub fn new(
+        device_config: DeviceConfig,
+        stripe_sector_count: u64,
+        has_fetched_all_stripes: bool,
+    ) -> Self {
         Self {
             device_config,
             stripe_sector_count,
+            has_fetched_all_stripes,
         }
     }
 
     pub fn build(&self) -> Result<Box<dyn StripeSource>> {
+        // If already fetched all stripes, no need to build a real source
+        if self.has_fetched_all_stripes {
+            info!("All stripes have been fetched; using NullBlockDevice as stripe source");
+            return Ok(Box::new(BlockDeviceStripeSource::new(
+                NullBlockDevice::new(),
+                self.stripe_sector_count,
+            )?));
+        }
+
         if let Some(stripe_source) = self.device_config.resolved_stripe_source() {
             match stripe_source {
                 StripeSourceConfig::Archive { config } => {
@@ -147,7 +165,7 @@ mod tests {
     #[test]
     fn test_build_defaults_to_null_device() {
         let config = create_test_config(None, None);
-        let builder = StripeSourceBuilder::new(config, 4096);
+        let builder = StripeSourceBuilder::new(config, 4096, false);
 
         let result = builder.build();
 
@@ -167,7 +185,7 @@ mod tests {
         f.set_len(1024 * 1024).unwrap();
 
         let config = create_test_config(None, Some(file_path));
-        let builder = StripeSourceBuilder::new(config, 4096);
+        let builder = StripeSourceBuilder::new(config, 4096, false);
 
         let result = builder.build();
         assert!(
@@ -180,7 +198,7 @@ mod tests {
     fn test_build_local_block_device_fails_on_missing_file() {
         let bad_path = PathBuf::from("/path/to/nonexistent/file.img");
         let config = create_test_config(None, Some(bad_path));
-        let builder = StripeSourceBuilder::new(config, 4096);
+        let builder = StripeSourceBuilder::new(config, 4096, false);
 
         let result = builder.build();
 
@@ -197,7 +215,7 @@ mod tests {
     #[test]
     fn test_connect_to_invalid_remote_server() {
         let config = create_test_config(Some("127.0.0.1:99999".to_string()), None);
-        let builder = StripeSourceBuilder::new(config, 4096);
+        let builder = StripeSourceBuilder::new(config, 4096, false);
 
         let result = builder.build();
 
@@ -263,5 +281,21 @@ mod tests {
         };
         let store = StripeSourceBuilder::build_archive_store(&config);
         assert!(store.is_ok());
+    }
+
+    #[test]
+    fn test_skips_building_real_source_when_all_stripes_fetched() {
+        let config = create_test_config(None, None);
+        let builder = StripeSourceBuilder::new(config, 4096, true);
+
+        let result = builder.build();
+        assert!(
+            result.is_ok(),
+            "Should successfully build a NullBlockDevice source when all stripes fetched"
+        );
+
+        let stripe_source = result.unwrap();
+        // NullBlockDevice has sector_count of 0
+        assert_eq!(stripe_source.sector_count(), 0);
     }
 }

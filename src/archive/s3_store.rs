@@ -1,7 +1,7 @@
 use std::{sync::Arc, thread::JoinHandle, time::Duration};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
-use log::{debug, error};
+use log::{debug, error, info};
 
 use super::ArchiveStore;
 use crate::Result;
@@ -122,6 +122,7 @@ impl S3Store {
 
 impl Drop for S3Store {
     fn drop(&mut self) {
+        info!("Shutting down S3Store workers");
         let _ = self.request_tx.take();
         for worker in self.workers.drain(..) {
             if let Err(e) = worker.join() {

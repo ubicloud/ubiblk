@@ -5,7 +5,7 @@ use std::{
 
 use crossbeam_channel::{Receiver, Sender};
 
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 
 use super::{S3ByteStream, S3Client, S3Request, S3Result};
 use crate::Result;
@@ -47,14 +47,14 @@ pub(super) fn spawn_workers(
 
         let join_handle = thread::Builder::new()
             .name(format!("s3-worker-{}", i))
-            .spawn(move || run_worker_loop(ctx, rx, tx))?;
+            .spawn(move || run_worker_loop(ctx, rx, tx, i))?;
         workers.push(join_handle);
     }
 
     Ok(workers)
 }
 
-fn run_worker_loop(ctx: WorkerContext, rx: Receiver<S3Request>, tx: Sender<S3Result>) {
+fn run_worker_loop(ctx: WorkerContext, rx: Receiver<S3Request>, tx: Sender<S3Result>, id: usize) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -71,6 +71,8 @@ fn run_worker_loop(ctx: WorkerContext, rx: Receiver<S3Request>, tx: Sender<S3Res
             process_request(&ctx, req, &tx).await;
         });
     }
+
+    info!("S3 worker thread {} exiting", id);
 }
 
 async fn process_request(ctx: &WorkerContext, req: S3Request, tx: &Sender<S3Result>) {

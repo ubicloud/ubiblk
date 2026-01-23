@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use log::{error, warn};
+use log::{error, info, warn};
 
 use crate::{
     block_device::{metadata_flags, SharedBuffer},
@@ -50,6 +50,12 @@ impl RemoteStripeSource {
             pending_requests: VecDeque::new(),
             remote_headers,
         })
+    }
+}
+
+impl Drop for RemoteStripeSource {
+    fn drop(&mut self) {
+        info!("Terminating the RemoteStripeSource");
     }
 }
 

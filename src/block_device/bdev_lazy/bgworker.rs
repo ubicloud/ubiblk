@@ -106,6 +106,7 @@ impl BgWorker {
             }
         }
         self.metadata_flusher.update();
+        self.stripe_fetcher.disconnect_from_source_if_all_fetched();
     }
 
     pub fn run(&mut self) {

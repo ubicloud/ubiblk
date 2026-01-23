@@ -107,7 +107,7 @@ impl StripeArchiver {
     }
 
     fn start_fetch_stripe(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
-        if self.stripe_written(stripe_id) {
+        if self.stripe_written(stripe_id) || self.stripe_fetched(stripe_id) {
             debug!("Fetching stripe {} from block device", stripe_id,);
             self.io_channel.add_read(
                 self.stripe_offset(stripe_id),
@@ -199,6 +199,11 @@ impl StripeArchiver {
     fn stripe_written(&self, stripe_id: usize) -> bool {
         let header = self.metadata.stripe_headers[stripe_id];
         header & metadata_flags::WRITTEN != 0
+    }
+
+    fn stripe_fetched(&self, stripe_id: usize) -> bool {
+        let header = self.metadata.stripe_headers[stripe_id];
+        header & metadata_flags::FETCHED != 0
     }
 
     fn stripe_exists_in_source(&self, stripe_id: usize) -> bool {

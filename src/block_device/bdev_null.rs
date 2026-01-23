@@ -60,7 +60,7 @@ impl IoChannel for NullIoChannel {
     }
 
     fn busy(&self) -> bool {
-        false
+        !self.finished_requests.is_empty()
     }
 }
 
@@ -111,9 +111,12 @@ mod tests {
         chan.add_read(10, 2, buf.clone(), 1);
         chan.add_write(20, 2, buf.clone(), 2);
         chan.add_flush(3);
+        assert!(chan.busy());
         chan.submit().unwrap();
+        assert!(chan.busy());
 
         let mut results = chan.poll();
+        assert!(!chan.busy());
         results.sort_by_key(|entry| entry.0);
         assert_eq!(results, vec![(1, true), (2, true), (3, true)]);
 

@@ -1,12 +1,15 @@
 use std::collections::{HashMap, VecDeque};
 
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 
 use super::super::*;
 
 use crate::{
-    block_device::SharedMetadataState, stripe_source::StripeSource,
-    utils::aligned_buffer_pool::AlignedBufferPool, vhost_backend::SECTOR_SIZE, Result,
+    block_device::SharedMetadataState,
+    stripe_source::{BlockDeviceStripeSource, StripeSource},
+    utils::aligned_buffer_pool::AlignedBufferPool,
+    vhost_backend::SECTOR_SIZE,
+    Result,
 };
 
 const MAX_CONCURRENT_FETCHES: usize = 16;
@@ -36,6 +39,7 @@ pub struct StripeFetcher {
     allocated_buffers: HashMap<usize, (SharedBuffer, usize)>,
     finished_fetches: Vec<(usize, bool)>,
     autofetch: bool,
+    disconnected: bool,
 }
 
 impl StripeFetcher {
@@ -89,6 +93,7 @@ impl StripeFetcher {
             finished_fetches: Vec::new(),
             autofetch,
             autofetch_queue,
+            disconnected: false,
         })
     }
 
@@ -123,6 +128,26 @@ impl StripeFetcher {
         self.update_autofetch();
         self.start_fetches();
         self.poll_fetches();
+    }
+
+    pub fn disconnect_from_source_if_all_fetched(&mut self) {
+        if !self.disconnected
+            && !self.busy()
+            && self.shared_metadata_state.source_stripes()
+                == self.shared_metadata_state.fetched_stripes()
+        {
+            let prev_source_sector_count = self.stripe_source.sector_count();
+            let result =
+                BlockDeviceStripeSource::new(NullBlockDevice::new(), self.stripe_sector_count);
+            // NullBlockDevice always succeeds, so we can ignore errors here
+            if let Ok(source) = result {
+                self.stripe_source = Box::new(source);
+                if prev_source_sector_count != 0 {
+                    info!("All stripes fetched, disconnected from source device");
+                }
+                self.disconnected = true;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -486,5 +511,29 @@ mod tests {
         assert!(state.fetcher.fetch_queue.is_empty());
         assert_eq!(state.fetcher.stripe_states.get(&0), None);
         assert!(state.fetcher.shared_metadata_state.is_stripe_failed(0));
+    }
+
+    #[test]
+    fn test_disconnects_when_all_fetched() {
+        let mut state = prep(false);
+        let source_stripe_count = state.fetcher.source_stripe_count() as usize;
+
+        // Not done yet
+        state.fetcher.disconnect_from_source_if_all_fetched();
+        assert_ne!(state.fetcher.stripe_source.sector_count(), 0);
+        assert!(!state.fetcher.disconnected);
+
+        // Mark all fetched
+        for stripe_id in 0..source_stripe_count {
+            state.fetcher.shared_metadata_state.set_stripe_header(
+                stripe_id,
+                metadata_flags::FETCHED | metadata_flags::HAS_SOURCE,
+            );
+        }
+
+        // Now should disconnect
+        state.fetcher.disconnect_from_source_if_all_fetched();
+        assert_eq!(state.fetcher.stripe_source.sector_count(), 0);
+        assert!(state.fetcher.disconnected);
     }
 }

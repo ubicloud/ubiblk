@@ -313,6 +313,27 @@ mod tests {
     }
 
     #[test]
+    fn test_archive_kek_for_s3() {
+        let kek = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(vec![0xCC; 32]),
+            init_vector: Some(vec![0xDD; 12]),
+            auth_data: Some(b"s3-aad".to_vec()),
+        };
+        let config = ArchiveStripeSourceConfig::S3 {
+            bucket: "bucket".to_string(),
+            archive_kek: kek.clone(),
+            prefix: None,
+            endpoint: None,
+            region: None,
+            profile: None,
+            credentials: None,
+            connections: 16,
+        };
+        assert_eq!(config.archive_kek(), &kek);
+    }
+
+    #[test]
     fn test_load_from_file_with_kek_decrypts_credentials() {
         let kek_key = [0x10u8; 32];
         let iv = [0x20u8; 12];
@@ -345,14 +366,76 @@ mod tests {
         file.write_all(yaml.as_bytes()).unwrap();
 
         let config = ArchiveStripeSourceConfig::load_from_file_with_kek(file.path(), &kek).unwrap();
-
-        match config {
-            ArchiveStripeSourceConfig::S3 { credentials, .. } => {
-                let creds = credentials.expect("credentials should be present");
-                assert_eq!(creds.access_key_id, access_key_plain);
-                assert_eq!(creds.secret_access_key, secret_key_plain);
+        assert_eq!(
+            config,
+            ArchiveStripeSourceConfig::S3 {
+                bucket: "backups".to_string(),
+                prefix: None,
+                endpoint: None,
+                region: None,
+                profile: None,
+                credentials: Some(AwsCredentials {
+                    access_key_id: access_key_plain.to_vec(),
+                    secret_access_key: secret_key_plain.to_vec(),
+                }),
+                connections: 16,
+                archive_kek: KeyEncryptionCipher::default(),
             }
-            other => panic!("unexpected config {other:?}"),
-        }
+        );
+    }
+
+    #[test]
+    fn test_load_from_str_with_kek_defaults_and_no_credentials() {
+        let yaml = r#"
+        type: s3
+        bucket: backups
+        "#;
+
+        let config = ArchiveStripeSourceConfig::load_from_str_with_kek(
+            yaml,
+            &KeyEncryptionCipher::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            config,
+            ArchiveStripeSourceConfig::S3 {
+                bucket: "backups".to_string(),
+                prefix: None,
+                endpoint: None,
+                region: None,
+                profile: None,
+                credentials: None,
+                connections: 16,
+                archive_kek: KeyEncryptionCipher::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_load_from_file_with_kek_missing_path() {
+        let result = ArchiveStripeSourceConfig::load_from_file_with_kek(
+            Path::new("/nonexistent/archive.yaml"),
+            &KeyEncryptionCipher::default(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to read archive target config"));
+    }
+
+    #[test]
+    fn test_load_from_str_with_kek_invalid_yaml() {
+        let invalid_yaml = "xyz: [unclosed_list";
+        let result = ArchiveStripeSourceConfig::load_from_str_with_kek(
+            invalid_yaml,
+            &KeyEncryptionCipher::default(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to parse archive target config YAML"));
     }
 }

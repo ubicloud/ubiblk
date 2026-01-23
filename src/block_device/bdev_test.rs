@@ -88,7 +88,7 @@ impl IoChannel for TestIoChannel {
     }
 
     fn busy(&self) -> bool {
-        false
+        !self.finished_requests.is_empty()
     }
 }
 

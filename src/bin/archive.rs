@@ -63,7 +63,12 @@ fn main() -> Result<()> {
 
     let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
 
-    let stripe_source = StripeSourceBuilder::new(config.clone(), stripe_sector_count).build()?;
+    let stripe_source = StripeSourceBuilder::new(
+        config.clone(),
+        stripe_sector_count,
+        metadata.has_fetched_all_stripes(),
+    )
+    .build()?;
 
     let target_config =
         ArchiveStripeSourceConfig::load_from_file_with_kek(&args.target_config_path, &config_kek)?;

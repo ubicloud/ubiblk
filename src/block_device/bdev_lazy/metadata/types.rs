@@ -181,6 +181,12 @@ impl UbiMetadata {
 
         buf[SECTOR_SIZE..SECTOR_SIZE + stripe_count].copy_from_slice(&self.stripe_headers);
     }
+
+    pub fn has_fetched_all_stripes(&self) -> bool {
+        self.stripe_headers.iter().all(|&header| {
+            (header & metadata_flags::HAS_SOURCE) == 0 || (header & metadata_flags::FETCHED) != 0
+        })
+    }
 }
 
 #[cfg(test)]
@@ -275,5 +281,20 @@ mod tests {
             };
             assert_eq!(metadata.stripe_header(i), expected);
         }
+    }
+
+    #[test]
+    fn test_has_fetched_all_stripes() {
+        let mut metadata = UbiMetadata::new(0, 10, 5);
+        metadata.set_stripe_header(0, metadata_flags::FETCHED | metadata_flags::HAS_SOURCE);
+        assert!(!metadata.has_fetched_all_stripes());
+        metadata.set_stripe_header(1, metadata_flags::FETCHED | metadata_flags::HAS_SOURCE);
+        assert!(!metadata.has_fetched_all_stripes());
+        metadata.set_stripe_header(2, metadata_flags::FETCHED | metadata_flags::HAS_SOURCE);
+        assert!(!metadata.has_fetched_all_stripes());
+        metadata.set_stripe_header(3, 0); // No source
+        assert!(!metadata.has_fetched_all_stripes());
+        metadata.set_stripe_header(4, metadata_flags::FETCHED | metadata_flags::HAS_SOURCE);
+        assert!(metadata.has_fetched_all_stripes());
     }
 }

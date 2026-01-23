@@ -41,6 +41,7 @@ mod tests {
     #[test]
     fn test_wait_for_completion_success() {
         let mut channel = TestBlockDevice::new(1024).create_channel().unwrap();
+        channel.add_read(0, 1, shared_buffer(SECTOR_SIZE), 1);
         channel.add_read(0, 1, shared_buffer(SECTOR_SIZE), 4);
         channel.submit().unwrap();
         wait_for_completion(channel.as_mut(), 4, std::time::Duration::from_millis(10)).unwrap();
@@ -56,17 +57,10 @@ mod tests {
         channel.submit().unwrap();
         let err = wait_for_completion(channel.as_mut(), 7, std::time::Duration::from_millis(10))
             .unwrap_err();
-        match err {
-            UbiblkError::IoError { source, .. } => {
-                assert_eq!(source.kind(), std::io::ErrorKind::Other);
-                assert!(
-                    source.to_string().contains("Failed request ID: 7"),
-                    "unexpected error message: {}",
-                    source
-                );
-            }
-            other => panic!("unexpected error: {other}"),
-        }
+        assert!(matches!(&err, UbiblkError::IoError {
+            source,
+            ..
+        } if source.kind() == std::io::ErrorKind::Other && source.to_string().contains("Failed request ID: 7")));
     }
 
     #[test]
@@ -74,18 +68,9 @@ mod tests {
         let mut channel = TestBlockDevice::new(1024).create_channel().unwrap();
         let err = wait_for_completion(channel.as_mut(), 1, std::time::Duration::from_millis(10))
             .unwrap_err();
-        match err {
-            UbiblkError::IoError { source, .. } => {
-                assert_eq!(source.kind(), std::io::ErrorKind::TimedOut);
-                assert!(
-                    source
-                        .to_string()
-                        .contains("Timeout while waiting for request ID 1"),
-                    "unexpected error message: {}",
-                    source
-                );
-            }
-            other => panic!("unexpected error: {other}"),
-        }
+        assert!(matches!(&err, UbiblkError::IoError {
+            source,
+            ..
+        } if source.kind() == std::io::ErrorKind::TimedOut && source.to_string().contains("Timeout while waiting for request ID 1")));
     }
 }

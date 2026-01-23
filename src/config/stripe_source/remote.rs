@@ -59,6 +59,8 @@ impl RemoteStripeSourceConfig {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::StripeSourceConfig;
+
     use super::*;
     use aes_gcm::aead::{Aead, KeyInit, Payload};
     use base64::{engine::general_purpose::STANDARD, Engine};
@@ -89,17 +91,18 @@ mod tests {
         psk_secret: "MDEyMzQ1Njc4OUFCQ0RFRg=="
         "#;
 
-        let config: super::super::StripeSourceConfig = from_str(yaml).unwrap();
-        match config {
-            super::super::StripeSourceConfig::Remote { config } => {
-                assert_eq!(config.psk_identity.as_deref(), Some("client1"));
-                assert_eq!(
-                    config.psk_secret.as_deref(),
-                    Some(b"0123456789ABCDEF".as_ref())
-                );
+        let config: StripeSourceConfig = from_str(yaml).unwrap();
+
+        assert_eq!(
+            config,
+            StripeSourceConfig::Remote {
+                config: RemoteStripeSourceConfig {
+                    address: "1.2.3.4:4567".to_string(),
+                    psk_identity: Some("client1".to_string()),
+                    psk_secret: Some(b"0123456789ABCDEF".to_vec()),
+                },
             }
-            other => panic!("Unexpected stripe source: {other:?}"),
-        }
+        );
     }
 
     #[test]
@@ -113,6 +116,10 @@ mod tests {
             &KeyEncryptionCipher::default(),
         );
         assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Both psk_identity and psk_secret must be specified together."));
 
         let yaml_identity_only = r#"
         address: "1.2.3.4:4567"
@@ -123,6 +130,24 @@ mod tests {
             &KeyEncryptionCipher::default(),
         );
         assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Both psk_identity and psk_secret must be specified together."));
+    }
+
+    #[test]
+    fn test_remote_without_psk_pair_is_valid() {
+        let yaml = r#"
+        address: "1.2.3.4:4567"
+        "#;
+        let config =
+            RemoteStripeSourceConfig::load_from_str_with_kek(yaml, &KeyEncryptionCipher::default())
+                .unwrap();
+
+        assert_eq!(config.address, "1.2.3.4:4567");
+        assert!(config.psk_identity.is_none());
+        assert!(config.psk_secret.is_none());
     }
 
     #[test]
@@ -157,5 +182,30 @@ mod tests {
         assert_eq!(config.psk_secret.as_deref(), Some(secret_plain.as_ref()));
     }
 
-    // Decryption behavior is covered by crypt module tests; here we focus on parsing/validation.
+    #[test]
+    fn test_load_from_file_with_kek_missing_path() {
+        let result = RemoteStripeSourceConfig::load_from_file_with_kek(
+            Path::new("/nonexistent/remote.yaml"),
+            &KeyEncryptionCipher::default(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to read remote config file"));
+    }
+
+    #[test]
+    fn test_load_from_str_with_kek_invalid_yaml() {
+        let invalid_yaml = "xyz: [unclosed_list";
+        let result = RemoteStripeSourceConfig::load_from_str_with_kek(
+            invalid_yaml,
+            &KeyEncryptionCipher::default(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to parse remote config YAML"));
+    }
 }

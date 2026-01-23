@@ -559,4 +559,27 @@ mod tests {
             .to_string()
             .contains("metadata_path must be specified when using a stripe source"));
     }
+
+    #[test]
+    fn test_load_from_str_with_kek_invalid_yaml() {
+        let invalid_yaml = "xyz: [unclosed_list";
+        let result =
+            DeviceConfig::load_from_str_with_kek(invalid_yaml, &KeyEncryptionCipher::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to parse device config YAML"));
+    }
+
+    #[test]
+    fn test_load_from_file_missing_file() {
+        let missing_path = Path::new("/non/existent/config.yaml");
+        let result = DeviceConfig::load_from_file(missing_path);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to read device config file"));
+    }
 }

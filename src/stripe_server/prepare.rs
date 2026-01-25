@@ -8,11 +8,21 @@ use crate::{
     Result,
 };
 
+fn error_if_incomplete_metadata(metadata: &UbiMetadata) -> Result<()> {
+    if !metadata.has_fetched_all_stripes() {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "Not all source stripes have been fetched.".to_string()
+        }));
+    }
+    Ok(())
+}
+
 pub fn prepare_stripe_server(config: &DeviceConfig) -> Result<Arc<StripeServer>> {
     let stripe_device = build_block_device(&config.path, config, false)?;
     let metadata: Arc<UbiMetadata> = if let Some(metadata_path) = config.metadata_path.as_deref() {
         let metadata_device = build_block_device(metadata_path, config, false)?;
         let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
+        error_if_incomplete_metadata(&metadata)?;
         Arc::from(metadata)
     } else {
         let stripe_sector_count_shift = DEFAULT_STRIPE_SECTOR_COUNT_SHIFT;
@@ -20,7 +30,7 @@ pub fn prepare_stripe_server(config: &DeviceConfig) -> Result<Arc<StripeServer>>
         let stripe_count = stripe_device.stripe_count(stripe_sector_count);
         let mut metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count);
         for stripe_header in metadata.stripe_headers.iter_mut() {
-            *stripe_header |= metadata_flags::WRITTEN;
+            *stripe_header |= metadata_flags::WRITTEN | metadata_flags::FETCHED;
         }
         Arc::from(metadata)
     };
@@ -108,5 +118,19 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn test_error_if_incomplete_metadata() {
+        let mut metadata = UbiMetadata::new(DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, 16, 4);
+
+        for i in 0..4 {
+            let result = error_if_incomplete_metadata(&metadata);
+            assert!(result.is_err());
+            metadata.stripe_headers[i] |= metadata_flags::FETCHED;
+        }
+
+        let result = error_if_incomplete_metadata(&metadata);
+        assert!(result.is_ok());
     }
 }

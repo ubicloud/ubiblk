@@ -104,7 +104,11 @@ impl RemoteStripeProvider for StripeServerClient {
             STATUS_INVALID_STRIPE => Err(crate::ubiblk_error!(InvalidParameter {
                 description: format!("Invalid stripe index: {}", stripe_idx),
             })),
-            STATUS_UNWRITTEN => Err(crate::ubiblk_error!(UnwrittenStripe { stripe: stripe_idx })),
+            STATUS_NO_DATA | STATUS_NOT_FETCHED => {
+                Err(crate::ubiblk_error!(StripeUnavailableData {
+                    stripe: stripe_idx
+                }))
+            }
             STATUS_SERVER_ERROR => Err(crate::ubiblk_error!(RemoteStatus {
                 status: STATUS_SERVER_ERROR,
             })),
@@ -197,16 +201,26 @@ mod tests {
         receiver.recv().expect("client thread should send a result")
     }
 
-    fn written_unwritten_metadata(stripe_count: usize) -> Arc<UbiMetadata> {
-        let mut metadata = UbiMetadata::new(0, stripe_count, stripe_count);
-        metadata.stripe_headers[0] |= metadata_flags::WRITTEN;
+    fn test_metadata(
+        device_stripe_count: usize,
+        image_stripe_count: usize,
+        fetched_stripes: &[usize],
+        written_stripes: &[usize],
+    ) -> Arc<UbiMetadata> {
+        let mut metadata = UbiMetadata::new(0, device_stripe_count, image_stripe_count);
+        for &idx in fetched_stripes {
+            metadata.stripe_headers[idx] |= metadata_flags::FETCHED;
+        }
+        for &idx in written_stripes {
+            metadata.stripe_headers[idx] |= metadata_flags::WRITTEN;
+        }
         Arc::from(metadata)
     }
 
     #[test]
-    fn fetches_metadata_with_written_and_unwritten_bits() {
+    fn fetches_metadata_with_written_and_no_data_bits() {
         let stripe_count = 2;
-        let metadata = written_unwritten_metadata(stripe_count);
+        let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
             (stripe_count as u64) * SECTOR_SIZE as u64,
         ));
@@ -233,7 +247,7 @@ mod tests {
     #[test]
     fn fetches_written_stripe() {
         let stripe_count = 2;
-        let metadata = written_unwritten_metadata(stripe_count);
+        let metadata = test_metadata(stripe_count, 0, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
             (stripe_count as u64) * SECTOR_SIZE as u64,
         ));
@@ -255,11 +269,49 @@ mod tests {
     }
 
     #[test]
-    fn fetching_unwritten_stripe_returns_error() {
+    fn fetches_fetched_stripe() {
         let stripe_count = 2;
-        let metadata = written_unwritten_metadata(stripe_count);
+        let metadata = test_metadata(stripe_count, stripe_count, &[1], &[]);
         let stripe_device = Arc::new(TestBlockDevice::new(
             (stripe_count as u64) * SECTOR_SIZE as u64,
+        ));
+
+        let pattern = (0..SECTOR_SIZE)
+            .map(|idx| (idx % (u8::MAX as usize + 1)) as u8)
+            .collect::<Vec<_>>();
+        stripe_device.write(SECTOR_SIZE, &pattern, pattern.len());
+
+        let stripe_data = run_client_with_server(metadata, stripe_device, None, |client| {
+            client
+                .fetch_metadata()
+                .expect("metadata fetch should succeed");
+            client
+                .fetch_stripe(1)
+                .expect("fetched stripe should be readable")
+        });
+        assert_eq!(stripe_data, pattern);
+    }
+
+    #[test]
+    fn fetching_no_data_stripe_returns_error() {
+        let device_stripe_count: usize = 6;
+        let image_device_stripe_count: usize = 2;
+        let metadata = test_metadata(device_stripe_count, image_device_stripe_count, &[], &[0]);
+        let stripe_device = Arc::new(TestBlockDevice::new(
+            (device_stripe_count as u64) * SECTOR_SIZE as u64,
+        ));
+
+        let err = run_client_with_server(metadata.clone(), stripe_device.clone(), None, |client| {
+            client
+                .fetch_metadata()
+                .expect("metadata fetch should succeed");
+            client
+                .fetch_stripe(1)
+                .expect_err("unfetched stripe should return an error")
+        });
+        assert!(matches!(
+            err,
+            UbiblkError::StripeUnavailableData { stripe, .. } if stripe == 1
         ));
 
         let err = run_client_with_server(metadata, stripe_device, None, |client| {
@@ -267,19 +319,19 @@ mod tests {
                 .fetch_metadata()
                 .expect("metadata fetch should succeed");
             client
-                .fetch_stripe(1)
+                .fetch_stripe(4)
                 .expect_err("unwritten stripe should return an error")
         });
         assert!(matches!(
             err,
-            UbiblkError::UnwrittenStripe { stripe, .. } if stripe == 1
+            UbiblkError::StripeUnavailableData { stripe, .. } if stripe == 4
         ));
     }
 
     #[test]
     fn fetching_out_of_bounds_stripe_returns_error() {
         let stripe_count = 2;
-        let metadata = written_unwritten_metadata(stripe_count);
+        let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
             (stripe_count as u64) * SECTOR_SIZE as u64,
         ));
@@ -302,7 +354,7 @@ mod tests {
     #[test]
     fn sending_invalid_command_returns_error_status() {
         let stripe_count = 1;
-        let metadata = written_unwritten_metadata(stripe_count);
+        let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
             (stripe_count as u64) * SECTOR_SIZE as u64,
         ));
@@ -319,7 +371,7 @@ mod tests {
     #[test]
     fn fetches_metadata_over_psk() {
         let stripe_count = 1;
-        let metadata = written_unwritten_metadata(stripe_count);
+        let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
             (stripe_count as u64) * SECTOR_SIZE as u64,
         ));

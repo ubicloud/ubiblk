@@ -80,8 +80,8 @@ pub enum UbiblkError {
     },
     #[error("Missing stripe metadata on client (at {context})")]
     MissingStripeMetadata { context: ErrorLocation },
-    #[error("Stripe {stripe} is unwritten (at {context})")]
-    UnwrittenStripe { stripe: u64, context: ErrorLocation },
+    #[error("Stripe {stripe} is unavailable (at {context})")]
+    StripeUnavailableData { stripe: u64, context: ErrorLocation },
     #[error("Stripe {stripe} size mismatch: expected {expected} bytes, got {actual} bytes (at {context})")]
     StripeSizeMismatch {
         stripe: u64,
@@ -269,11 +269,11 @@ mod tests {
     }
 
     #[test]
-    fn test_unwritten_stripe_format() {
-        let error = crate::ubiblk_error!(UnwrittenStripe { stripe: 42 });
+    fn test_stripe_unavailable_data_format() {
+        let error = crate::ubiblk_error!(StripeUnavailableData { stripe: 42 });
         let rendered = format!("{error}");
         assert!(
-            rendered.starts_with("Stripe 42 is unwritten (at "),
+            rendered.starts_with("Stripe 42 is unavailable (at "),
             "unexpected error display: {rendered}"
         );
         assert!(

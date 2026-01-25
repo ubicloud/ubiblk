@@ -81,6 +81,21 @@ impl StripeServerSession {
         Ok(())
     }
 
+    fn stripe_not_fetched(&self, stripe_id: u64) -> bool {
+        let stripe_header = self.metadata.stripe_headers[stripe_id as usize];
+        let has_source = stripe_header & metadata_flags::HAS_SOURCE != 0;
+        let fetched = stripe_header & metadata_flags::FETCHED != 0;
+        has_source && !fetched
+    }
+
+    fn stripe_has_data(&self, stripe_id: u64) -> bool {
+        let stripe_header = self.metadata.stripe_headers[stripe_id as usize];
+        let written = stripe_header & metadata_flags::WRITTEN != 0;
+        let has_source = stripe_header & metadata_flags::HAS_SOURCE != 0;
+        let fetched = stripe_header & metadata_flags::FETCHED != 0;
+        written || (has_source && fetched)
+    }
+
     fn handle_read_stripe_request(&mut self, stripe_id: u64) -> Result<()> {
         info!("Handling read stripe request for stripe_id: {}", stripe_id);
         if stripe_id >= self.metadata.stripe_count() {
@@ -89,10 +104,19 @@ impl StripeServerSession {
             return Ok(());
         }
 
-        let stripe_header = self.metadata.stripe_headers[stripe_id as usize];
-        if stripe_header & metadata_flags::WRITTEN == 0 {
-            info!("Stripe {} is not written, notifying client", stripe_id);
-            self.stream.write_all(&[STATUS_UNWRITTEN])?;
+        if self.stripe_not_fetched(stripe_id) {
+            info!(
+                "Stripe {} has not been fetched from source, notifying client",
+                stripe_id
+            );
+            self.stream.write_all(&[STATUS_NOT_FETCHED])?;
+            self.stream.flush()?;
+            return Ok(());
+        }
+
+        if !self.stripe_has_data(stripe_id) {
+            info!("Stripe {} cannot be served, notifying client", stripe_id);
+            self.stream.write_all(&[STATUS_NO_DATA])?;
             self.stream.flush()?;
             return Ok(());
         }
@@ -218,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_read_stripe_unwritten() {
+    fn test_handle_read_stripe_no_data() {
         let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, 1, 0));
         let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
         let mut input = vec![READ_STRIPE_CMD];
@@ -227,7 +251,7 @@ mod tests {
 
         session.handle_single_request().unwrap();
 
-        assert_eq!(*writes.lock().unwrap(), vec![STATUS_UNWRITTEN]);
+        assert_eq!(*writes.lock().unwrap(), vec![STATUS_NO_DATA]);
     }
 
     #[test]

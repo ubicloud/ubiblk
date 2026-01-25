@@ -105,9 +105,10 @@ The client must request metadata before issuing stripe reads.
 | Status byte | Meaning |
 | --- | --- |
 | `0x01` (`STATUS_INVALID_STRIPE`) | Stripe index is out of range. |
-| `0x02` (`STATUS_UNWRITTEN`) | Stripe exists but is marked unwritten. |
+| `0x02` (`STATUS_NO_DATA`) | Stripe exists but does not contain data. |
+| `0x03` (`STATUS_NOT_FETCHED`) | Stripe also exists in source, but has not been fetched yet. |
 | `0xFE` (`STATUS_INVALID_COMMAND`) | Unknown opcode. |
 | `0xFF` (`STATUS_SERVER_ERROR`) | Internal server error. |
 
-The server determines whether a stripe is written by inspecting the metadata
-header bits. Unwritten stripes return `STATUS_UNWRITTEN` and no payload.
+The server determines whether a stripe has data by inspecting the metadata
+header bits. Stripes that do not contain data return `STATUS_NO_DATA` and no payload. Stripes that exist in the source but have not been fetched yet return `STATUS_NOT_FETCHED` and no payload.

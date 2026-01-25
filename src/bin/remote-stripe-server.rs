@@ -39,13 +39,6 @@ fn run(args: Args) -> Result<()> {
     } = args;
 
     let (config, kek) = load_config_and_kek(&common)?;
-    if config.has_stripe_source() {
-        return Err(ubiblk::ubiblk_error!(InvalidParameter {
-            description:
-                "config must not specify a stripe source when used with remote-stripe-server"
-                    .to_string(),
-        }));
-    }
 
     let listen_config =
         RemoteStripeSourceConfig::load_from_file_with_kek(&listen_config_path, &kek)?;

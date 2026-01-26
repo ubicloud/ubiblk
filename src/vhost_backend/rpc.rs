@@ -1,7 +1,10 @@
 use std::{
     fs,
     io::{self, BufRead, BufReader, Write},
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::{
+        fs::PermissionsExt,
+        net::{UnixListener, UnixStream},
+    },
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -11,6 +14,7 @@ use std::{
 };
 
 use crate::{
+    utils::umask_guard::UmaskGuard,
     vhost_backend::io_tracking::{IoKind, IoTracker},
     Result,
 };
@@ -72,11 +76,18 @@ pub fn start_rpc_server<P: AsRef<Path>>(
         }
     }
 
-    let listener = UnixListener::bind(&path).map_err(|e| {
-        crate::ubiblk_error!(RpcError {
-            description: format!("failed to bind RPC socket {:?}: {e}", path),
-        })
-    })?;
+    let listener = {
+        let _um = UmaskGuard::set(0o117); // ensures 0660 max on creation
+        UnixListener::bind(&path).map_err(|e| {
+            crate::ubiblk_error!(RpcError {
+                description: format!("failed to bind RPC socket {:?}: {e}", path),
+            })
+        })?
+    };
+
+    // Allow only owner and group to read/write the socket
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o660))?;
+
     let state = Arc::new(RpcState {
         status_reporter,
         io_trackers,

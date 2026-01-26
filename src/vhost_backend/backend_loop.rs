@@ -1,5 +1,6 @@
 use std::{
-    cmp,
+    cmp, fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{
         mpsc::{channel, Receiver, Sender},
@@ -9,7 +10,8 @@ use std::{
 
 use log::{error, info};
 use nix::sys::statfs::statfs;
-use vhost_user_backend::VhostUserDaemon;
+use vhost::vhost_user::{Error as VhostUserError, Listener};
+use vhost_user_backend::{Error as VhostUserBackendError, VhostUserDaemon};
 use vm_memory::GuestMemoryAtomic;
 
 use super::{backend::UbiBlkBackend, rpc};
@@ -20,7 +22,7 @@ use crate::{
     },
     config::{DeviceConfig, IoEngine},
     stripe_source::StripeSourceBuilder,
-    utils::aligned_buffer::BUFFER_ALIGNMENT,
+    utils::{aligned_buffer::BUFFER_ALIGNMENT, umask_guard::UmaskGuard},
     vhost_backend::io_tracking::IoTracker,
     Result,
 };
@@ -247,14 +249,33 @@ impl BackendEnv {
 
         info!("Backend is created!");
 
-        let mut daemon = VhostUserDaemon::new("ubiblk-backend".to_string(), backend.clone(), mem)
-            .map_err(|e| crate::ubiblk_error!(VhostUserBackendError { reason: e }))?;
+        let mut daemon = VhostUserDaemon::new("ubiblk-backend".to_string(), backend.clone(), mem)?;
 
         info!("Daemon is created!");
 
-        daemon
-            .serve(&self.config.socket)
-            .map_err(|e| crate::ubiblk_error!(VhostUserBackendError { reason: e }))?;
+        let listener = {
+            let _um = UmaskGuard::set(0o117); // ensures 0660 max on creation
+            Listener::new(&self.config.socket, true)?
+        };
+
+        // Allow only owner and group to read/write the socket
+        fs::set_permissions(&self.config.socket, fs::Permissions::from_mode(0o660))?;
+
+        daemon.start(listener)?;
+        let result = daemon.wait();
+
+        for handler in daemon.get_epoll_handlers() {
+            handler.send_exit_event();
+        }
+
+        match result {
+            Ok(()) => {}
+            Err(VhostUserBackendError::HandleRequest(VhostUserError::Disconnected))
+            | Err(VhostUserBackendError::HandleRequest(VhostUserError::PartialMessage)) => {}
+            Err(e) => {
+                return Err(e.into());
+            }
+        }
 
         info!("Finished serving socket!");
         Self::shutdown_worker_threads(&backend);

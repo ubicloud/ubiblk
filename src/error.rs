@@ -116,6 +116,11 @@ pub enum UbiblkError {
         description: String,
         context: ErrorLocation,
     },
+    #[error("Vhost user error: {reason} (at {context})")]
+    VhostUserError {
+        reason: vhost::vhost_user::Error,
+        context: ErrorLocation,
+    },
     #[error("Vhost user backend error: {reason} (at {context})")]
     VhostUserBackendError {
         reason: vhost_user_backend::Error,
@@ -153,22 +158,58 @@ impl From<std::io::Error> for UbiblkError {
     }
 }
 
+impl From<vhost_user_backend::Error> for UbiblkError {
+    #[track_caller]
+    fn from(reason: vhost_user_backend::Error) -> Self {
+        let location = std::panic::Location::caller();
+        UbiblkError::VhostUserBackendError {
+            reason,
+            context: ErrorLocation::new(location.file(), location.line()),
+        }
+    }
+}
+
+impl From<vhost::vhost_user::Error> for UbiblkError {
+    #[track_caller]
+    fn from(reason: vhost::vhost_user::Error) -> Self {
+        let location = std::panic::Location::caller();
+        UbiblkError::VhostUserError {
+            reason,
+            context: ErrorLocation::new(location.file(), location.line()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn assert_starts_with(haystack: &str, needle: &str) {
+        assert!(
+            haystack.starts_with(needle),
+            "expected '{}' to start with '{}'",
+            haystack,
+            needle
+        );
+    }
+
+    fn assert_contains(haystack: &str, needle: &str) {
+        assert!(
+            haystack.contains(needle),
+            "expected '{}' to contain '{}'",
+            haystack,
+            needle
+        );
+    }
+
     #[test]
     fn test_invalid_parameter_format() {
         let error = crate::ubiblk_error!(InvalidParameter {
             description: "Test error".to_string(),
         });
         let rendered = format!("{error}");
-        assert!(
-            rendered.starts_with("Invalid parameter error: Test error (at "),
-            "unexpected error display: {rendered}"
-        );
-        assert!(
-            rendered.contains("src/error.rs:"),
-            "missing file location: {rendered}"
-        );
+        assert_starts_with(&rendered, "Invalid parameter error: Test error (at ");
+        assert_contains(&rendered, "src/error.rs:");
     }
 
     #[test]
@@ -176,14 +217,8 @@ mod tests {
         let io_error = std::io::Error::other("Test IO error");
         let error = crate::ubiblk_error!(IoError { source: io_error });
         let rendered = format!("{error}");
-        assert!(
-            rendered.starts_with("I/O error: Test IO error (at "),
-            "unexpected error display: {rendered}"
-        );
-        assert!(
-            rendered.contains("src/error.rs:"),
-            "missing file location: {rendered}"
-        );
+        assert_starts_with(&rendered, "I/O error: Test IO error (at ");
+        assert_contains(&rendered, "src/error.rs:");
     }
 
     #[test]
@@ -193,16 +228,11 @@ mod tests {
             source: guest_memory_error,
         });
         let rendered = format!("{error}");
-        assert!(
-            rendered.starts_with(
-                "Guest memory access error: Guest memory error: invalid backend address (at "
-            ),
-            "unexpected error display: {rendered}"
+        assert_starts_with(
+            &rendered,
+            "Guest memory access error: Guest memory error: invalid backend address (at ",
         );
-        assert!(
-            rendered.contains("src/error.rs:"),
-            "missing file location: {rendered}"
-        );
+        assert_contains(&rendered, "src/error.rs:");
     }
 
     #[test]
@@ -211,14 +241,8 @@ mod tests {
             source: std::io::Error::other("spawn error"),
         });
         let rendered = format!("{error}");
-        assert!(
-            rendered.starts_with("Thread creation error: spawn error (at "),
-            "unexpected error display: {rendered}"
-        );
-        assert!(
-            rendered.contains("src/error.rs:"),
-            "missing file location: {rendered}"
-        );
+        assert_starts_with(&rendered, "Thread creation error: spawn error (at ");
+        assert_contains(&rendered, "src/error.rs:");
     }
 
     #[test]
@@ -226,14 +250,8 @@ mod tests {
         let io_error = std::io::Error::other("Test IO error");
         let error = crate::ubiblk_error!(IoChannelCreation { source: io_error });
         let rendered = format!("{error}");
-        assert!(
-            rendered.starts_with("I/O channel creation error: Test IO error (at "),
-            "unexpected error display: {rendered}"
-        );
-        assert!(
-            rendered.contains("src/error.rs:"),
-            "missing file location: {rendered}"
-        );
+        assert_starts_with(&rendered, "I/O channel creation error: Test IO error (at ");
+        assert_contains(&rendered, "src/error.rs:");
     }
 
     #[test]
@@ -242,14 +260,8 @@ mod tests {
             reason: "Disconnected".to_string(),
         });
         let rendered = format!("{error}");
-        assert!(
-            rendered.starts_with("Channel error: Disconnected (at "),
-            "unexpected error display: {rendered}"
-        );
-        assert!(
-            rendered.contains("src/error.rs:"),
-            "missing file location: {rendered}"
-        );
+        assert_starts_with(&rendered, "Channel error: Disconnected (at ");
+        assert_contains(&rendered, "src/error.rs:");
     }
 
     #[test]
@@ -258,28 +270,16 @@ mod tests {
             description: "Test metadata error".to_string(),
         });
         let rendered = format!("{error}");
-        assert!(
-            rendered.starts_with("Metadata error: Test metadata error (at "),
-            "unexpected error display: {rendered}"
-        );
-        assert!(
-            rendered.contains("src/error.rs:"),
-            "missing file location: {rendered}"
-        );
+        assert_starts_with(&rendered, "Metadata error: Test metadata error (at ");
+        assert_contains(&rendered, "src/error.rs:");
     }
 
     #[test]
     fn test_stripe_unavailable_data_format() {
         let error = crate::ubiblk_error!(StripeUnavailableData { stripe: 42 });
         let rendered = format!("{error}");
-        assert!(
-            rendered.starts_with("Stripe 42 is unavailable (at "),
-            "unexpected error display: {rendered}"
-        );
-        assert!(
-            rendered.contains("src/error.rs:"),
-            "missing file location: {rendered}"
-        );
+        assert_starts_with(&rendered, "Stripe 42 is unavailable (at ");
+        assert_contains(&rendered, "src/error.rs:");
     }
 
     #[test]
@@ -288,13 +288,29 @@ mod tests {
             description: "Invalid status byte".to_string(),
         });
         let rendered = format!("{error}");
-        assert!(
-            rendered.starts_with("Protocol error: Invalid status byte (at "),
-            "unexpected error display: {rendered}"
+        assert_starts_with(&rendered, "Protocol error: Invalid status byte (at ");
+        assert_contains(&rendered, "src/error.rs:");
+    }
+
+    #[test]
+    fn test_conversion_from_vhost_user_backend_error() {
+        let some_io_error = std::io::Error::other("IO failure");
+        let vhub_error = vhost_user_backend::Error::StartDaemon(some_io_error);
+        let ubiblk_error: UbiblkError = vhub_error.into();
+        let rendered = format!("{ubiblk_error}");
+        assert_starts_with(
+            &rendered,
+            "Vhost user backend error: failed to start daemon: IO failure (at ",
         );
-        assert!(
-            rendered.contains("src/error.rs:"),
-            "missing file location: {rendered}"
-        );
+        assert_contains(&rendered, "src/error.rs:");
+    }
+
+    #[test]
+    fn test_conversion_from_vhost_user_error() {
+        let vhu_error = vhost::vhost_user::Error::InvalidMessage;
+        let ubiblk_error: UbiblkError = vhu_error.into();
+        let rendered = format!("{ubiblk_error}");
+        assert_starts_with(&rendered, "Vhost user error: invalid message (at ");
+        assert_contains(&rendered, "src/error.rs:");
     }
 }

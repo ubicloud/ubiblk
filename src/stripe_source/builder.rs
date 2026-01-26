@@ -6,7 +6,7 @@ use crate::{
     config::{ArchiveStripeSourceConfig, AwsCredentials, DeviceConfig, StripeSourceConfig},
     stripe_server::connect_to_stripe_server,
     utils::s3::{build_s3_client, create_runtime},
-    vhost_backend::build_source_device,
+    vhost_backend::build_raw_image_device,
     Result,
 };
 
@@ -59,10 +59,13 @@ impl StripeSourceBuilder {
             }
         }
 
-        let block_device = build_source_device(&self.device_config)?;
+        let source_block_device =
+            build_raw_image_device(&self.device_config)?.unwrap_or(NullBlockDevice::new());
 
-        let stripe_source = BlockDeviceStripeSource::new(block_device, self.stripe_sector_count)?;
-        Ok(Box::new(stripe_source))
+        Ok(Box::new(BlockDeviceStripeSource::new(
+            source_block_device,
+            self.stripe_sector_count,
+        )?))
     }
 
     fn build_aws_credentials(

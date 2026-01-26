@@ -16,7 +16,7 @@ use super::{backend::UbiBlkBackend, rpc};
 use crate::{
     block_device::{
         self, BgWorker, BgWorkerRequest, BlockDevice, SharedMetadataState, StatusReporter,
-        UbiMetadata, UringBlockDevice,
+        SyncBlockDevice, UbiMetadata, UringBlockDevice,
     },
     config::{DeviceConfig, IoEngine},
     stripe_source::StripeSourceBuilder,
@@ -40,7 +40,7 @@ struct BgWorkerConfig {
 struct BackendEnv {
     bdev: Box<dyn BlockDevice>,
     bgworker_config: Option<BgWorkerConfig>,
-    bgworker_ch: Option<Sender<BgWorkerRequest>>,
+    bgworker_sender: Option<Sender<BgWorkerRequest>>,
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
     config: DeviceConfig,
@@ -50,29 +50,76 @@ struct BackendEnv {
 
 impl BackendEnv {
     fn build(config: &DeviceConfig) -> Result<Self> {
-        let base_device = build_block_device(&config.path, config, false)?;
         let alignment = Self::determine_alignment(&config.path)?;
 
-        let BgWorkerSetup {
-            block_device,
-            config: bgworker_config,
-            channel,
-            status_reporter,
-        } = Self::build_devices(base_device, config, alignment)?;
+        let disk_device = build_block_device(&config.path, config, false)?;
+        let metadata_device = config
+            .metadata_path
+            .as_ref()
+            .map(|path| build_block_device(path, config, false))
+            .transpose()?;
 
-        let io_trackers = (0..config.num_queues)
-            .map(|_| IoTracker::new(config.queue_size))
-            .collect();
+        match metadata_device {
+            None => Ok(BackendEnv {
+                bdev: disk_device,
+                bgworker_config: None,
+                bgworker_sender: None,
+                bgworker_thread: None,
+                alignment,
+                config: config.clone(),
+                status_reporter: None,
+                io_trackers: Self::build_io_trackers(config),
+            }),
+            Some(metadata_dev) => {
+                Self::build_with_bgworker(disk_device, metadata_dev, config, alignment)
+            }
+        }
+    }
+
+    fn build_with_bgworker(
+        disk_device: Box<dyn BlockDevice>,
+        metadata_device: Box<dyn BlockDevice>,
+        config: &DeviceConfig,
+        alignment: usize,
+    ) -> Result<Self> {
+        let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
+        let shared_state = SharedMetadataState::new(&metadata);
+        let status_reporter = StatusReporter::new(shared_state.clone(), disk_device.sector_count());
+
+        let (bgworker_sender, bgworker_receiver) = channel();
+
+        let bdev_lazy = Self::build_bdev_lazy(
+            disk_device.clone(),
+            config,
+            bgworker_sender.clone(),
+            shared_state.clone(),
+        )?;
+
+        let stripe_source_builder = Box::new(StripeSourceBuilder::new(
+            config.clone(),
+            shared_state.stripe_sector_count(),
+            metadata.has_fetched_all_stripes(),
+        ));
+
+        let bgworker_config = BgWorkerConfig {
+            target_dev: disk_device,
+            stripe_source_builder,
+            metadata_dev: metadata_device,
+            alignment,
+            autofetch: config.autofetch,
+            shared_state,
+            receiver: bgworker_receiver,
+        };
 
         Ok(BackendEnv {
-            bdev: block_device,
-            bgworker_config,
-            bgworker_ch: channel,
+            bdev: bdev_lazy,
+            bgworker_config: Some(bgworker_config),
+            bgworker_sender: Some(bgworker_sender),
             bgworker_thread: None,
             alignment,
             config: config.clone(),
-            status_reporter,
-            io_trackers,
+            status_reporter: Some(status_reporter),
+            io_trackers: Self::build_io_trackers(config),
         })
     }
 
@@ -86,128 +133,89 @@ impl BackendEnv {
         Ok(cmp::max(BUFFER_ALIGNMENT, stat.block_size() as usize))
     }
 
-    fn build_devices(
-        base_device: Box<dyn BlockDevice>,
+    fn build_bdev_lazy(
+        disk_device: Box<dyn BlockDevice>,
         config: &DeviceConfig,
-        alignment: usize,
-    ) -> Result<BgWorkerSetup> {
-        if let Some(metadata_path) = config.metadata_path.as_ref() {
-            Self::build_lazy_device(base_device, config, alignment, metadata_path)
-        } else {
-            Ok(BgWorkerSetup {
-                block_device: base_device,
-                config: None,
-                channel: None,
-                status_reporter: None,
-            })
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build_lazy_device(
-        base_device: Box<dyn BlockDevice>,
-        config: &DeviceConfig,
-        alignment: usize,
-        metadata_path: &str,
-    ) -> Result<BgWorkerSetup> {
-        let metadata_dev = build_block_device(metadata_path, config, false)?;
-        let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
-        let shared_state = SharedMetadataState::new(&metadata);
-
-        let maybe_image_bdev = if config.copy_on_read {
+        bgworker_sender: Sender<BgWorkerRequest>,
+        shared_state: SharedMetadataState,
+    ) -> Result<Box<dyn BlockDevice>> {
+        let raw_image_device = if config.copy_on_read {
             None
         } else {
-            Some(build_source_device(config)?)
+            build_raw_image_device(config)?
         };
 
-        let target_clone = base_device.clone();
-        let target_sector_count = target_clone.sector_count();
-        let (bgworker_tx, bgworker_rx) = channel();
-
-        let block_device = block_device::LazyBlockDevice::new(
-            base_device,
-            maybe_image_bdev,
-            bgworker_tx.clone(),
-            shared_state.clone(),
+        let lazy_bdev = block_device::LazyBlockDevice::new(
+            disk_device,
+            raw_image_device,
+            bgworker_sender,
+            shared_state,
             config.track_written,
         )?;
 
-        let stripe_source_builder = Box::new(StripeSourceBuilder::new(
-            config.clone(),
-            shared_state.stripe_sector_count(),
-            metadata.has_fetched_all_stripes(),
-        ));
+        Ok(lazy_bdev)
+    }
 
-        let config = BgWorkerConfig {
-            target_dev: target_clone,
-            stripe_source_builder,
-            metadata_dev,
-            alignment,
-            autofetch: config.autofetch,
-            shared_state: shared_state.clone(),
-            receiver: bgworker_rx,
-        };
-
-        let status_reporter = StatusReporter::new(shared_state.clone(), target_sector_count);
-
-        Ok(BgWorkerSetup {
-            block_device,
-            config: Some(config),
-            channel: Some(bgworker_tx),
-            status_reporter: Some(status_reporter),
-        })
+    fn build_io_trackers(config: &DeviceConfig) -> Vec<IoTracker> {
+        (0..config.num_queues)
+            .map(|_| IoTracker::new(config.queue_size))
+            .collect()
     }
 
     fn run_bgworker_thread(&mut self) -> Result<()> {
         if let Some(config) = self.bgworker_config.take() {
-            self.bgworker_thread = Some(
-                std::thread::Builder::new()
-                    .name("bgworker".to_string())
-                    .spawn(move || {
-                        let BgWorkerConfig {
-                            target_dev,
-                            stripe_source_builder,
-                            metadata_dev,
-                            alignment,
-                            autofetch,
-                            shared_state,
-                            receiver,
-                        } = config;
-
-                        let stripe_source = match stripe_source_builder.build() {
-                            Ok(source) => source,
-                            Err(e) => {
-                                error!("Failed to build stripe source: {e}");
-                                return;
-                            }
-                        };
-
-                        match BgWorker::new(
-                            stripe_source,
-                            &*target_dev,
-                            &*metadata_dev,
-                            alignment,
-                            autofetch,
-                            shared_state,
-                            receiver,
-                        ) {
-                            Ok(mut worker) => worker.run(),
-                            Err(e) => error!("Failed to construct bgworker: {e}"),
-                        }
-                    })
-                    .map_err(|e| {
-                        error!("Failed to spawn bgworker thread: {e}");
-                        crate::ubiblk_error!(ThreadCreation { source: e })
-                    })?,
-            );
+            self.bgworker_thread = Some(Self::spawn_bgworker_thread(config)?);
         }
 
         Ok(())
     }
 
+    fn spawn_bgworker_thread(config: BgWorkerConfig) -> Result<std::thread::JoinHandle<()>> {
+        std::thread::Builder::new()
+            .name("bgworker".to_string())
+            .spawn(move || Self::run_bgworker(config))
+            .map_err(|e| {
+                error!("Failed to spawn bgworker thread: {e}");
+                crate::ubiblk_error!(ThreadCreation { source: e })
+            })
+    }
+
+    fn run_bgworker(config: BgWorkerConfig) {
+        let BgWorkerConfig {
+            target_dev,
+            stripe_source_builder,
+            metadata_dev,
+            alignment,
+            autofetch,
+            shared_state,
+            receiver,
+        } = config;
+
+        let stripe_source = match stripe_source_builder.build() {
+            Ok(source) => source,
+            Err(e) => {
+                error!("Failed to build stripe source: {e}");
+                return;
+            }
+        };
+
+        match BgWorker::new(
+            stripe_source,
+            &*target_dev,
+            &*metadata_dev,
+            alignment,
+            autofetch,
+            shared_state,
+            receiver,
+        ) {
+            Ok(mut worker) => worker.run(),
+            Err(e) => error!("Failed to construct bgworker: {e}"),
+        }
+    }
+
     #[allow(dead_code)]
     fn stop_bgworker_thread(&mut self) {
-        if let Some(ch) = self.bgworker_ch.take() {
+        if let Some(ch) = self.bgworker_sender.take() {
             if let Err(e) = ch.send(BgWorkerRequest::Shutdown) {
                 error!("Failed to send shutdown request to bgworker: {e}");
             }
@@ -249,7 +257,12 @@ impl BackendEnv {
             .map_err(|e| crate::ubiblk_error!(VhostUserBackendError { reason: e }))?;
 
         info!("Finished serving socket!");
+        Self::shutdown_worker_threads(&backend);
 
+        Ok(())
+    }
+
+    fn shutdown_worker_threads(backend: &UbiBlkBackend) {
         for thread in backend.threads().iter() {
             match thread.lock() {
                 Ok(t) => {
@@ -262,16 +275,7 @@ impl BackendEnv {
         }
 
         info!("Finished shutting down worker threads!");
-
-        Ok(())
     }
-}
-
-struct BgWorkerSetup {
-    block_device: Box<dyn BlockDevice>,
-    config: Option<BgWorkerConfig>,
-    channel: Option<Sender<BgWorkerRequest>>,
-    status_reporter: Option<StatusReporter>,
 }
 
 pub fn block_backend_loop(config: &DeviceConfig) -> Result<()> {
@@ -336,43 +340,36 @@ fn create_io_engine_device(
     write_through: bool,
 ) -> Result<Box<dyn BlockDevice>> {
     match engine {
-        IoEngine::IoUring => {
-            let dev = UringBlockDevice::new(
-                path.to_path_buf(),
-                queue_size,
-                readonly,
-                direct_io,
-                write_through,
-            )?;
-            Ok(dev as Box<dyn BlockDevice>)
-        }
-        IoEngine::Sync => {
-            let dev = block_device::SyncBlockDevice::new(
-                path.to_path_buf(),
-                readonly,
-                direct_io,
-                write_through,
-            )?;
-            Ok(dev as Box<dyn BlockDevice>)
-        }
+        IoEngine::IoUring => Ok(UringBlockDevice::new(
+            path,
+            queue_size,
+            readonly,
+            direct_io,
+            write_through,
+        )?),
+        IoEngine::Sync => Ok(SyncBlockDevice::new(
+            path,
+            readonly,
+            direct_io,
+            write_through,
+        )?),
     }
 }
 
-pub fn build_source_device(config: &DeviceConfig) -> Result<Box<dyn BlockDevice>> {
-    let source: Box<dyn BlockDevice> = if let Some(path) = config.raw_image_path() {
+pub fn build_raw_image_device(config: &DeviceConfig) -> Result<Option<Box<dyn BlockDevice>>> {
+    if let Some(path) = config.raw_image_path() {
         let readonly = true;
-        create_io_engine_device(
+        Ok(Some(create_io_engine_device(
             config.io_engine.clone(),
             path,
             64,
             readonly,
             true,
             config.write_through,
-        )?
+        )?))
     } else {
-        block_device::NullBlockDevice::new()
-    };
-    Ok(source)
+        Ok(None)
+    }
 }
 
 pub fn build_block_device(
@@ -387,11 +384,7 @@ pub fn build_block_device(
         readonly,
         true,
         config.write_through,
-    )
-    .map_err(|e| {
-        error!("Failed to create block device at {path}: {e:?}");
-        e
-    })?;
+    )?;
 
     if let Some((key1, key2)) = &config.encryption_key {
         block_device =

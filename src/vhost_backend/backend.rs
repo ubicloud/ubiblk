@@ -113,6 +113,14 @@ impl UbiBlkBackend {
             device_config: device_config.clone(),
         })
     }
+
+    fn maybe_pin_cpu(&self, thread: &mut UbiBlkBackendThread, thread_index: usize) -> Result<bool> {
+        if let Some(ref cpus) = self.device_config.cpus {
+            thread.pin_to_cpu(cpus[thread_index])
+        } else {
+            Ok(false)
+        }
+    }
 }
 
 // This impl is mostly based on CloudHypervisor's vhost_user_block/src/lib.rs,
@@ -145,7 +153,7 @@ impl VhostUserBackend for UbiBlkBackend {
     }
 
     fn features(&self) -> u64 {
-        let avail_features = (1 << VIRTIO_BLK_F_SEG_MAX)
+        (1 << VIRTIO_BLK_F_SEG_MAX)
             | (1 << VIRTIO_BLK_F_BLK_SIZE)
             | (1 << VIRTIO_BLK_F_SIZE_MAX)
             | (1 << VIRTIO_BLK_F_FLUSH)
@@ -155,21 +163,16 @@ impl VhostUserBackend for UbiBlkBackend {
             | (1 << VIRTIO_RING_F_EVENT_IDX) // https://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-370007
             | (1 << VIRTIO_F_VERSION_1)
             | (1 << VIRTIO_RING_F_INDIRECT_DESC) // https://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-330003
-            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits();
-
-        info!(
-            "avail_features: {}",
-            features_to_str(avail_features).trim_end()
-        );
-        avail_features
+            | VhostUserVirtioFeatures::PROTOCOL_FEATURES.bits()
     }
 
     fn acked_features(&self, features: u64) {
-        info!(
+        let log = format!(
             "acked_features: 0x{:x} {}",
             features,
-            features_to_str(features).trim_end()
+            features_to_str(features)
         );
+        info!("{log}");
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
@@ -220,10 +223,8 @@ impl VhostUserBackend for UbiBlkBackend {
             .lock()
             .map_err(|_| std::io::Error::other("Thread lock poisoned"))?;
 
-        if let Some(cpus) = &self.device_config.cpus {
-            if let Err(e) = thread.pin_to_cpu(cpus[thread_id]) {
-                error!("Failed to pin thread to cpu {}: {e}", cpus[thread_id]);
-            }
+        if let Err(e) = self.maybe_pin_cpu(&mut thread, thread_id) {
+            error!("Failed to pin thread {} to CPU: {e}", thread_id);
         }
 
         match device_event {
@@ -290,5 +291,301 @@ impl VhostUserBackend for UbiBlkBackend {
         _mem: GuestMemoryAtomic<GuestMemoryMmap>,
     ) -> std::result::Result<(), std::io::Error> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::fd::AsRawFd;
+
+    use super::*;
+    use crate::{
+        block_device::bdev_test::TestBlockDevice, utils::aligned_buffer::BUFFER_ALIGNMENT,
+        vhost_backend::init_metadata, UbiblkError,
+    };
+    use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
+    use virtio_bindings::virtio_blk::{VIRTIO_BLK_ID_BYTES, VIRTIO_BLK_S_OK, VIRTIO_BLK_T_GET_ID};
+    use virtio_queue::desc::{split::Descriptor as SplitDescriptor, RawDescriptor};
+    use virtio_queue::mock::MockSplitQueue;
+    use vm_memory::{Address, Bytes, GuestAddress};
+
+    const DEFAULT_NUM_QUEUES: usize = 1;
+    const DEFAULT_QUEUE_SIZE: usize = 32;
+
+    fn default_config(path: String) -> DeviceConfig {
+        DeviceConfig {
+            path,
+            socket: "sock".to_string(),
+            num_queues: DEFAULT_NUM_QUEUES,
+            queue_size: DEFAULT_QUEUE_SIZE,
+            seg_size_max: 65536,
+            seg_count_max: 4,
+            write_through: true,
+            device_id: "ubiblk".to_string(),
+            io_engine: crate::config::IoEngine::IoUring,
+            ..Default::default()
+        }
+    }
+
+    fn build_backend(config: DeviceConfig) -> Result<UbiBlkBackend> {
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        UbiBlkBackend::new(&config, mem, block_device, BUFFER_ALIGNMENT, vec![])
+    }
+
+    fn default_backend() -> UbiBlkBackend {
+        let config = default_config("img".to_string());
+        build_backend(config).unwrap()
+    }
+
+    fn setup_mem() -> (GuestMemoryAtomic<GuestMemoryMmap>, GuestMemoryMmap) {
+        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), 0x10000)]).unwrap();
+        let gm = GuestMemoryAtomic::new(mem.clone());
+        (gm, mem)
+    }
+
+    /// Building the backend with a queue size that is not a power of two should fail.
+    #[test]
+    fn invalid_queue_size() {
+        let mut config = default_config("test.img".to_string());
+        config.queue_size = 30;
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let result = UbiBlkBackend::new(&config, mem, block_device, BUFFER_ALIGNMENT, vec![]);
+        assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
+    }
+
+    /// Ensure a backend can be created with valid parameters and exposes expected features.
+    #[test]
+    fn backend_features_and_protocol() {
+        let backend = default_backend();
+        assert_eq!(backend.num_queues(), 1);
+        assert_eq!(backend.max_queue_size(), 32);
+
+        let features = backend.features();
+        assert!(features & (1 << VIRTIO_BLK_F_FLUSH) != 0);
+        let protocol = backend.protocol_features();
+        assert!(protocol.contains(VhostUserProtocolFeatures::CONFIG));
+    }
+
+    /// Updating event index should propagate to all worker threads.
+    #[test]
+    fn set_event_index() {
+        let backend = default_backend();
+        backend.set_event_idx(true);
+        for thread in backend.threads().iter() {
+            assert!(thread.lock().unwrap().event_idx);
+        }
+    }
+
+    /// handle_event should reject unexpected event sets.
+    #[test]
+    fn handle_event_invalid_eventset() {
+        let backend = default_backend();
+        let err = backend.handle_event(0, EventSet::OUT, &[], 0).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    }
+
+    /// handle_event should reject device events other than 0.
+    #[test]
+    fn handle_event_invalid_device() {
+        let backend = default_backend();
+        let err = backend.handle_event(1, EventSet::IN, &[], 0).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    }
+
+    /// handle_event should process a valid queue request.
+    #[test]
+    fn handle_event_processes_get_id() {
+        let (gm, mem) = setup_mem();
+        let mut config = default_config("img".to_string());
+        config.queue_size = 8;
+        config.device_id = "ubiblk-test".to_string();
+        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
+        let backend =
+            UbiBlkBackend::new(&config, gm, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
+
+        let queue = MockSplitQueue::new(&mem, config.queue_size as u16);
+        let header_addr = GuestAddress(0x1000);
+        let data_addr = GuestAddress(0x2000);
+        let status_addr = GuestAddress(0x3000);
+        mem.write_obj::<u32>(VIRTIO_BLK_T_GET_ID, header_addr)
+            .unwrap();
+        mem.write_obj::<u32>(0, header_addr.unchecked_add(4))
+            .unwrap();
+        mem.write_obj::<u64>(0, header_addr.unchecked_add(8))
+            .unwrap();
+
+        let descs = [
+            RawDescriptor::from(SplitDescriptor::new(
+                header_addr.0,
+                16,
+                VRING_DESC_F_NEXT as u16,
+                1,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                data_addr.0,
+                VIRTIO_BLK_ID_BYTES,
+                (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT) as u16,
+                2,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                status_addr.0,
+                1,
+                VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+        ];
+        queue.add_desc_chains(&descs, 0).unwrap();
+
+        let vring = VringRwLock::new(
+            GuestMemoryAtomic::new(mem.clone()),
+            config.queue_size as u16,
+        )
+        .expect("vring new failed");
+        vring.set_queue_size(config.queue_size as u16);
+        vring
+            .set_queue_info(
+                queue.desc_table_addr().0,
+                queue.avail_addr().0,
+                queue.used_addr().0,
+            )
+            .expect("set_queue_info failed");
+        vring.set_queue_ready(true);
+
+        backend
+            .handle_event(0, EventSet::IN, &[vring], 0)
+            .expect("handle_event failed");
+
+        let status = mem.read_obj::<u8>(status_addr).unwrap();
+        assert_eq!(status, VIRTIO_BLK_S_OK as u8);
+
+        let mut buf = [0u8; VIRTIO_BLK_ID_BYTES as usize];
+        mem.read_slice(&mut buf, data_addr).unwrap();
+        assert_eq!(&buf[..config.device_id.len()], config.device_id.as_bytes());
+    }
+
+    /// init_metadata should fail when metadata_path is missing.
+    #[test]
+    fn init_metadata_missing_path() {
+        let config = default_config("img".to_string());
+        let res = init_metadata(&config, 4);
+        assert!(res.is_err());
+    }
+
+    /// The features method should advertise common virtio features.
+    #[test]
+    fn features_advertise_bits() {
+        let backend = default_backend();
+
+        let features = backend.features();
+        use virtio_bindings::virtio_config::VIRTIO_F_VERSION_1;
+        use virtio_bindings::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
+        assert!(features & (1 << VIRTIO_F_VERSION_1) != 0);
+        assert!(features & (1 << VIRTIO_RING_F_EVENT_IDX) != 0);
+    }
+
+    /// acked_features should accept arbitrary feature flags without panicking.
+    #[test]
+    fn acked_features_noop() {
+        let backend = default_backend();
+        backend.acked_features(1 << VIRTIO_BLK_F_FLUSH);
+    }
+
+    /// set_event_idx(false) should clear the flag on all worker threads.
+    #[test]
+    fn clear_event_index() {
+        let backend = default_backend();
+        backend.set_event_idx(true);
+        backend.set_event_idx(false);
+        for thread in backend.threads().iter() {
+            assert!(!thread.lock().unwrap().event_idx);
+        }
+    }
+
+    /// get_config should return a valid VirtioBlockConfig structure.
+    #[test]
+    fn get_config_returns_struct() {
+        let backend = default_backend();
+
+        let bytes = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
+        assert_eq!(bytes.len(), std::mem::size_of::<VirtioBlockConfig>());
+        let virtio_config: VirtioBlockConfig = *VirtioBlockConfig::from_slice(&bytes).unwrap();
+        let capacity = virtio_config.capacity;
+        let blk_size = virtio_config.blk_size;
+        let queues = virtio_config.num_queues;
+        assert_eq!(capacity, 8);
+        assert_eq!(blk_size, SECTOR_SIZE as u32);
+        assert_eq!(queues as usize, DEFAULT_NUM_QUEUES);
+    }
+
+    /// queues_per_thread should reflect the number of queues configured.
+    #[test]
+    fn queues_per_thread_multiple() {
+        let mut config = default_config("img".to_string());
+        config.num_queues = 3;
+        config.cpus = None;
+        let backend = build_backend(config).unwrap();
+
+        assert_eq!(backend.queues_per_thread(), vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn cpus_mismatch() {
+        let mut config = default_config("img".to_string());
+        config.num_queues = 2;
+        config.cpus = Some(vec![0]);
+        let res = build_backend(config);
+        assert!(res.is_err());
+    }
+
+    /// update_memory is currently a no-op and should succeed.
+    #[test]
+    fn update_memory_nop() {
+        let backend = default_backend();
+        let mem2: GuestMemoryAtomic<vm_memory::GuestMemoryMmap<BitmapMmapRegion>> =
+            GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        assert!(backend.update_memory(mem2).is_ok());
+    }
+
+    /// exit_event should return a clone of the worker thread's kill event fd.
+    #[test]
+    fn exit_event_clone() {
+        let backend = default_backend();
+        let evt1 = backend.exit_event(0).unwrap();
+        let evt2 = backend.exit_event(0).unwrap();
+        assert_ne!(evt1.as_raw_fd(), evt2.as_raw_fd());
+    }
+
+    /// maybe_pin_cpu should return Ok(false) when no CPUs are configured.
+    #[test]
+    fn maybe_pin_cpu_no_cpus() {
+        let backend = default_backend();
+        let mut thread = backend.threads()[0].lock().unwrap();
+        let res = backend.maybe_pin_cpu(&mut thread, 0).unwrap();
+        assert!(!res);
+    }
+
+    /// maybe_pin_cpu should return Ok(true) when pinning is successful.
+    #[test]
+    fn maybe_pin_cpu_success() {
+        let mut config = default_config("img".to_string());
+        config.cpus = Some(vec![0]);
+        let backend = build_backend(config).unwrap();
+        let mut thread = backend.threads()[0].lock().unwrap();
+        let res = backend.maybe_pin_cpu(&mut thread, 0).unwrap();
+        assert!(res);
+    }
+
+    /// maybe_pin_cpu should return Err when pinning fails.
+    #[test]
+    fn maybe_pin_cpu_failure() {
+        let mut config = default_config("img".to_string());
+        // Assuming CPU 9999 does not exist on the system.
+        config.cpus = Some(vec![9999]);
+        let backend = build_backend(config).unwrap();
+        let mut thread = backend.threads()[0].lock().unwrap();
+        let res = backend.maybe_pin_cpu(&mut thread, 0);
+        assert!(res.is_err());
     }
 }

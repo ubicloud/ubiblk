@@ -152,9 +152,9 @@ impl UbiBlkBackendThread {
         self.io_tracker.clear(idx);
     }
 
-    pub(crate) fn pin_to_cpu(&mut self, cpu: usize) -> Result<()> {
+    pub(crate) fn pin_to_cpu(&mut self, cpu: usize) -> Result<bool> {
         if self.pin_attempted {
-            return Ok(());
+            return Ok(false);
         }
         // Mark that we have attempted to pin, regardless of success or failure
         self.pin_attempted = true;
@@ -169,7 +169,7 @@ impl UbiBlkBackendThread {
         } else {
             let thread_id = std::thread::current().id();
             info!("pinned thread {thread_id:?} to cpu {cpu}");
-            Ok(())
+            Ok(true)
         }
     }
 

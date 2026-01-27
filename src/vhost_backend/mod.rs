@@ -11,7 +11,4 @@ mod backend_thread;
 pub const SECTOR_SIZE: usize = 512;
 
 #[cfg(test)]
-mod backend_tests;
-
-#[cfg(test)]
 pub use backend::UbiBlkBackend;

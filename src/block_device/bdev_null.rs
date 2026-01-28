@@ -1,5 +1,5 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
-use crate::vhost_backend::SECTOR_SIZE;
+use crate::backends::SECTOR_SIZE;
 use crate::Result;
 
 /// A block device that emulates `/dev/null`.
@@ -93,8 +93,8 @@ impl BlockDevice for NullBlockDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::SECTOR_SIZE;
     use crate::block_device::shared_buffer;
-    use crate::vhost_backend::SECTOR_SIZE;
 
     #[test]
     fn reports_zero_capacity() {

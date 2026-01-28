@@ -4,11 +4,11 @@ use clap::Parser;
 
 use ubiblk::{
     archive::StripeArchiver,
+    backends::build_block_device,
     block_device::UbiMetadata,
     cli::{load_config_and_kek, CommonArgs},
     config::ArchiveStripeSourceConfig,
     stripe_source::StripeSourceBuilder,
-    vhost_backend::build_block_device,
     Result,
 };
 

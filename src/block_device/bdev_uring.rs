@@ -1,5 +1,5 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
-use crate::{vhost_backend::SECTOR_SIZE, Result};
+use crate::{backends::SECTOR_SIZE, Result};
 use io_uring::IoUring;
 use log::error;
 use nix::errno::Errno;

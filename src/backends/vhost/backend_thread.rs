@@ -2,14 +2,15 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::{ops::Deref, sync::RwLockWriteGuard};
 
-use super::{request::*, SECTOR_SIZE};
+use super::request::*;
+#[cfg(test)]
+use crate::backends::common::io_tracking::IoKind;
+use crate::backends::common::io_tracking::IoTracker;
+use crate::backends::SECTOR_SIZE;
 use crate::block_device::IoChannel;
 use crate::block_device::SharedBuffer;
 use crate::config::DeviceConfig;
 use crate::utils::aligned_buffer::AlignedBuf;
-#[cfg(test)]
-use crate::vhost_backend::io_tracking::IoKind;
-use crate::vhost_backend::io_tracking::IoTracker;
 use crate::Result;
 
 use libc::EFD_NONBLOCK;

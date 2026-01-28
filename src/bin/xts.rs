@@ -8,9 +8,9 @@ use std::{
 use clap::{Parser, ValueEnum};
 
 use ubiblk::{
+    backends::SECTOR_SIZE,
     block_device::{self, shared_buffer, wait_for_completion, BlockDevice},
     config::DeviceConfig,
-    vhost_backend::SECTOR_SIZE,
     KeyEncryptionCipher, Result,
 };
 

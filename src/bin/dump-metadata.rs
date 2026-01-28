@@ -1,8 +1,8 @@
 use clap::Parser;
+use ubiblk::backends::{build_block_device, SECTOR_SIZE};
 use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
 use ubiblk::cli::{load_config, CommonArgs};
 use ubiblk::config::{ArchiveStripeSourceConfig, DeviceConfig, StripeSourceConfig};
-use ubiblk::vhost_backend::{build_block_device, SECTOR_SIZE};
 use ubiblk::Result;
 
 #[derive(Parser)]

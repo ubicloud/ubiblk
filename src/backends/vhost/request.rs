@@ -170,7 +170,7 @@ impl Request {
 
 #[cfg(test)]
 mod tests {
-    use crate::vhost_backend::SECTOR_SIZE;
+    use crate::backends::SECTOR_SIZE;
 
     use super::*;
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};

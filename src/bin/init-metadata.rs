@@ -1,6 +1,6 @@
 use clap::Parser;
+use ubiblk::backends::init_metadata;
 use ubiblk::cli::{load_config, CommonArgs};
-use ubiblk::vhost_backend::*;
 use ubiblk::Result;
 
 const STRIPE_SECTOR_COUNT_SHIFT_MIN: u8 = 6;

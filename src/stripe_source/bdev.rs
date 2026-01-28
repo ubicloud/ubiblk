@@ -63,8 +63,8 @@ impl StripeSource for BlockDeviceStripeSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::SECTOR_SIZE;
     use crate::block_device::{bdev_test::TestBlockDevice, shared_buffer};
-    use crate::vhost_backend::SECTOR_SIZE;
     use crate::UbiblkError;
 
     #[test]

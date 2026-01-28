@@ -1,6 +1,6 @@
 use std::sync::{atomic::AtomicBool, Arc, RwLock};
 
-use crate::vhost_backend::SECTOR_SIZE;
+use crate::backends::SECTOR_SIZE;
 
 use super::*;
 

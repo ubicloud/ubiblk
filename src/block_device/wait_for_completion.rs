@@ -34,7 +34,7 @@ pub fn wait_for_completion(
 #[cfg(test)]
 mod tests {
     use crate::UbiblkError;
-    use crate::{block_device::bdev_test::TestBlockDevice, vhost_backend::SECTOR_SIZE};
+    use crate::{backends::SECTOR_SIZE, block_device::bdev_test::TestBlockDevice};
 
     use super::*;
 

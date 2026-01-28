@@ -1,4 +1,4 @@
-use crate::{stripe_source::StripeSource, vhost_backend::SECTOR_SIZE};
+use crate::{backends::SECTOR_SIZE, stripe_source::StripeSource};
 
 pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
@@ -192,7 +192,7 @@ impl UbiMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vhost_backend::SECTOR_SIZE;
+    use crate::backends::SECTOR_SIZE;
 
     #[test]
     fn test_ubi_metadata_serialization() {

@@ -150,11 +150,11 @@ pub fn connect_to_stripe_server(conf: &RemoteStripeSourceConfig) -> Result<Strip
 mod tests {
     use std::{os::unix::net::UnixStream, sync::Arc, thread};
 
+    use crate::backends::SECTOR_SIZE;
     use crate::block_device::{
         bdev_test::TestBlockDevice, metadata_flags, BlockDevice, UbiMetadata,
     };
     use crate::stripe_server::StripeServer;
-    use crate::vhost_backend::SECTOR_SIZE;
     use crate::UbiblkError;
 
     use super::*;

@@ -1,5 +1,5 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
-use crate::vhost_backend::SECTOR_SIZE;
+use crate::backends::SECTOR_SIZE;
 use crate::Result;
 use log::error;
 use std::fs::{File, OpenOptions};

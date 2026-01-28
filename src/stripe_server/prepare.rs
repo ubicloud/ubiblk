@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
 use crate::{
+    backends::build_block_device,
     block_device::{metadata_flags, UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT},
     config::DeviceConfig,
     stripe_server::StripeServer,
-    vhost_backend::build_block_device,
     Result,
 };
 
@@ -43,7 +43,7 @@ pub fn prepare_stripe_server(config: &DeviceConfig) -> Result<Arc<StripeServer>>
 
 #[cfg(test)]
 mod tests {
-    use crate::vhost_backend::SECTOR_SIZE;
+    use crate::backends::SECTOR_SIZE;
 
     use super::*;
     use std::io::Write;

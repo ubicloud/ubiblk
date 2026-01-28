@@ -5,10 +5,10 @@ use log::{debug, error, info, warn};
 use super::super::*;
 
 use crate::{
+    backends::SECTOR_SIZE,
     block_device::SharedMetadataState,
     stripe_source::{BlockDeviceStripeSource, StripeSource},
     utils::aligned_buffer_pool::AlignedBufferPool,
-    vhost_backend::SECTOR_SIZE,
     Result,
 };
 

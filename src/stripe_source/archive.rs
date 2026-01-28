@@ -240,11 +240,11 @@ mod tests {
 
     use crate::UbiblkError;
     use crate::{
+        backends::SECTOR_SIZE,
         block_device::{
             bdev_test::TestBlockDevice, metadata_flags, shared_buffer, BlockDevice, UbiMetadata,
         },
         stripe_source::BlockDeviceStripeSource,
-        vhost_backend::SECTOR_SIZE,
     };
 
     use super::*;

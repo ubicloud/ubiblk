@@ -20,15 +20,15 @@ mod tests {
     };
 
     use crate::{
+        backends::{
+            common::io_tracking::{IoKind, IoTracker},
+            vhost::backend_thread::UbiBlkBackendThread,
+            vhost::request::{Request, RequestType},
+            SECTOR_SIZE,
+        },
         block_device::{bdev_test::TestBlockDevice, BlockDevice},
         config::DeviceConfig,
         utils::aligned_buffer::BUFFER_ALIGNMENT,
-        vhost_backend::{
-            backend_thread::UbiBlkBackendThread,
-            io_tracking::{IoKind, IoTracker},
-            request::{Request, RequestType},
-            SECTOR_SIZE,
-        },
     };
 
     type GuestMemory = GuestMemoryMmap<BitmapMmapRegion>;

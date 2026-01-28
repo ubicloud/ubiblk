@@ -133,8 +133,8 @@ impl StripeSource for RemoteStripeSource {
 mod tests {
     use super::*;
     use crate::{
+        backends::SECTOR_SIZE,
         block_device::{shared_buffer, UbiMetadata},
-        vhost_backend::SECTOR_SIZE,
     };
 
     const STRIPE_SECTOR_COUNT_SHIFT: u8 = 4;

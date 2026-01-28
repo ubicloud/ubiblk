@@ -57,7 +57,7 @@ The configuration YAML must define:
 - `image_path`: (Optional, deprecated) Image path for lazy stripe fetch.
 - `metadata_path`: Metadata file path. **Required** whenever `stripe_source` or legacy `image_path` is set.
 - `rpc_socket_path`: (Optional) Path to a Unix domain socket for runtime RPC commands.
-- `socket`: vhost-user socket path.
+- `socket`: (Optional) vhost-user socket path (required when running `vhost-backend`).
 - `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
 - `copy_on_read`: (Optional) Copy stripes from the stripe source only when accessed.
   **Required** to be set to true for `remote` and `archive` stripe sources.
@@ -111,7 +111,7 @@ stripe_source:                           # Optional: stripe source configuration
   path: "/path/to/ubi-image.raw"         # Local stripe source path
 metadata_path: "/path/to/metadata"       # Required when stripe_source or image_path is set
 rpc_socket_path: "/tmp/ubiblk-rpc.sock"  # Optional: RPC Unix socket path
-socket: "/tmp/vhost.sock"                # String: vhost‐user socket path
+socket: "/tmp/vhost.sock"                # Optional: vhost‐user socket path (required for vhost-backend)
 num_queues: 1                            # Integer: number of virtqueues
 cpus: [0]                                # Optional: CPU list matching num_queues
 queue_size: 64                           # Integer: size of each virtqueue

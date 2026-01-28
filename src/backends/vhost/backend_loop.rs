@@ -38,16 +38,19 @@ fn serve_vhost(backend_env: &BackendEnv) -> Result<()> {
 
     info!("Daemon is created!");
 
+    let socket = backend_env.config().socket.as_ref().ok_or_else(|| {
+        crate::ubiblk_error!(InvalidParameter {
+            description: "socket must be specified for the vhost backend".to_string(),
+        })
+    })?;
+
     let listener = {
         let _um = UmaskGuard::set(0o117); // ensures 0660 max on creation
-        Listener::new(&backend_env.config().socket, true)?
+        Listener::new(socket, true)?
     };
 
     // Allow only owner and group to read/write the socket
-    fs::set_permissions(
-        &backend_env.config().socket,
-        fs::Permissions::from_mode(0o660),
-    )?;
+    fs::set_permissions(socket, fs::Permissions::from_mode(0o660))?;
 
     daemon.start(listener)?;
     let result = daemon.wait();

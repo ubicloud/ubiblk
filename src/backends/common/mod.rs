@@ -390,7 +390,7 @@ mod tests {
 
         let config = DeviceConfig {
             path: disk_file.path().to_str().unwrap().to_string(),
-            socket: "/tmp/ubiblk-test.sock".to_string(),
+            socket: Some("/tmp/ubiblk-test.sock".to_string()),
             queue_size: 128,
             ..Default::default()
         };
@@ -403,7 +403,7 @@ mod tests {
     fn build_backend_env_with_invalid_path() {
         let config = DeviceConfig {
             path: "/non/existent/path".to_string(),
-            socket: "/tmp/ubiblk-test.sock".to_string(),
+            socket: Some("/tmp/ubiblk-test.sock".to_string()),
             queue_size: 128,
             ..Default::default()
         };
@@ -431,7 +431,7 @@ mod tests {
                 },
             }),
             metadata_path: Some(metadata_path.path().to_str().unwrap().to_string()),
-            socket: "/tmp/ubiblk-test.sock".to_string(),
+            socket: Some("/tmp/ubiblk-test.sock".to_string()),
             queue_size: 128,
             ..Default::default()
         };

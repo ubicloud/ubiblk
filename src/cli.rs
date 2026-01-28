@@ -69,7 +69,7 @@ socket: /tmp/ubiblk.sock
         let config = load_config(&args).expect("load config");
 
         assert_eq!(config.path, "/dev/null");
-        assert_eq!(config.socket, "/tmp/ubiblk.sock");
+        assert_eq!(config.socket.as_deref(), Some("/tmp/ubiblk.sock"));
     }
 
     #[test]

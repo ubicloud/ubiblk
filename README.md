@@ -37,7 +37,7 @@ cargo test
 
 ## vhost-backend
 
-The `vhost-backend` utility launches a vhost-user-blk backend based on a YAML
+The `vhost-backend` binary launches a vhost-user-blk backend based on a YAML
 configuration file.
 
 **Usage:**
@@ -74,6 +74,51 @@ The configuration YAML must define:
 ```bash
 vhost-backend --config config.yaml
 ```
+
+## ublk-backend
+
+The `ublk-backend` binary exposes the backend through the Linux ublk driver.
+
+**Note:** Treat this backend as experimental. It hasn't been tested as
+extensively as `vhost-backend`.
+
+**Usage:**
+```bash
+ublk-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek]
+```
+
+**Notes:**
+- Requires a Linux kernel with `CONFIG_BLK_DEV_UBLK` enabled and access to
+  `/dev/ublk-control` (typically root or a udev rule).
+- Uses the same configuration file as `vhost-backend`. The `socket` value is
+  ignored for ublk since it does not create a vhost-user socket.
+
+After startup, a block device such as `/dev/ublkb0` is created and can be used
+with standard tools.
+
+### Checking ublk support
+
+To check if your kernel supports ublk, run:
+
+```bash
+grep CONFIG_BLK_DEV_UBLK /boot/config-$(uname -r)
+```
+
+If the output is `CONFIG_BLK_DEV_UBLK=y`, then ublk support is built into the
+kernel. If it is `CONFIG_BLK_DEV_UBLK=m`, then ublk is built as a module and you
+need to load it with:
+
+```bash
+sudo modprobe ublk_drv
+```
+
+To make it load automatically at boot:
+
+```bash
+echo "ublk_drv" | sudo tee /etc/modules-load.d/ublk.conf
+```
+
+## RPC Interface
 
 When `rpc_socket_path` is provided, the backend listens for newline-delimited
 JSON commands on the specified Unix socket. The following commands are

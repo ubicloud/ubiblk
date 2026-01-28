@@ -1,3 +1,4 @@
+use libublk::UblkError;
 use thiserror::Error;
 
 #[macro_export]
@@ -142,6 +143,12 @@ pub enum UbiblkError {
         source: nix::Error,
         context: ErrorLocation,
     },
+    #[error("Ublk error: {source} (at {context})")]
+    UblkError {
+        #[source]
+        source: libublk::UblkError,
+        context: ErrorLocation,
+    },
 }
 
 pub type Error = UbiblkError;
@@ -175,6 +182,17 @@ impl From<vhost::vhost_user::Error> for UbiblkError {
         let location = std::panic::Location::caller();
         UbiblkError::VhostUserError {
             reason,
+            context: ErrorLocation::new(location.file(), location.line()),
+        }
+    }
+}
+
+impl From<UblkError> for UbiblkError {
+    #[track_caller]
+    fn from(err: UblkError) -> Self {
+        let location = std::panic::Location::caller();
+        UbiblkError::UblkError {
+            source: err,
             context: ErrorLocation::new(location.file(), location.line()),
         }
     }
@@ -311,6 +329,15 @@ mod tests {
         let ubiblk_error: UbiblkError = vhu_error.into();
         let rendered = format!("{ubiblk_error}");
         assert_starts_with(&rendered, "Vhost user error: invalid message (at ");
+        assert_contains(&rendered, "src/error.rs:");
+    }
+
+    #[test]
+    fn test_conversion_from_ublk_error() {
+        let ublk_error = UblkError::InvalidVal;
+        let ubiblk_error: UbiblkError = ublk_error.into();
+        let rendered = format!("{ubiblk_error}");
+        assert_starts_with(&rendered, "Ublk error: Invalid input (at ");
         assert_contains(&rendered, "src/error.rs:");
     }
 }

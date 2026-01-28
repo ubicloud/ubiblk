@@ -25,7 +25,8 @@ vmm-sys-util = "0.14.0"
 vm-memory = "0.16.2"
 virtio-bindings = "0.2.6"
 virtio-queue = "0.16.0"
-io-uring = "0.7.10"
+# NOTE: io-uring was intentionally downgraded from 0.7.10 to 0.7.9 for compatibility with libublk 0.4.5.
+io-uring = "0.7.9"
 serde_yaml = "0.9.34"
 hex = "0.4.3"
 log = "0.4.28"
@@ -43,6 +44,8 @@ aws-config = "1.8.12"
 aws-sdk-s3 = { version = "1.120.0" }
 tokio = { version = "1.48.0", features = ["rt"] }
 crossbeam-channel = "0.5.15"
+libublk = "0.4.5"
+ctrlc = "3.5.1"
 
 [build-dependencies]
 bindgen = "0.72.1"

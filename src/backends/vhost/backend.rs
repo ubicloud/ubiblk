@@ -316,7 +316,7 @@ mod tests {
     fn default_config(path: String) -> DeviceConfig {
         DeviceConfig {
             path,
-            socket: "sock".to_string(),
+            socket: Some("sock".to_string()),
             num_queues: DEFAULT_NUM_QUEUES,
             queue_size: DEFAULT_QUEUE_SIZE,
             seg_size_max: 65536,

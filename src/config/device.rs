@@ -68,7 +68,7 @@ pub struct DeviceConfig {
     pub stripe_source: Option<StripeSourceConfig>,
     pub metadata_path: Option<String>,
     pub rpc_socket_path: Option<String>,
-    pub socket: String,
+    pub socket: Option<String>,
 
     #[serde(default)]
     pub cpus: Option<Vec<usize>>,
@@ -329,7 +329,6 @@ mod tests {
     fn test_default_values() {
         let yaml = r#"
         path: "/path/to/disk"
-        socket: "/path/to/socket"
         "#;
         let config = DeviceConfig::load_from_str(yaml).unwrap();
         assert!(!config.copy_on_read);
@@ -337,6 +336,7 @@ mod tests {
         assert!(!config.write_through);
         assert_eq!(config.device_id, "ubiblk".to_string());
         assert!(config.rpc_socket_path.is_none());
+        assert!(config.socket.is_none());
         assert!(!config.autofetch);
         assert_eq!(config.io_engine, IoEngine::IoUring);
     }

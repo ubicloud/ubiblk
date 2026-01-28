@@ -145,7 +145,7 @@ mod tests {
     fn default_config(path: &str) -> DeviceConfig {
         DeviceConfig {
             path: path.to_string(),
-            socket: "sock".to_string(),
+            socket: Some("sock".to_string()),
             num_queues: 1,
             queue_size: 2,
             seg_size_max: SECTOR_SIZE as u32,

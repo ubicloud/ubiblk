@@ -1,8 +1,8 @@
 use log::info;
 
 use crate::{
+    backends::SECTOR_SIZE,
     block_device::{shared_buffer, wait_for_completion, BlockDevice, UbiMetadata},
-    vhost_backend::SECTOR_SIZE,
     Result,
 };
 

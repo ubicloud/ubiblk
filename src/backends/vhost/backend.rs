@@ -1,10 +1,10 @@
 use std::{ops::Deref, sync::Mutex, time::Instant};
 
 use crate::{
+    backends::{common::io_tracking::IoTracker, SECTOR_SIZE},
     block_device::BlockDevice,
     config::DeviceConfig,
     utils::block::{features_to_str, VirtioBlockConfig},
-    vhost_backend::{io_tracking::IoTracker, SECTOR_SIZE},
     Result,
 };
 
@@ -32,7 +32,8 @@ pub struct UbiBlkBackend {
 }
 
 impl UbiBlkBackend {
-    pub(crate) fn threads(&self) -> &Vec<Mutex<UbiBlkBackendThread>> {
+    #[cfg(test)]
+    fn threads(&self) -> &Vec<Mutex<UbiBlkBackendThread>> {
         &self.threads
     }
 
@@ -300,8 +301,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        block_device::bdev_test::TestBlockDevice, utils::aligned_buffer::BUFFER_ALIGNMENT,
-        vhost_backend::init_metadata, UbiblkError,
+        backends::init_metadata, block_device::bdev_test::TestBlockDevice,
+        utils::aligned_buffer::BUFFER_ALIGNMENT, UbiblkError,
     };
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
     use virtio_bindings::virtio_blk::{VIRTIO_BLK_ID_BYTES, VIRTIO_BLK_S_OK, VIRTIO_BLK_T_GET_ID};

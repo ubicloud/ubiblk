@@ -1,7 +1,7 @@
 use crate::{
+    backends::SECTOR_SIZE,
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedMetadataState, UbiMetadata},
     utils::AlignedBufferPool,
-    vhost_backend::SECTOR_SIZE,
     Result,
 };
 use log::{debug, error};

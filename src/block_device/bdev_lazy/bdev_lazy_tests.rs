@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests {
+    use crate::backends::SECTOR_SIZE;
     use crate::block_device::{
         bdev_lazy::{BgWorker, LazyBlockDevice, SharedMetadataState, UbiMetadata},
         bdev_test::{TestBlockDevice, TestDeviceMetrics},
         BlockDevice, IoChannel,
     };
     use crate::block_device::{shared_buffer, SharedBuffer};
-    use crate::vhost_backend::SECTOR_SIZE;
     use std::cell::RefCell;
     use std::sync::{mpsc::channel, Arc, RwLock};
     use std::thread::sleep;

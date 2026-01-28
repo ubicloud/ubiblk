@@ -119,7 +119,7 @@ mod tests {
 
     use super::*;
 
-    use crate::{block_device::bdev_test::TestBlockDevice, vhost_backend::SECTOR_SIZE};
+    use crate::{backends::SECTOR_SIZE, block_device::bdev_test::TestBlockDevice};
 
     #[test]
     fn test_crypt_block_device() {

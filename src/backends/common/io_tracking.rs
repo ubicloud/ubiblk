@@ -36,7 +36,7 @@ impl IoTracker {
         IoTracker { ios: vec }
     }
 
-    pub fn add_read(&mut self, slot: usize, offset_sectors: u64, length_sectors: u64) {
+    pub fn add_read(&self, slot: usize, offset_sectors: u64, length_sectors: u64) {
         if slot >= self.ios.len() {
             info!(
                 "Large IO (read): slot {}, offset {} sectors, length {} sectors",
@@ -54,7 +54,7 @@ impl IoTracker {
             .store(IoKind::Read as u8, std::sync::atomic::Ordering::Release);
     }
 
-    pub fn add_write(&mut self, slot: usize, offset_sectors: u64, length_sectors: u64) {
+    pub fn add_write(&self, slot: usize, offset_sectors: u64, length_sectors: u64) {
         if slot >= self.ios.len() {
             info!(
                 "Large IO (write): slot {}, offset {} sectors, length {} sectors",
@@ -72,7 +72,7 @@ impl IoTracker {
             .store(IoKind::Write as u8, std::sync::atomic::Ordering::Release);
     }
 
-    pub fn add_flush(&mut self, slot: usize) {
+    pub fn add_flush(&self, slot: usize) {
         if slot >= self.ios.len() {
             info!("Large IO (flush): slot {}", slot);
             return;

@@ -1,20 +1,12 @@
 use std::{
-    cmp, fs,
-    os::unix::fs::PermissionsExt,
+    cmp,
     path::{Path, PathBuf},
-    sync::{
-        mpsc::{channel, Receiver, Sender},
-        Arc,
-    },
+    sync::mpsc::{channel, Receiver, Sender},
 };
 
 use log::{error, info};
 use nix::sys::statfs::statfs;
-use vhost::vhost_user::{Error as VhostUserError, Listener};
-use vhost_user_backend::{Error as VhostUserBackendError, VhostUserDaemon};
-use vm_memory::GuestMemoryAtomic;
 
-use super::{backend::UbiBlkBackend, rpc};
 use crate::{
     block_device::{
         self, BgWorker, BgWorkerRequest, BlockDevice, SharedMetadataState, StatusReporter,
@@ -22,12 +14,14 @@ use crate::{
     },
     config::{DeviceConfig, IoEngine},
     stripe_source::StripeSourceBuilder,
-    utils::{aligned_buffer::BUFFER_ALIGNMENT, umask_guard::UmaskGuard},
-    vhost_backend::io_tracking::IoTracker,
+    utils::aligned_buffer::BUFFER_ALIGNMENT,
     Result,
 };
 
-type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
+pub mod io_tracking;
+pub mod rpc;
+
+pub const SECTOR_SIZE: usize = 512;
 
 struct BgWorkerConfig {
     target_dev: Box<dyn BlockDevice>,
@@ -39,7 +33,7 @@ struct BgWorkerConfig {
     receiver: Receiver<BgWorkerRequest>,
 }
 
-struct BackendEnv {
+pub struct BackendEnv {
     bdev: Box<dyn BlockDevice>,
     bgworker_config: Option<BgWorkerConfig>,
     bgworker_sender: Option<Sender<BgWorkerRequest>>,
@@ -47,11 +41,11 @@ struct BackendEnv {
     alignment: usize,
     config: DeviceConfig,
     status_reporter: Option<StatusReporter>,
-    io_trackers: Vec<IoTracker>,
+    io_trackers: Vec<io_tracking::IoTracker>,
 }
 
 impl BackendEnv {
-    fn build(config: &DeviceConfig) -> Result<Self> {
+    pub fn build(config: &DeviceConfig) -> Result<Self> {
         let alignment = Self::determine_alignment(&config.path)?;
 
         let disk_device = build_block_device(&config.path, config, false)?;
@@ -76,6 +70,48 @@ impl BackendEnv {
                 Self::build_with_bgworker(disk_device, metadata_dev, config, alignment)
             }
         }
+    }
+
+    pub fn run_bgworker_thread(&mut self) -> Result<()> {
+        if let Some(config) = self.bgworker_config.take() {
+            self.bgworker_thread = Some(Self::spawn_bgworker_thread(config)?);
+        }
+
+        Ok(())
+    }
+
+    pub fn stop_bgworker_thread(&mut self) {
+        if let Some(ch) = self.bgworker_sender.take() {
+            if let Err(e) = ch.send(BgWorkerRequest::Shutdown) {
+                error!("Failed to send shutdown request to bgworker: {e}");
+            }
+        }
+
+        if let Some(handle) = self.bgworker_thread.take() {
+            if let Err(e) = handle.join() {
+                error!("Failed to join bgworker thread: {e:?}");
+            }
+        }
+    }
+
+    pub fn status_reporter(&self) -> Option<StatusReporter> {
+        self.status_reporter.clone()
+    }
+
+    pub fn io_trackers(&self) -> &Vec<io_tracking::IoTracker> {
+        &self.io_trackers
+    }
+
+    pub fn config(&self) -> &DeviceConfig {
+        &self.config
+    }
+
+    pub fn alignment(&self) -> usize {
+        self.alignment
+    }
+
+    pub fn bdev(&self) -> Box<dyn BlockDevice> {
+        self.bdev.clone()
     }
 
     fn build_with_bgworker(
@@ -158,18 +194,10 @@ impl BackendEnv {
         Ok(lazy_bdev)
     }
 
-    fn build_io_trackers(config: &DeviceConfig) -> Vec<IoTracker> {
+    fn build_io_trackers(config: &DeviceConfig) -> Vec<io_tracking::IoTracker> {
         (0..config.num_queues)
-            .map(|_| IoTracker::new(config.queue_size))
+            .map(|_| io_tracking::IoTracker::new(config.queue_size))
             .collect()
-    }
-
-    fn run_bgworker_thread(&mut self) -> Result<()> {
-        if let Some(config) = self.bgworker_config.take() {
-            self.bgworker_thread = Some(Self::spawn_bgworker_thread(config)?);
-        }
-
-        Ok(())
     }
 
     fn spawn_bgworker_thread(config: BgWorkerConfig) -> Result<std::thread::JoinHandle<()>> {
@@ -214,94 +242,25 @@ impl BackendEnv {
             Err(e) => error!("Failed to construct bgworker: {e}"),
         }
     }
+}
 
-    #[allow(dead_code)]
-    fn stop_bgworker_thread(&mut self) {
-        if let Some(ch) = self.bgworker_sender.take() {
-            if let Err(e) = ch.send(BgWorkerRequest::Shutdown) {
-                error!("Failed to send shutdown request to bgworker: {e}");
-            }
-        }
-
-        if let Some(handle) = self.bgworker_thread.take() {
-            if let Err(e) = handle.join() {
-                error!("Failed to join bgworker thread: {e:?}");
-            }
-        }
-    }
-
-    fn status_reporter(&self) -> Option<StatusReporter> {
-        self.status_reporter.clone()
-    }
-
-    fn serve(&self) -> Result<()> {
-        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
-
-        info!("Creating backend ...");
-
-        let backend = Arc::new(UbiBlkBackend::new(
-            &self.config,
-            mem.clone(),
-            self.bdev.clone(),
-            self.alignment,
-            self.io_trackers.clone(),
-        )?);
-
-        info!("Backend is created!");
-
-        let mut daemon = VhostUserDaemon::new("ubiblk-backend".to_string(), backend.clone(), mem)?;
-
-        info!("Daemon is created!");
-
-        let listener = {
-            let _um = UmaskGuard::set(0o117); // ensures 0660 max on creation
-            Listener::new(&self.config.socket, true)?
-        };
-
-        // Allow only owner and group to read/write the socket
-        fs::set_permissions(&self.config.socket, fs::Permissions::from_mode(0o660))?;
-
-        daemon.start(listener)?;
-        let result = daemon.wait();
-
-        for handler in daemon.get_epoll_handlers() {
-            handler.send_exit_event();
-        }
-
-        match result {
-            Ok(()) => {}
-            Err(VhostUserBackendError::HandleRequest(VhostUserError::Disconnected))
-            | Err(VhostUserBackendError::HandleRequest(VhostUserError::PartialMessage)) => {}
-            Err(e) => {
-                return Err(e.into());
-            }
-        }
-
-        info!("Finished serving socket!");
-        Self::shutdown_worker_threads(&backend);
-
-        Ok(())
-    }
-
-    fn shutdown_worker_threads(backend: &UbiBlkBackend) {
-        for thread in backend.threads().iter() {
-            match thread.lock() {
-                Ok(t) => {
-                    if let Err(e) = t.kill_evt.write(1) {
-                        error!("Error shutting down worker thread: {e:?}");
-                    }
-                }
-                Err(_) => error!("Failed to lock worker thread for shutdown"),
-            }
-        }
-
-        info!("Finished shutting down worker threads!");
+impl Drop for BackendEnv {
+    fn drop(&mut self) {
+        self.stop_bgworker_thread();
     }
 }
 
-pub fn block_backend_loop(config: &DeviceConfig) -> Result<()> {
+pub fn run_backend_loop<F>(
+    config: &DeviceConfig,
+    backend_name: &str,
+    loop_forever: bool,
+    mut serve: F,
+) -> Result<()>
+where
+    F: FnMut(&BackendEnv) -> Result<()>,
+{
     info!(
-        "Starting vhost-user-blk backend. Process ID: {}",
+        "Starting {backend_name} backend. Process ID: {}",
         std::process::id()
     );
 
@@ -310,17 +269,21 @@ pub fn block_backend_loop(config: &DeviceConfig) -> Result<()> {
 
     let _rpc_handle = if let Some(path) = config.rpc_socket_path.as_ref() {
         let status_reporter = backend_env.status_reporter();
-        let io_trackers = backend_env.io_trackers.clone();
+        let io_trackers = backend_env.io_trackers().clone();
         Some(rpc::start_rpc_server(path, status_reporter, io_trackers)?)
     } else {
         None
     };
 
-    loop {
-        backend_env.serve()?;
+    if loop_forever {
+        loop {
+            serve(&backend_env)?;
+        }
+    } else {
+        serve(&backend_env)?;
     }
 
-    // TODO: Graceful shutdown handling
+    Ok(())
 }
 
 pub fn init_metadata(config: &DeviceConfig, stripe_sector_count_shift: u8) -> Result<()> {

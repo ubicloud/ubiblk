@@ -166,9 +166,9 @@ mod tests {
     use std::io::{Cursor, Read, Write};
     use std::sync::{Arc, Mutex};
 
+    use crate::backends::SECTOR_SIZE;
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::stripe_server::StripeServer;
-    use crate::vhost_backend::SECTOR_SIZE;
 
     use super::*;
 

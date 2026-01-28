@@ -14,8 +14,8 @@ use std::{
 };
 
 use crate::{
+    backends::common::io_tracking::{IoKind, IoTracker},
     utils::umask_guard::UmaskGuard,
-    vhost_backend::io_tracking::{IoKind, IoTracker},
     Result,
 };
 use log::{error, info, warn};
@@ -366,13 +366,13 @@ mod tests {
     fn test_rpc_queues() {
         let path = test_socket_path("queues");
 
-        let mut io_tracker_1 = IoTracker::new(4);
+        let io_tracker_1 = IoTracker::new(4);
         io_tracker_1.add_flush(0);
         io_tracker_1.add_read(1, 2, 3);
         io_tracker_1.add_write(2, 4, 5);
         io_tracker_1.add_flush(3);
 
-        let mut io_tracker_2 = IoTracker::new(4);
+        let io_tracker_2 = IoTracker::new(4);
         io_tracker_2.add_write(2, 10, 20);
 
         let io_tracker_3 = IoTracker::new(4);

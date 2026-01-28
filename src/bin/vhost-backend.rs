@@ -1,6 +1,6 @@
 use clap::Parser;
+use ubiblk::backends::vhost::block_backend_loop;
 use ubiblk::cli::{load_config, CommonArgs};
-use ubiblk::vhost_backend::*;
 use ubiblk::Result;
 
 #[derive(Parser)]

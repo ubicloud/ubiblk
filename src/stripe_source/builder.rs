@@ -2,11 +2,11 @@ use log::info;
 
 use crate::{
     archive::{ArchiveStore, FileSystemStore, S3Store},
+    backends::build_raw_image_device,
     block_device::NullBlockDevice,
     config::{ArchiveStripeSourceConfig, AwsCredentials, DeviceConfig, StripeSourceConfig},
     stripe_server::connect_to_stripe_server,
     utils::s3::{build_s3_client, create_runtime},
-    vhost_backend::build_raw_image_device,
     Result,
 };
 

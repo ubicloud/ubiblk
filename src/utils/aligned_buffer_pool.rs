@@ -58,7 +58,7 @@ impl AlignedBufferPool {
 
 #[cfg(test)]
 mod tests {
-    use crate::vhost_backend::SECTOR_SIZE;
+    use crate::backends::SECTOR_SIZE;
 
     use super::*;
 

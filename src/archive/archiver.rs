@@ -5,11 +5,11 @@ use log::{debug, info};
 use super::ArchiveStore;
 use crate::{
     archive::{ArchiveMetadata, DEFAULT_ARCHIVE_TIMEOUT},
+    backends::SECTOR_SIZE,
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedBuffer, UbiMetadata},
     crypt::XtsBlockCipher,
     stripe_source::{ArchiveStripeSource, StripeSource},
     utils::{aligned_buffer::BUFFER_ALIGNMENT, hash::sha256_hex, AlignedBufferPool},
-    vhost_backend::SECTOR_SIZE,
     KeyEncryptionCipher, Result,
 };
 

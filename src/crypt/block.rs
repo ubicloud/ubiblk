@@ -1,6 +1,5 @@
 use crate::{
-    crypt::KeyEncryptionCipher, vhost_backend::SECTOR_SIZE, Result, XTS_AES_256_dec,
-    XTS_AES_256_enc,
+    backends::SECTOR_SIZE, crypt::KeyEncryptionCipher, Result, XTS_AES_256_dec, XTS_AES_256_enc,
 };
 
 use openssl::rand::rand_bytes;

@@ -1,9 +1,9 @@
 use crate::{
+    backends::SECTOR_SIZE,
     block_device::{
         bdev_lazy::metadata::types::{METADATA_VERSION_MAJOR, METADATA_VERSION_MINOR, UBI_MAGIC},
         shared_buffer, wait_for_completion, BlockDevice, UbiMetadata,
     },
-    vhost_backend::SECTOR_SIZE,
     Result,
 };
 use log::{error, info};

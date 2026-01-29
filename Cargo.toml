@@ -5,10 +5,16 @@ edition = "2021"
 license = "AGPL-3.0-only"
 
 [profile.release]
-codegen-units = 16
 lto = "thin"
+codegen-units = 4
 debug = true
 strip = false
+opt-level = "s"
+
+[profile.release.package."*"]
+codegen-units = 16
+debug = false
+opt-level = "s"
 
 [dependencies]
 clap = { version = "4.5.49", features = ["cargo", "wrap_help", "derive"] }

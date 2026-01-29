@@ -106,7 +106,15 @@ grep CONFIG_BLK_DEV_UBLK /boot/config-$(uname -r)
 
 If the output is `CONFIG_BLK_DEV_UBLK=y`, then ublk support is built into the
 kernel. If it is `CONFIG_BLK_DEV_UBLK=m`, then ublk is built as a module and you
-need to load it with:
+need to:
+
+1. Install extra kernel modules if not already installed:
+
+```bash
+sudo apt-get install linux-modules-extra-$(uname -r)
+```
+
+2. Load the ublk module:
 
 ```bash
 sudo modprobe ublk_drv

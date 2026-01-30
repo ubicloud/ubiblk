@@ -146,7 +146,7 @@ fn to_tls_error<E: ToString>(err: E) -> UbiblkError {
     let location = std::panic::Location::caller();
     UbiblkError::TlsError {
         description: err.to_string(),
-        context: crate::ErrorLocation::new(location.file(), location.line()),
+        meta: crate::ErrorMeta::new(crate::ErrorLocation::new(location.file(), location.line())),
     }
 }
 

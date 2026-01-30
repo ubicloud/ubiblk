@@ -199,7 +199,7 @@ fn param_err(description: impl Into<String>) -> UbiblkError {
     let location = std::panic::Location::caller();
     UbiblkError::InvalidParameter {
         description: description.into(),
-        context: crate::ErrorLocation::new(location.file(), location.line()),
+        meta: crate::ErrorMeta::new(crate::ErrorLocation::new(location.file(), location.line())),
     }
 }
 

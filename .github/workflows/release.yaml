@@ -61,12 +61,12 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend ublk-backend init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata
+          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf ubiblk-${{ matrix.arch }}.tar.gz vhost-backend ublk-backend init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata
           cd -
 
       - uses: ncipollo/release-action@v1
         if: github.ref_type == 'tag'
         with:
-          artifacts: "${{ github.workspace }}/target/${{ matrix.target }}/release/vhost-backend-${{ matrix.arch }}.tar.gz"
+          artifacts: "${{ github.workspace }}/target/${{ matrix.target }}/release/ubiblk-${{ matrix.arch }}.tar.gz"
           body: "Release ${{ github.ref_name }}"
           allowUpdates: true

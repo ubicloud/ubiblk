@@ -75,7 +75,7 @@ impl ErrorContexts {
 
 impl std::fmt::Display for ErrorContexts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for context in self.0.iter().rev() {
+        for context in self.0.iter() {
             write!(f, "\nContext: {context}")?;
         }
         Ok(())
@@ -233,8 +233,16 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl UbiblkError {
     #[track_caller]
-    pub fn context(mut self, message: impl Into<String>) -> Self {
+    pub fn context(self, message: impl Into<String>) -> Self {
         let location = std::panic::Location::caller();
+        self.context_at(message, location)
+    }
+
+    pub fn context_at(
+        mut self,
+        message: impl Into<String>,
+        location: &'static std::panic::Location<'static>,
+    ) -> Self {
         let context = ErrorContext::new(
             message,
             ErrorLocation::new(location.file(), location.line()),
@@ -254,7 +262,8 @@ where
 {
     #[track_caller]
     fn context(self, message: impl Into<String>) -> Result<T> {
-        self.map_err(|e| e.into().context(message))
+        let location = std::panic::Location::caller();
+        self.map_err(|e| e.into().context_at(message, location))
     }
 }
 
@@ -450,8 +459,8 @@ mod tests {
         let error = crate::ubiblk_error!(InvalidParameter {
             description: "Test error".to_string(),
         })
-        .context("outer context")
-        .context("inner context");
+        .context("inner context")
+        .context("outer context");
         let rendered = format!("{error}");
         let inner_index = rendered
             .find("Context: inner context (at ")
@@ -467,18 +476,44 @@ mod tests {
         fn inner_operation() -> std::result::Result<(), std::io::Error> {
             Err(std::io::Error::other("inner error"))
         }
-        fn outer_operation() -> Result<()> {
-            inner_operation().context("failed during outer operation")?;
+        fn middle_operation(context_line: &mut u32) -> Result<()> {
+            *context_line = line!() + 1;
+            inner_operation().context("failed during middle operation")?;
             Ok(())
         }
-        let result = outer_operation();
+        fn outer_operation(
+            outer_context_line: &mut u32,
+            middle_context_line: &mut u32,
+        ) -> Result<()> {
+            *outer_context_line = line!() + 1;
+            middle_operation(middle_context_line).context("failed in outer_operation")?;
+            Ok(())
+        }
+        let mut middle_context_line = 0;
+        let mut outer_context_line = 0;
+        let result = outer_operation(&mut outer_context_line, &mut middle_context_line);
         assert!(result.is_err());
         let error = result.unwrap_err();
         let rendered = format!("{error}");
         // Verify the error contains the I/O error message
         assert_contains(&rendered, "inner error");
         // Verify the error contains the context message
-        assert_contains(&rendered, "Context: failed during outer operation (at ");
+        assert_contains(
+            &rendered,
+            &format!(
+                "Context: failed during middle operation (at {}:{})",
+                file!(),
+                middle_context_line
+            ),
+        );
+        assert_contains(
+            &rendered,
+            &format!(
+                "Context: failed in outer_operation (at {}:{})",
+                file!(),
+                outer_context_line
+            ),
+        );
         // Verify the error is of the correct variant (IoError)
         assert_starts_with(&rendered, "I/O error:");
     }

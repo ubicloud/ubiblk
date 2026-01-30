@@ -72,3 +72,28 @@ fn serve_vhost(backend_env: &BackendEnv) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serve_vhost_requires_socket() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let config = DeviceConfig {
+            path: disk_file.path().to_str().unwrap().to_string(),
+            socket: None,
+            queue_size: 128,
+            ..Default::default()
+        };
+
+        let err = block_backend_loop(&config).unwrap_err();
+
+        assert!(matches!(err,
+            crate::UbiblkError::InvalidParameter { description, .. }
+            if description == "socket must be specified for the vhost backend"
+        ));
+    }
+}

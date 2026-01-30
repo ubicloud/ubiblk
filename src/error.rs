@@ -6,12 +6,12 @@ macro_rules! ubiblk_error {
     ($variant:ident { $($field:ident : $value:expr),* $(,)? }) => {{
         $crate::UbiblkError::$variant {
             $($field: $value,)*
-            context: $crate::ErrorLocation::new(file!(), line!()),
+            meta: $crate::ErrorMeta::new($crate::ErrorLocation::new(file!(), line!())),
         }
     }};
     ($variant:ident) => {{
         $crate::UbiblkError::$variant {
-            context: $crate::ErrorLocation::new(file!(), line!()),
+            meta: $crate::ErrorMeta::new($crate::ErrorLocation::new(file!(), line!())),
         }
     }};
 }
@@ -28,131 +28,235 @@ impl ErrorLocation {
     }
 }
 
+impl Default for ErrorLocation {
+    fn default() -> Self {
+        Self {
+            file: "<unknown>",
+            line: 0,
+        }
+    }
+}
+
 impl std::fmt::Display for ErrorLocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}:{}", self.file, self.line)
     }
 }
 
-#[derive(Error, Debug)]
-pub enum UbiblkError {
-    #[error("Thread creation error: {source} (at {context})")]
+#[derive(Debug, Clone)]
+pub struct ErrorContext {
+    message: String,
+    location: ErrorLocation,
+}
+
+impl ErrorContext {
+    pub fn new(message: impl Into<String>, location: ErrorLocation) -> Self {
+        Self {
+            message: message.into(),
+            location,
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} (at {})", self.message, self.location)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ErrorContexts(Vec<ErrorContext>);
+
+impl ErrorContexts {
+    pub fn push(&mut self, context: ErrorContext) {
+        self.0.push(context);
+    }
+}
+
+impl std::fmt::Display for ErrorContexts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for context in self.0.iter().rev() {
+            write!(f, "\nContext: {context}")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ErrorMeta {
+    pub location: ErrorLocation,
+    pub contexts: ErrorContexts,
+}
+
+impl ErrorMeta {
+    pub fn new(location: ErrorLocation) -> Self {
+        Self {
+            location,
+            contexts: ErrorContexts::default(),
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorMeta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(at {}){}", self.location, self.contexts)
+    }
+}
+
+macro_rules! ubiblk_error_variants {
+    ($( $variant:ident { $( $(#[$field_attr:meta])* $field:ident : $ty:ty ),* $(,)? } => $message:expr ),* $(,)?) => {
+        #[derive(Error, Debug)]
+        pub enum UbiblkError {
+            $(
+                #[error($message)]
+                $variant {
+                    $( $(#[$field_attr])* $field: $ty, )*
+                },
+            )*
+        }
+
+        impl UbiblkError {
+            fn contexts_mut(&mut self) -> &mut ErrorContexts {
+                match self {
+                    $( UbiblkError::$variant { meta, .. } => &mut meta.contexts, )*
+                }
+            }
+        }
+    };
+}
+
+ubiblk_error_variants! {
     ThreadCreation {
         #[source]
         source: std::io::Error,
-        context: ErrorLocation,
-    },
-    #[error("I/O channel creation error: {source} (at {context})")]
+        meta: ErrorMeta,
+    } => "Thread creation error: {source} {meta}",
     IoChannelCreation {
         #[source]
         source: std::io::Error,
-        context: ErrorLocation,
-    },
-    #[error("Guest memory access error: {source} (at {context})")]
+        meta: ErrorMeta,
+    } => "I/O channel creation error: {source} {meta}",
     GuestMemoryAccess {
         #[source]
         source: vm_memory::GuestMemoryError,
-        context: ErrorLocation,
-    },
-    #[error("I/O error: {source} (at {context})")]
+        meta: ErrorMeta,
+    } => "Guest memory access error: {source} {meta}",
     IoError {
+        #[source]
         source: std::io::Error,
-        context: ErrorLocation,
-    },
-    #[error("Channel error: {reason} (at {context})")]
+        meta: ErrorMeta,
+    } => "I/O error: {source} {meta}",
     ChannelError {
         reason: String,
-        context: ErrorLocation,
-    },
-    #[error("Invalid parameter error: {description} (at {context})")]
+        meta: ErrorMeta,
+    } => "Channel error: {reason} {meta}",
     InvalidParameter {
         description: String,
-        context: ErrorLocation,
-    },
-    #[error("Metadata error: {description} (at {context})")]
+        meta: ErrorMeta,
+    } => "Invalid parameter error: {description} {meta}",
     MetadataError {
         description: String,
-        context: ErrorLocation,
-    },
-    #[error("Protocol error: {description} (at {context})")]
+        meta: ErrorMeta,
+    } => "Metadata error: {description} {meta}",
     ProtocolError {
         description: String,
-        context: ErrorLocation,
-    },
-    #[error("Missing stripe metadata on client (at {context})")]
-    MissingStripeMetadata { context: ErrorLocation },
-    #[error("Stripe {stripe} is unavailable (at {context})")]
-    StripeUnavailableData { stripe: u64, context: ErrorLocation },
-    #[error("Stripe {stripe} size mismatch: expected {expected} bytes, got {actual} bytes (at {context})")]
+        meta: ErrorMeta,
+    } => "Protocol error: {description} {meta}",
+    MissingStripeMetadata {
+        meta: ErrorMeta,
+    } => "Missing stripe metadata on client {meta}",
+    StripeUnavailableData {
+        stripe: u64,
+        meta: ErrorMeta,
+    } => "Stripe {stripe} is unavailable {meta}",
     StripeSizeMismatch {
         stripe: u64,
         expected: usize,
         actual: usize,
-        context: ErrorLocation,
-    },
-    #[error("Stripe fetch failed for stripe {stripe} (at {context})")]
+        meta: ErrorMeta,
+    } => "Stripe {stripe} size mismatch: expected {expected} bytes, got {actual} bytes {meta}",
     StripeFetchFailed {
         stripe: usize,
-        context: ErrorLocation,
-    },
-    #[error("Stripe fetch timeout for stripe {stripe} (at {context})")]
+        meta: ErrorMeta,
+    } => "Stripe fetch failed for stripe {stripe} {meta}",
     StripeFetchTimeout {
         stripe: usize,
-        context: ErrorLocation,
-    },
-    #[error("Remote server returned error status: {status} (at {context})")]
-    RemoteStatus { status: u8, context: ErrorLocation },
-    #[error("TLS setup failed: {description} (at {context})")]
+        meta: ErrorMeta,
+    } => "Stripe fetch timeout for stripe {stripe} {meta}",
+    RemoteStatus {
+        status: u8,
+        meta: ErrorMeta,
+    } => "Remote server returned error status: {status} {meta}",
     TlsError {
         description: String,
-        context: ErrorLocation,
-    },
-    #[error("Background worker error: {description} (at {context})")]
+        meta: ErrorMeta,
+    } => "TLS setup failed: {description} {meta}",
     BackgroundWorkerError {
         description: String,
-        context: ErrorLocation,
-    },
-    #[error("RPC error: {description} (at {context})")]
+        meta: ErrorMeta,
+    } => "Background worker error: {description} {meta}",
     RpcError {
         description: String,
-        context: ErrorLocation,
-    },
-    #[error("Vhost user error: {reason} (at {context})")]
+        meta: ErrorMeta,
+    } => "RPC error: {description} {meta}",
     VhostUserError {
-        reason: vhost::vhost_user::Error,
-        context: ErrorLocation,
-    },
-    #[error("Vhost user backend error: {reason} (at {context})")]
+        #[source]
+        source: vhost::vhost_user::Error,
+        meta: ErrorMeta,
+    } => "Vhost user error: {source} {meta}",
     VhostUserBackendError {
         reason: vhost_user_backend::Error,
-        context: ErrorLocation,
-    },
-    #[error("Archive error: {description} (at {context})")]
+        meta: ErrorMeta,
+    } => "Vhost user backend error: {reason} {meta}",
     ArchiveError {
         description: String,
-        context: ErrorLocation,
-    },
-    #[error("Cryptography error: {description} (at {context})")]
+        meta: ErrorMeta,
+    } => "Archive error: {description} {meta}",
     CryptoError {
         description: String,
-        context: ErrorLocation,
-    },
-    #[error("CPU pinning error: {source} (at {context})")]
+        meta: ErrorMeta,
+    } => "Cryptography error: {description} {meta}",
     CpuPinning {
         #[source]
         source: nix::Error,
-        context: ErrorLocation,
-    },
-    #[error("Ublk error: {source} (at {context})")]
+        meta: ErrorMeta,
+    } => "CPU pinning error: {source} {meta}",
     UblkError {
         #[source]
         source: libublk::UblkError,
-        context: ErrorLocation,
-    },
+        meta: ErrorMeta,
+    } => "Ublk error: {source} {meta}",
 }
 
 pub type Error = UbiblkError;
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl UbiblkError {
+    #[track_caller]
+    pub fn context(mut self, message: impl Into<String>) -> Self {
+        let location = std::panic::Location::caller();
+        let context = ErrorContext::new(
+            message,
+            ErrorLocation::new(location.file(), location.line()),
+        );
+        self.contexts_mut().push(context);
+        self
+    }
+}
+
+pub trait ResultExt<T> {
+    fn context(self, message: impl Into<String>) -> Result<T>;
+}
+
+impl<T, E> ResultExt<T> for std::result::Result<T, E>
+where
+    E: Into<UbiblkError>,
+{
+    #[track_caller]
+    fn context(self, message: impl Into<String>) -> Result<T> {
+        self.map_err(|e| e.into().context(message))
+    }
+}
 
 impl From<std::io::Error> for UbiblkError {
     #[track_caller]
@@ -160,7 +264,7 @@ impl From<std::io::Error> for UbiblkError {
         let location = std::panic::Location::caller();
         UbiblkError::IoError {
             source,
-            context: ErrorLocation::new(location.file(), location.line()),
+            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
         }
     }
 }
@@ -171,18 +275,18 @@ impl From<vhost_user_backend::Error> for UbiblkError {
         let location = std::panic::Location::caller();
         UbiblkError::VhostUserBackendError {
             reason,
-            context: ErrorLocation::new(location.file(), location.line()),
+            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
         }
     }
 }
 
 impl From<vhost::vhost_user::Error> for UbiblkError {
     #[track_caller]
-    fn from(reason: vhost::vhost_user::Error) -> Self {
+    fn from(source: vhost::vhost_user::Error) -> Self {
         let location = std::panic::Location::caller();
         UbiblkError::VhostUserError {
-            reason,
-            context: ErrorLocation::new(location.file(), location.line()),
+            source,
+            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
         }
     }
 }
@@ -193,7 +297,7 @@ impl From<UblkError> for UbiblkError {
         let location = std::panic::Location::caller();
         UbiblkError::UblkError {
             source: err,
-            context: ErrorLocation::new(location.file(), location.line()),
+            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
         }
     }
 }
@@ -339,5 +443,43 @@ mod tests {
         let rendered = format!("{ubiblk_error}");
         assert_starts_with(&rendered, "Ublk error: Invalid input (at ");
         assert_contains(&rendered, "src/error.rs:");
+    }
+
+    #[test]
+    fn test_context_stack_format() {
+        let error = crate::ubiblk_error!(InvalidParameter {
+            description: "Test error".to_string(),
+        })
+        .context("outer context")
+        .context("inner context");
+        let rendered = format!("{error}");
+        let inner_index = rendered
+            .find("Context: inner context (at ")
+            .expect("missing inner context");
+        let outer_index = rendered
+            .find("Context: outer context (at ")
+            .expect("missing outer context");
+        assert!(inner_index < outer_index);
+    }
+
+    #[test]
+    fn test_result_ext_context_with_question_operator() {
+        fn inner_operation() -> std::result::Result<(), std::io::Error> {
+            Err(std::io::Error::other("inner error"))
+        }
+        fn outer_operation() -> Result<()> {
+            inner_operation().context("failed during outer operation")?;
+            Ok(())
+        }
+        let result = outer_operation();
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        let rendered = format!("{error}");
+        // Verify the error contains the I/O error message
+        assert_contains(&rendered, "inner error");
+        // Verify the error contains the context message
+        assert_contains(&rendered, "Context: failed during outer operation (at ");
+        // Verify the error is of the correct variant (IoError)
+        assert_starts_with(&rendered, "I/O error:");
     }
 }

@@ -253,6 +253,18 @@ mod tests {
 
     use super::*;
 
+    fn test_store(request_tx: Option<Sender<S3Request>>) -> S3Store {
+        let (_, result_rx) = unbounded();
+        S3Store {
+            prefix: None,
+            request_tx,
+            result_rx,
+            finished_puts: Vec::new(),
+            finished_gets: Vec::new(),
+            workers: Vec::new(),
+        }
+    }
+
     fn prepare_s3_store(bucket: &str, prefix: Option<&str>, rules: &[Rule]) -> S3Store {
         S3Store::new(
             mock_client!(aws_sdk_s3, rules),
@@ -275,6 +287,40 @@ mod tests {
     }
 
     #[test]
+    fn start_put_object_rejects_invalid_name() {
+        let (tx, _rx) = unbounded();
+        let mut store = test_store(Some(tx));
+        store.start_put_object("bad/name", b"data");
+        let results = store.poll_puts();
+        assert_eq!(results.len(), 1);
+        let (name, result) = &results[0];
+        assert_eq!(name, "bad/name");
+        let err = result
+            .as_ref()
+            .expect_err("expected error for invalid name");
+        assert!(
+            err.to_string().contains("Invalid object name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn start_put_object_errors_when_queue_missing() {
+        let mut store = test_store(None);
+        store.start_put_object("object", b"data");
+        let results = store.poll_puts();
+        assert_eq!(results.len(), 1);
+        let err = results[0]
+            .1
+            .as_ref()
+            .expect_err("expected error when queue missing");
+        assert!(
+            err.to_string().contains("S3 worker queue is unavailable"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn test_get_object() {
         let get_rule = mock!(S3Client::get_object).then_output(|| {
             GetObjectOutput::builder()
@@ -287,6 +333,40 @@ mod tests {
         let result = store.get_object("test-object", Duration::from_secs(5));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), b"hello");
+    }
+
+    #[test]
+    fn start_get_object_rejects_invalid_name() {
+        let (tx, _rx) = unbounded();
+        let mut store = test_store(Some(tx));
+        store.start_get_object("..");
+        let results = store.poll_gets();
+        assert_eq!(results.len(), 1);
+        let (name, result) = &results[0];
+        assert_eq!(name, "..");
+        let err = result
+            .as_ref()
+            .expect_err("expected error for invalid name");
+        assert!(
+            err.to_string().contains("Invalid object name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn start_get_object_errors_when_queue_missing() {
+        let mut store = test_store(None);
+        store.start_get_object("object");
+        let results = store.poll_gets();
+        assert_eq!(results.len(), 1);
+        let err = results[0]
+            .1
+            .as_ref()
+            .expect_err("expected error when queue missing");
+        assert!(
+            err.to_string().contains("S3 worker queue is unavailable"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

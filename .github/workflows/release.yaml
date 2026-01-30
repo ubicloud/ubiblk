@@ -51,6 +51,7 @@ jobs:
         run: |
           cargo build --release --target=${{ matrix.target }}
 
+      # Strip debug info from binaries (except the backends)
       - name: Strip debug info
         run: |
           cd target/${{ matrix.target }}/release
@@ -60,7 +61,7 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata
+          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf vhost-backend-${{ matrix.arch }}.tar.gz vhost-backend ublk-backend init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata
           cd -
 
       - uses: ncipollo/release-action@v1

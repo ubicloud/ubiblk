@@ -381,7 +381,10 @@ pub fn build_block_device(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::block_device::bdev_test::TestBlockDevice;
     use crate::config::{RawStripeSourceConfig, StripeSourceConfig};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
 
     #[test]
     fn build_backend_env_no_metadata() {
@@ -397,6 +400,72 @@ mod tests {
 
         let result = BackendEnv::build(&config);
         assert!(result.is_ok());
+    }
+
+    fn build_test_bgworker_config() -> (BgWorkerConfig, Sender<BgWorkerRequest>) {
+        let stripe_sector_count_shift = 11;
+        let target_dev = TestBlockDevice::new(1024 * 1024);
+        let metadata_dev = TestBlockDevice::new(1024 * 1024);
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, 16, 0);
+        metadata.save_to_bdev(&metadata_dev).unwrap();
+        let loaded_metadata = UbiMetadata::load_from_bdev(&metadata_dev).unwrap();
+        let shared_state = SharedMetadataState::new(&loaded_metadata);
+        let stripe_source_builder = Box::new(StripeSourceBuilder::new(
+            DeviceConfig::default(),
+            shared_state.stripe_sector_count(),
+            loaded_metadata.has_fetched_all_stripes(),
+        ));
+        let (sender, receiver) = channel();
+
+        (
+            BgWorkerConfig {
+                target_dev: Box::new(target_dev),
+                stripe_source_builder,
+                metadata_dev: Box::new(metadata_dev),
+                alignment: 4096,
+                autofetch: false,
+                shared_state,
+                receiver,
+            },
+            sender,
+        )
+    }
+
+    #[test]
+    fn run_bgworker_handles_shutdown_request() {
+        let (config, sender) = build_test_bgworker_config();
+        sender.send(BgWorkerRequest::Shutdown).unwrap();
+        BackendEnv::run_bgworker(config);
+    }
+
+    #[test]
+    fn spawn_bgworker_thread_runs_and_joins() {
+        let (config, sender) = build_test_bgworker_config();
+        let handle = BackendEnv::spawn_bgworker_thread(config).unwrap();
+        sender.send(BgWorkerRequest::Shutdown).unwrap();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn run_backend_loop_invokes_backend_once() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let config = DeviceConfig {
+            path: disk_file.path().to_str().unwrap().to_string(),
+            queue_size: 128,
+            ..Default::default()
+        };
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_handle = call_count.clone();
+        run_backend_loop(&config, "test-backend", false, |_| {
+            call_count_handle.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]

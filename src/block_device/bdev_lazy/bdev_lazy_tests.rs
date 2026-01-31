@@ -4,7 +4,7 @@ mod tests {
     use crate::block_device::{
         bdev_lazy::{BgWorker, LazyBlockDevice, SharedMetadataState, UbiMetadata},
         bdev_test::{TestBlockDevice, TestDeviceMetrics},
-        BlockDevice, IoChannel,
+        metadata_flags, BlockDevice, IoChannel,
     };
     use crate::block_device::{shared_buffer, SharedBuffer};
     use std::cell::RefCell;
@@ -242,6 +242,19 @@ mod tests {
             write_data
         );
 
+        // write request on the same stripe
+        let write_data = b"second_write";
+        write_buf.borrow_mut().as_mut_slice()[..write_data.len()].copy_from_slice(write_data);
+        chan.add_write(env.stripe_sectors, 1, write_buf.clone(), 3);
+        chan.submit().unwrap();
+        let results = drive(&env.bgworker, &mut chan);
+        assert_eq!(results, vec![(3, true)]);
+        let start = env.stripe_sectors as usize * SECTOR_SIZE;
+        assert_eq!(
+            &env.target_mem.read().unwrap()[start..start + write_data.len()],
+            write_data
+        );
+
         let flush_id = 3;
         chan.add_flush(flush_id);
         chan.submit().unwrap();
@@ -388,5 +401,54 @@ mod tests {
             &read_buf.borrow().as_slice()[.."image_read".len()],
             b"image_read"
         );
+    }
+
+    #[test]
+    fn test_start_stripe_fetches_channel_failure_read() {
+        let TestEnv { lazy, bgworker, .. } = setup_env(false, false, b"");
+        drop(bgworker);
+        let mut chan = lazy.create_channel().unwrap();
+
+        let read_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
+        chan.add_read(0, 1, read_buf, 1);
+        chan.submit().unwrap();
+        let results = chan.poll();
+
+        assert_eq!(results, vec![(1, false)]);
+    }
+
+    #[test]
+    fn test_start_stripe_fetches_channel_failure_write() {
+        let TestEnv { lazy, bgworker, .. } = setup_env(false, false, b"");
+        drop(bgworker);
+        let mut chan = lazy.create_channel().unwrap();
+
+        let write_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
+        chan.add_write(0, 1, write_buf, 1);
+        chan.submit().unwrap();
+        let results = chan.poll();
+        assert_eq!(results, vec![(1, false)]);
+    }
+
+    #[test]
+    fn test_start_stripe_set_written_channel_failure() {
+        let TestEnv {
+            lazy,
+            bgworker,
+            metadata_state,
+            target_metrics,
+            ..
+        } = setup_env(false, true, b"");
+        metadata_state.set_stripe_header(0, metadata_flags::FETCHED);
+        drop(bgworker);
+        let mut chan = lazy.create_channel().unwrap();
+
+        let write_buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
+        chan.add_write(0, 1, write_buf, 1);
+        chan.submit().unwrap();
+        let results = chan.poll();
+
+        assert_eq!(results, vec![(1, false)]);
+        assert_eq!(target_metrics.read().unwrap().writes, 0);
     }
 }

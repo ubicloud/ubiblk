@@ -4,7 +4,7 @@ use openssl::{
     ssl::{Ssl, SslContext, SslContextBuilder, SslMethod, SslOptions, SslStream, SslVerifyMode},
 };
 
-use crate::{KeyEncryptionCipher, Result, UbiblkError};
+use crate::{KeyEncryptionCipher, Result};
 
 use super::DynStream;
 
@@ -92,10 +92,10 @@ pub fn wrap_psk_client_stream(stream: DynStream, creds: &PskCredentials) -> Resu
     });
 
     let ctx: SslContext = builder.build();
-    let ssl = Ssl::new(&ctx).map_err(to_tls_error)?;
-    let mut stream = SslStream::new(ssl, stream).map_err(to_tls_error)?;
+    let ssl = Ssl::new(&ctx)?;
+    let mut stream = SslStream::new(ssl, stream)?;
 
-    stream.connect().map_err(to_tls_error)?;
+    stream.connect()?;
 
     Ok(Box::new(stream))
 }
@@ -119,39 +119,30 @@ pub fn wrap_psk_server_stream(stream: DynStream, creds: &PskCredentials) -> Resu
     });
 
     let ctx: SslContext = builder.build();
-    let mut ssl = Ssl::new(&ctx).map_err(to_tls_error)?;
+    let mut ssl = Ssl::new(&ctx)?;
     ssl.set_accept_state();
-    let mut stream = SslStream::new(ssl, stream).map_err(to_tls_error)?;
-    stream.accept().map_err(to_tls_error)?;
+    let mut stream = SslStream::new(ssl, stream)?;
+    stream.accept()?;
 
     Ok(Box::new(stream))
 }
 
 fn build_psk_context() -> Result<SslContextBuilder> {
-    let mut builder = SslContext::builder(SslMethod::tls()).map_err(to_tls_error)?;
+    let mut builder = SslContext::builder(SslMethod::tls())?;
 
     // TODO: Support TLS 1.3 PSK
     builder.set_options(SslOptions::NO_TLSV1_3);
     builder.set_options(SslOptions::NO_TICKET);
-    builder
-        .set_cipher_list(PSK_CIPHER_SUITE)
-        .map_err(to_tls_error)?;
+    builder.set_cipher_list(PSK_CIPHER_SUITE)?;
     builder.set_verify(SslVerifyMode::NONE);
 
     Ok(builder)
 }
 
-#[track_caller]
-fn to_tls_error<E: ToString>(err: E) -> UbiblkError {
-    let location = std::panic::Location::caller();
-    UbiblkError::TlsError {
-        description: err.to_string(),
-        meta: crate::ErrorMeta::new(crate::ErrorLocation::new(location.file(), location.line())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::UbiblkError;
+
     use super::*;
 
     #[test]

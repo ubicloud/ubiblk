@@ -131,16 +131,12 @@ mod tests {
     };
     use std::sync::mpsc::channel;
 
-    fn build_bg_worker() -> (BgWorker, std::sync::mpsc::Sender<BgWorkerRequest>) {
+    fn build_bg_worker_with_source(
+        stripe_source: Box<dyn StripeSource>,
+    ) -> (BgWorker, std::sync::mpsc::Sender<BgWorkerRequest>) {
         let stripe_sector_count_shift = 11;
-        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
-        let source_dev = TestBlockDevice::new(1024 * 1024);
         let target_dev = TestBlockDevice::new(1024 * 1024);
         let metadata_dev = TestBlockDevice::new(1024 * 1024);
-        let stripe_source = Box::new(
-            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
-                .unwrap(),
-        );
         let metadata = UbiMetadata::new(stripe_sector_count_shift, 16, 16);
         metadata.save_to_bdev(&metadata_dev).unwrap();
         let metadata_state = {
@@ -163,6 +159,17 @@ mod tests {
             .unwrap(),
             tx,
         )
+    }
+
+    fn build_bg_worker() -> (BgWorker, std::sync::mpsc::Sender<BgWorkerRequest>) {
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+        let source_dev = TestBlockDevice::new(1024 * 1024);
+        let stripe_source = Box::new(
+            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
+                .unwrap(),
+        );
+        build_bg_worker_with_source(stripe_source)
     }
 
     #[test]
@@ -203,5 +210,29 @@ mod tests {
             rx,
         )
         .expect("BgWorker should support null source device");
+    }
+
+    #[test]
+    fn bg_worker_marks_failed_stripes_with_flaky_source() {
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+        let source_dev = TestBlockDevice::new(1024 * 1024);
+        let base_source =
+            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
+                .unwrap();
+        let flaky_source =
+            stripe_source::FlakyStripeSource::new(Box::new(base_source), vec![(0, 4)]);
+
+        let (mut bg_worker, sender) = build_bg_worker_with_source(Box::new(flaky_source));
+        sender
+            .send(BgWorkerRequest::Fetch { stripe_id: 0 })
+            .unwrap();
+        bg_worker.receive_requests(false);
+
+        for _ in 0..100 {
+            bg_worker.update();
+        }
+
+        assert!(bg_worker.shared_state().is_stripe_failed(0));
     }
 }

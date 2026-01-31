@@ -263,6 +263,7 @@ mod tests {
         bdev_stripe_count: usize,
         image_stripe_count: usize,
         encrypted: bool,
+        fail_stripe_fetches: Vec<usize>,
     ) -> StripeArchiver {
         let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * SECTOR_SIZE) as u64;
         let metadata = UbiMetadata::new(
@@ -273,6 +274,14 @@ mod tests {
         let bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(bdev_size));
         let stripe_source =
             BlockDeviceStripeSource::new(bdev.clone(), STRIPE_SECTOR_COUNT).unwrap();
+        let stripe_source = crate::stripe_source::FlakyStripeSource::new(
+            Box::new(stripe_source),
+            fail_stripe_fetches
+                .into_iter()
+                .map(|sid| (sid, 1))
+                .collect(),
+        );
+
         let store = Box::new(MemStore::default());
 
         StripeArchiver::new(
@@ -289,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_stripe_object_key() {
-        let archiver = prep(4, 4, false);
+        let archiver = prep(4, 4, false, Vec::new());
         let stripe_id = 42;
         let stripe_data = vec![0u8; 4096];
         let key = archiver.stripe_object_key(stripe_id, &stripe_data);
@@ -298,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_stripe_should_be_archived() {
-        let mut archiver = prep(16, 4, false);
+        let mut archiver = prep(16, 4, false, Vec::new());
         archiver.metadata.stripe_headers[8] |= metadata_flags::WRITTEN;
 
         for stripe_id in 0..16 {
@@ -313,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_archive_all_no_image_stripes() {
-        let mut archiver = prep(16, 0, false);
+        let mut archiver = prep(16, 0, false, Vec::new());
         archiver.metadata.stripe_headers[2] |= metadata_flags::WRITTEN;
         archiver.metadata.stripe_headers[5] |= metadata_flags::WRITTEN;
 
@@ -330,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_archive_all_with_image_stripes() {
-        let mut archiver = prep(16, 4, false);
+        let mut archiver = prep(16, 4, false, Vec::new());
         archiver.metadata.stripe_headers[2] &= !metadata_flags::HAS_SOURCE;
         archiver.metadata.stripe_headers[10] |= metadata_flags::WRITTEN;
         archiver.metadata.stripe_headers[12] |= metadata_flags::WRITTEN;
@@ -350,7 +359,7 @@ mod tests {
 
     #[test]
     fn test_archive_metadata_not_encrypted() {
-        let mut archiver = prep(4, 4, false);
+        let mut archiver = prep(4, 4, false, Vec::new());
         archiver.archive_all().unwrap();
         let metadata_bytes = archiver
             .archive_store
@@ -363,7 +372,7 @@ mod tests {
 
     #[test]
     fn test_archive_metadata_encrypted() {
-        let mut archiver = prep(4, 4, true);
+        let mut archiver = prep(4, 4, true, Vec::new());
         archiver.archive_all().unwrap();
         let metadata_bytes = archiver
             .archive_store
@@ -376,10 +385,21 @@ mod tests {
 
     #[test]
     fn test_object_key_large_stripe_id() {
-        let archiver = prep(10, 0, false);
+        let archiver = prep(10, 0, false, Vec::new());
         let stripe_id = 1_234_567_890_123usize;
         let stripe_data = vec![0u8; 4096];
         let key = archiver.stripe_object_key(stripe_id, &stripe_data);
         assert!(key.starts_with("stripe_1234567890123_"));
+    }
+
+    #[test]
+    fn stripe_fetch_failure() {
+        let mut archiver = prep(4, 4, false, vec![2]);
+        let result = archiver.archive_all();
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        assert!(err
+            .to_string()
+            .contains("I/O error while fetching stripe 2"));
     }
 }

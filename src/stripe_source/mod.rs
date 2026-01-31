@@ -17,9 +17,11 @@ pub trait StripeSource {
 mod archive;
 mod bdev;
 mod builder;
+mod flaky;
 mod remote;
 pub mod wait;
 pub use archive::ArchiveStripeSource;
 pub use bdev::BlockDeviceStripeSource;
 pub use builder::StripeSourceBuilder;
+pub use flaky::FlakyStripeSource;
 pub use remote::RemoteStripeSource;

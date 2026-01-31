@@ -1,7 +1,5 @@
 use std::sync::mpsc::SendError;
 
-#[cfg(test)]
-use libublk::UblkError;
 use thiserror::Error;
 
 #[macro_export]
@@ -136,21 +134,38 @@ macro_rules! ubiblk_error_variants {
     };
 }
 
+macro_rules! ubiblk_error_from_value {
+    ($field:ident) => {
+        $field
+    };
+    ($field:ident, $into:ty) => {
+        $field.into()
+    };
+}
+
 macro_rules! ubiblk_error_from {
-    ($( #[from] $variant:ident ( $field:ident : $ty:ty ) ),* $(,)?) => {
+    ($( #[from] $variant:ident ( $field:ident : $ty:ty $(=> $into:ty)? ) ),* $(,)?) => {
         $(
             impl From<$ty> for UbiblkError {
                 #[track_caller]
                 fn from($field: $ty) -> Self {
                     let location = std::panic::Location::caller();
                     UbiblkError::$variant {
-                        $field,
+                        $field: ubiblk_error_from_value!($field $(, $into)?),
                         meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
                     }
                 }
             }
         )*
     };
+}
+
+#[derive(Debug, Error)]
+pub enum TlsErrorSource {
+    #[error(transparent)]
+    Ssl(#[from] openssl::ssl::Error),
+    #[error(transparent)]
+    Stack(#[from] openssl::error::ErrorStack),
 }
 
 ubiblk_error_variants! {
@@ -216,9 +231,10 @@ ubiblk_error_variants! {
         meta: ErrorMeta,
     } => "Remote server returned error status: {status} {meta}",
     TlsError {
-        description: String,
+        #[source]
+        source: TlsErrorSource,
         meta: ErrorMeta,
-    } => "TLS setup failed: {description} {meta}",
+    } => "TLS setup failed: {source} {meta}",
     BackgroundWorkerError {
         description: String,
         meta: ErrorMeta,
@@ -260,6 +276,8 @@ ubiblk_error_from! {
     #[from] IoError(source: std::io::Error),
     #[from] VhostUserError(source: vhost::vhost_user::Error),
     #[from] VhostUserBackendError(reason: vhost_user_backend::Error),
+    #[from] TlsError(source: openssl::ssl::Error => TlsErrorSource),
+    #[from] TlsError(source: openssl::error::ErrorStack => TlsErrorSource),
     #[from] UblkError(source: libublk::UblkError),
 }
 
@@ -315,6 +333,8 @@ impl<T> From<SendError<T>> for UbiblkError {
 
 #[cfg(test)]
 mod tests {
+    use libublk::UblkError;
+
     use super::*;
 
     fn assert_starts_with(haystack: &str, needle: &str) {
@@ -464,6 +484,24 @@ mod tests {
         let ubiblk_error: UbiblkError = send_error.into();
         let rendered = format!("{ubiblk_error}");
         assert_starts_with(&rendered, "Channel error: sending on a closed channel (at ");
+        assert_contains(&rendered, "src/error.rs:");
+    }
+
+    #[test]
+    fn test_conversion_from_openssl_error_stack() {
+        let openssl_error = openssl::error::ErrorStack::get();
+        let ubiblk_error: UbiblkError = openssl_error.into();
+        let rendered = format!("{ubiblk_error}");
+        assert_starts_with(&rendered, "TLS setup failed: ");
+        assert_contains(&rendered, "src/error.rs:");
+    }
+
+    #[test]
+    fn test_conversion_from_openssl_ssl_error() {
+        let openssl_error: openssl::ssl::Error = openssl::error::ErrorStack::get().into();
+        let ubiblk_error: UbiblkError = openssl_error.into();
+        let rendered = format!("{ubiblk_error}");
+        assert_starts_with(&rendered, "TLS setup failed: ");
         assert_contains(&rendered, "src/error.rs:");
     }
 

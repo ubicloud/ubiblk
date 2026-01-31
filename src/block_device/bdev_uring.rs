@@ -1,5 +1,5 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
-use crate::{backends::SECTOR_SIZE, Result};
+use crate::{backends::SECTOR_SIZE, Result, ResultExt};
 use io_uring::IoUring;
 use log::error;
 use nix::errno::Errno;
@@ -40,20 +40,16 @@ impl UringIoChannel {
         if flags != 0 {
             opts.custom_flags(flags);
         }
-        let file = opts.open(path).map_err(|e| {
-            error!("Failed to open file {path}: {e}");
-            crate::ubiblk_error!(IoError { source: e })
-        })?;
+        let file = opts
+            .open(path)
+            .context(format!("Failed to open file {path}"))?;
         let io_uring_entries: u32 = queue_size.try_into().map_err(|_| {
             error!("Invalid queue size: {queue_size}");
             crate::ubiblk_error!(InvalidParameter {
                 description: "Invalid io_uring queue size".to_string(),
             })
         })?;
-        let ring = IoUring::new(io_uring_entries).map_err(|e| {
-            error!("Failed to create io_uring: {e}");
-            crate::ubiblk_error!(IoError { source: e })
-        })?;
+        let ring = IoUring::new(io_uring_entries).context("Failed to create io_uring instance")?;
         Ok(UringIoChannel {
             file,
             ring,

@@ -1,6 +1,6 @@
 use super::{BlockDevice, IoChannel, SharedBuffer};
 use crate::backends::SECTOR_SIZE;
-use crate::Result;
+use crate::{Result, ResultExt};
 use log::error;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -31,10 +31,9 @@ impl SyncIoChannel {
             opts.custom_flags(flags);
         }
 
-        let file = opts.open(path).map_err(|e| {
-            error!("Failed to open file {}: {}", path.display(), e);
-            crate::ubiblk_error!(IoError { source: e })
-        })?;
+        let file = opts
+            .open(path)
+            .context(format!("Failed to open file {}", path.display()))?;
         Ok(SyncIoChannel {
             file,
             finished_requests: Vec::new(),
@@ -276,12 +275,7 @@ mod tests {
     // Use a pipe to provoke seek failures during read/write operations.
     // std::mem::forget prevents the pipe file descriptor from being closed twice.
     fn seek_error_paths() -> Result<()> {
-        let (read_fd, write_fd) = pipe().map_err(|e| {
-            error!("Failed to create pipe: {e}");
-            crate::ubiblk_error!(IoError {
-                source: std::io::Error::from(e),
-            })
-        })?;
+        let (read_fd, write_fd) = pipe().map_err(std::io::Error::from)?;
         let file = File::from(write_fd);
         let _r = File::from(read_fd);
         let mut chan = SyncIoChannel {

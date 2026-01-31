@@ -1,3 +1,5 @@
+use std::sync::mpsc::SendError;
+
 use libublk::UblkError;
 use thiserror::Error;
 
@@ -311,6 +313,17 @@ impl From<UblkError> for UbiblkError {
     }
 }
 
+impl<T> From<SendError<T>> for UbiblkError {
+    #[track_caller]
+    fn from(source: SendError<T>) -> Self {
+        let location = std::panic::Location::caller();
+        UbiblkError::ChannelError {
+            reason: source.to_string(),
+            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +464,17 @@ mod tests {
         let ubiblk_error: UbiblkError = ublk_error.into();
         let rendered = format!("{ubiblk_error}");
         assert_starts_with(&rendered, "Ublk error: Invalid input (at ");
+        assert_contains(&rendered, "src/error.rs:");
+    }
+
+    #[test]
+    fn test_conversion_from_send_error() {
+        let (tx, rx) = std::sync::mpsc::channel::<i32>();
+        drop(rx); // Close the receiver to cause a SendError
+        let send_error = tx.send(42).unwrap_err();
+        let ubiblk_error: UbiblkError = send_error.into();
+        let rendered = format!("{ubiblk_error}");
+        assert_starts_with(&rendered, "Channel error: sending on a closed channel (at ");
         assert_contains(&rendered, "src/error.rs:");
     }
 

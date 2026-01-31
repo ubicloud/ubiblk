@@ -1,6 +1,6 @@
 use crate::{
     block_device::{BlockDevice, IoChannel, SharedBuffer, SharedMetadataState},
-    Result,
+    Result, ResultExt,
 };
 
 use super::{
@@ -106,12 +106,9 @@ impl LazyIoChannel {
             {
                 self.bgworker_ch
                     .send(BgWorkerRequest::Fetch { stripe_id })
-                    .map_err(|e| {
-                        error!("Failed to send fetch request for stripe {stripe_id}: {e}");
-                        crate::ubiblk_error!(ChannelError {
-                            reason: "failed to send fetch request".to_string(),
-                        })
-                    })?;
+                    .context(format!(
+                        "failed to send fetch request for stripe {stripe_id}"
+                    ))?;
                 self.stripe_fetches_requested.insert(stripe_id);
             }
         }
@@ -123,12 +120,9 @@ impl LazyIoChannel {
             if !self.metadata_state.stripe_written(stripe_id) {
                 self.bgworker_ch
                     .send(BgWorkerRequest::SetWritten { stripe_id })
-                    .map_err(|e| {
-                        error!("Failed to send set written request for stripe {stripe_id}: {e}");
-                        crate::ubiblk_error!(ChannelError {
-                            reason: "failed to send set written request".to_string(),
-                        })
-                    })?;
+                    .context(format!(
+                        "failed to send set written request for stripe {stripe_id}"
+                    ))?;
             }
         }
         Ok(())

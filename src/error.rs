@@ -1,5 +1,6 @@
 use std::sync::mpsc::SendError;
 
+#[cfg(test)]
 use libublk::UblkError;
 use thiserror::Error;
 
@@ -84,7 +85,7 @@ impl std::fmt::Display for ErrorContexts {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ErrorMeta {
     pub location: ErrorLocation,
     pub contexts: ErrorContexts,
@@ -96,6 +97,14 @@ impl ErrorMeta {
             location,
             contexts: ErrorContexts::default(),
         }
+    }
+}
+
+impl Default for ErrorMeta {
+    #[track_caller]
+    fn default() -> Self {
+        let location = std::panic::Location::caller();
+        Self::new(ErrorLocation::new(location.file(), location.line()))
     }
 }
 
@@ -124,6 +133,23 @@ macro_rules! ubiblk_error_variants {
                 }
             }
         }
+    };
+}
+
+macro_rules! ubiblk_error_from {
+    ($( #[from] $variant:ident ( $field:ident : $ty:ty ) ),* $(,)?) => {
+        $(
+            impl From<$ty> for UbiblkError {
+                #[track_caller]
+                fn from($field: $ty) -> Self {
+                    let location = std::panic::Location::caller();
+                    UbiblkError::$variant {
+                        $field,
+                        meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
+                    }
+                }
+            }
+        )*
     };
 }
 
@@ -230,6 +256,13 @@ ubiblk_error_variants! {
     } => "Ublk error: {source} {meta}",
 }
 
+ubiblk_error_from! {
+    #[from] IoError(source: std::io::Error),
+    #[from] VhostUserError(source: vhost::vhost_user::Error),
+    #[from] VhostUserBackendError(reason: vhost_user_backend::Error),
+    #[from] UblkError(source: libublk::UblkError),
+}
+
 pub type Error = UbiblkError;
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -266,50 +299,6 @@ where
     fn context(self, message: impl Into<String>) -> Result<T> {
         let location = std::panic::Location::caller();
         self.map_err(|e| e.into().context_at(message, location))
-    }
-}
-
-impl From<std::io::Error> for UbiblkError {
-    #[track_caller]
-    fn from(source: std::io::Error) -> Self {
-        let location = std::panic::Location::caller();
-        UbiblkError::IoError {
-            source,
-            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
-        }
-    }
-}
-
-impl From<vhost_user_backend::Error> for UbiblkError {
-    #[track_caller]
-    fn from(reason: vhost_user_backend::Error) -> Self {
-        let location = std::panic::Location::caller();
-        UbiblkError::VhostUserBackendError {
-            reason,
-            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
-        }
-    }
-}
-
-impl From<vhost::vhost_user::Error> for UbiblkError {
-    #[track_caller]
-    fn from(source: vhost::vhost_user::Error) -> Self {
-        let location = std::panic::Location::caller();
-        UbiblkError::VhostUserError {
-            source,
-            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
-        }
-    }
-}
-
-impl From<UblkError> for UbiblkError {
-    #[track_caller]
-    fn from(err: UblkError) -> Self {
-        let location = std::panic::Location::caller();
-        UbiblkError::UblkError {
-            source: err,
-            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
-        }
     }
 }
 

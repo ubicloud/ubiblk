@@ -4,7 +4,7 @@ use openssl::{
     ssl::{Ssl, SslContext, SslContextBuilder, SslMethod, SslOptions, SslStream, SslVerifyMode},
 };
 
-use crate::{KeyEncryptionCipher, Result};
+use crate::{error_context, KeyEncryptionCipher, Result};
 
 use super::DynStream;
 
@@ -127,6 +127,7 @@ pub fn wrap_psk_server_stream(stream: DynStream, creds: &PskCredentials) -> Resu
     Ok(Box::new(stream))
 }
 
+#[error_context("failed to build PSK TLS context")]
 fn build_psk_context() -> Result<SslContextBuilder> {
     let mut builder = SslContext::builder(SslMethod::tls())?;
 

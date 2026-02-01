@@ -348,6 +348,7 @@ impl<T> From<SendError<T>> for UbiblkError {
 #[cfg(test)]
 mod tests {
     use libublk::UblkError;
+    use ubiblk_macros::error_context;
 
     use super::*;
 
@@ -585,6 +586,35 @@ mod tests {
             lines[1],
             file!(),
             lines[2]
+        );
+        assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn test_error_context_proc_macro() {
+        let line = line!();
+        #[error_context("top level context")]
+        fn level_one() -> Result<()> {
+            #[error_context("second level context")]
+            fn level_two() -> Result<()> {
+                Err(crate::ubiblk_error!(InvalidParameter {
+                    description: "original error".to_string(),
+                }))
+            }
+            level_two()
+        }
+        let result = level_one();
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        let rendered = format!("{error}");
+        let expected = format!(
+            "top level context (at {}:{})\n  - caused by: second level context (at {}:{})\n  - caused by: Invalid parameter error: original error (at {}:{})",
+            file!(),
+            line + 11,
+            file!(),
+            line + 9,
+            file!(),
+            line + 5
         );
         assert_eq!(rendered, expected);
     }

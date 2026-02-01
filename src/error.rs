@@ -618,4 +618,27 @@ mod tests {
         );
         assert_eq!(rendered, expected);
     }
+
+    #[test]
+    fn test_error_context_proc_macro_formatting() {
+        let line = line!();
+        #[error_context("failed to process stripe {}", stripe_id)]
+        fn process_stripe(stripe_id: usize) -> Result<()> {
+            Err(crate::ubiblk_error!(StripeFetchFailed {
+                stripe: stripe_id
+            }))
+        }
+        let result = process_stripe(42);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        let rendered = format!("{error}");
+        let expected = format!(
+            "failed to process stripe 42 (at {}:{})\n  - caused by: Stripe fetch failed for stripe 42 (at {}:{})",
+            file!(),
+            line + 7,
+            file!(),
+            line + 3
+        );
+        assert_eq!(rendered, expected);
+    }
 }

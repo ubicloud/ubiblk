@@ -1,10 +1,34 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, parse_quote, Expr, ItemFn};
+use syn::{
+    parse::{Parse, ParseStream},
+    parse_macro_input, parse_quote,
+    punctuated::Punctuated,
+    Expr, ItemFn, Token,
+};
+
+struct ErrorContextArgs {
+    args: Punctuated<Expr, Token![,]>,
+}
+
+impl Parse for ErrorContextArgs {
+    fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+        let args = Punctuated::parse_terminated(input)?;
+        Ok(Self { args })
+    }
+}
 
 #[proc_macro_attribute]
 pub fn error_context(attr: TokenStream, item: TokenStream) -> TokenStream {
-    let message = parse_macro_input!(attr as Expr);
+    let ErrorContextArgs { args } = parse_macro_input!(attr as ErrorContextArgs);
+    let message = if args.len() == 1 {
+        let expr = args
+            .first()
+            .expect("error_context should have at least one argument");
+        quote!(#expr)
+    } else {
+        quote!(format!(#args))
+    };
     let mut function = parse_macro_input!(item as ItemFn);
     let block = function.block;
 

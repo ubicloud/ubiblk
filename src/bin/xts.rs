@@ -6,6 +6,7 @@ use std::{
 };
 
 use clap::{Parser, ValueEnum};
+use log::error;
 
 use ubiblk::{
     backends::SECTOR_SIZE,
@@ -209,9 +210,16 @@ fn encode(args: &Args, key1: Vec<u8>, key2: Vec<u8>) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() {
     env_logger::builder().format_timestamp(None).init();
 
+    if let Err(err) = run() {
+        error!("{err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
     let kek_path = args.kek.as_ref().map(PathBuf::from);
     let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+use log::error;
 
 use ubiblk::{
     archive::StripeArchiver,
@@ -43,9 +44,16 @@ struct Args {
     encrypt: bool,
 }
 
-fn main() -> Result<()> {
+fn main() {
     env_logger::builder().format_timestamp(None).init();
 
+    if let Err(err) = run() {
+        error!("{err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
 
     let (config, config_kek) = load_config_and_kek(&args.common)?;

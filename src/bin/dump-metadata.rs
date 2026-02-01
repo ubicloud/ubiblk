@@ -1,4 +1,5 @@
 use clap::Parser;
+use log::error;
 use ubiblk::backends::{build_block_device, SECTOR_SIZE};
 use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
 use ubiblk::cli::{load_config, CommonArgs};
@@ -104,8 +105,16 @@ fn format_source_info(config: &DeviceConfig) -> Result<String> {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
     env_logger::builder().format_timestamp(None).init();
+
+    if let Err(err) = run() {
+        error!("{err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
 
     let config = load_config(&args.common)?;

@@ -1,4 +1,5 @@
 use clap::Parser;
+use log::error;
 use rustyline::{error::ReadlineError, DefaultEditor};
 use std::{collections::HashMap, io, path::PathBuf};
 
@@ -28,7 +29,16 @@ struct Args {
     unlink_kek: bool,
 }
 
-fn main() -> Result<()> {
+fn main() {
+    env_logger::builder().format_timestamp(None).init();
+
+    if let Err(err) = run() {
+        error!("{err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let Args {
         server_config_path,
         kek,

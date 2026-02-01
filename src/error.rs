@@ -1,15 +1,20 @@
-use std::sync::mpsc::SendError;
+pub type Error = UbiblkError;
+pub type Result<T> = std::result::Result<T, Error>;
 
-use thiserror::Error;
-
+/// A macro to simplify the creation of `UbiblkError` variants.
+/// It automatically injects source code metadata (file and line) into every error.
 #[macro_export]
 macro_rules! ubiblk_error {
+    // Case 1: Handles variants with named fields.
+    // (e.g., ubiblk_error!(Variant { field1: value1, field2: value2 }))
     ($variant:ident { $($field:ident : $value:expr),* $(,)? }) => {{
         $crate::UbiblkError::$variant {
             $($field: $value,)*
             meta: $crate::ErrorMeta::new($crate::ErrorLocation::new(file!(), line!())),
         }
     }};
+    // Case 2: Handles variants without additional fields
+    // (e.g., ubiblk_error!(Timeout))
     ($variant:ident) => {{
         $crate::UbiblkError::$variant {
             meta: $crate::ErrorMeta::new($crate::ErrorLocation::new(file!(), line!())),
@@ -45,55 +50,16 @@ impl std::fmt::Display for ErrorLocation {
 }
 
 #[derive(Debug, Clone)]
-pub struct ErrorContext {
-    message: String,
-    location: ErrorLocation,
-}
-
-impl ErrorContext {
-    pub fn new(message: impl Into<String>, location: ErrorLocation) -> Self {
-        Self {
-            message: message.into(),
-            location,
-        }
-    }
-}
-
-impl std::fmt::Display for ErrorContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} (at {})", self.message, self.location)
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ErrorContexts(Vec<ErrorContext>);
-
-impl ErrorContexts {
-    pub fn push(&mut self, context: ErrorContext) {
-        self.0.push(context);
-    }
-}
-
-impl std::fmt::Display for ErrorContexts {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for context in self.0.iter() {
-            write!(f, "\nContext: {context}")?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct ErrorMeta {
     pub location: ErrorLocation,
-    pub contexts: ErrorContexts,
+    pub contexts: Vec<(String, ErrorLocation)>,
 }
 
 impl ErrorMeta {
     pub fn new(location: ErrorLocation) -> Self {
         Self {
             location,
-            contexts: ErrorContexts::default(),
+            contexts: Vec::new(),
         }
     }
 }
@@ -111,75 +77,46 @@ impl std::fmt::Display for ErrorMeta {
         if f.alternate() {
             return write!(f, "(at {})", self.location);
         }
-        if self.contexts.0.is_empty() {
+        if self.contexts.is_empty() {
             return Ok(());
         }
-        let mut iter = self.contexts.0.iter().rev();
+        let mut iter = self.contexts.iter().rev();
         if let Some(context) = iter.next() {
-            write!(f, "{context}")?;
+            write!(f, "{} (at {})", context.0, context.1)?;
         }
         for context in iter {
-            write!(f, "\n  - caused by: {context}")?;
+            write!(f, "\n  - caused by: {} (at {})", context.0, context.1)?;
         }
         write!(f, "\n  - caused by: ")?;
         Ok(())
     }
 }
 
+/// Generates the central UbiblkError enum.
 macro_rules! ubiblk_error_variants {
     ($( $variant:ident { $( $(#[$field_attr:meta])* $field:ident : $ty:ty ),* $(,)? } => $message:expr ),* $(,)?) => {
-        #[derive(Error, Debug)]
+        #[derive(thiserror::Error, Debug)]
         pub enum UbiblkError {
             $(
+                // Uses 'thiserror' to define the Display implementation
                 #[error($message)]
                 $variant {
+                    // Expands fields, including potential attributes like #[source]
                     $( $(#[$field_attr])* $field: $ty, )*
                 },
             )*
         }
 
         impl UbiblkError {
-            fn contexts_mut(&mut self) -> &mut ErrorContexts {
+            /// Provides mutable access to the internal error context/metadata.
+            /// This assumes every variant generated has a 'meta' field.
+            fn contexts_mut(&mut self) -> &mut Vec<(String, ErrorLocation)> {
                 match self {
                     $( UbiblkError::$variant { meta, .. } => &mut meta.contexts, )*
                 }
             }
         }
     };
-}
-
-macro_rules! ubiblk_error_from_value {
-    ($field:ident) => {
-        $field
-    };
-    ($field:ident, $into:ty) => {
-        $field.into()
-    };
-}
-
-macro_rules! ubiblk_error_from {
-    ($( #[from] $variant:ident ( $field:ident : $ty:ty $(=> $into:ty)? ) ),* $(,)?) => {
-        $(
-            impl From<$ty> for UbiblkError {
-                #[track_caller]
-                fn from($field: $ty) -> Self {
-                    let location = std::panic::Location::caller();
-                    UbiblkError::$variant {
-                        $field: ubiblk_error_from_value!($field $(, $into)?),
-                        meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
-                    }
-                }
-            }
-        )*
-    };
-}
-
-#[derive(Debug, Error)]
-pub enum TlsErrorSource {
-    #[error(transparent)]
-    Ssl(#[from] openssl::ssl::Error),
-    #[error(transparent)]
-    Stack(#[from] openssl::error::ErrorStack),
 }
 
 ubiblk_error_variants! {
@@ -286,6 +223,42 @@ ubiblk_error_variants! {
     } => "{meta}Ublk error: {source} {meta:#}",
 }
 
+/// Internal helper to conditionally convert a field value.
+macro_rules! ubiblk_error_from_value {
+    ($field:ident) => {
+        $field
+    };
+    ($field:ident, $into:ty) => {
+        $field.into()
+    };
+}
+
+/// Automatically implements From<ExternalError> for UbiblkError.
+macro_rules! ubiblk_error_from {
+    ($( #[from] $variant:ident ( $field:ident : $ty:ty $(=> $into:ty)? ) ),* $(,)?) => {
+        $(
+            impl From<$ty> for UbiblkError {
+                #[track_caller]
+                fn from($field: $ty) -> Self {
+                    let location = std::panic::Location::caller();
+                    UbiblkError::$variant {
+                        $field: ubiblk_error_from_value!($field $(, $into)?),
+                        meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
+                    }
+                }
+            }
+        )*
+    };
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TlsErrorSource {
+    #[error(transparent)]
+    Ssl(#[from] openssl::ssl::Error),
+    #[error(transparent)]
+    Stack(#[from] openssl::error::ErrorStack),
+}
+
 ubiblk_error_from! {
     #[from] IoError(source: std::io::Error),
     #[from] VhostUserError(source: vhost::vhost_user::Error),
@@ -295,8 +268,16 @@ ubiblk_error_from! {
     #[from] UblkError(source: libublk::UblkError),
 }
 
-pub type Error = UbiblkError;
-pub type Result<T> = std::result::Result<T, Error>;
+impl<T> From<std::sync::mpsc::SendError<T>> for UbiblkError {
+    #[track_caller]
+    fn from(source: std::sync::mpsc::SendError<T>) -> Self {
+        let location = std::panic::Location::caller();
+        UbiblkError::ChannelError {
+            reason: source.to_string(),
+            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
+        }
+    }
+}
 
 impl UbiblkError {
     #[track_caller]
@@ -310,15 +291,15 @@ impl UbiblkError {
         message: impl Into<String>,
         location: &'static std::panic::Location<'static>,
     ) -> Self {
-        let context = ErrorContext::new(
-            message,
+        self.contexts_mut().push((
+            message.into(),
             ErrorLocation::new(location.file(), location.line()),
-        );
-        self.contexts_mut().push(context);
+        ));
         self
     }
 }
 
+/// Extension trait to add context to Results.
 pub trait ResultExt<T> {
     fn context(self, message: impl Into<String>) -> Result<T>;
 }
@@ -331,17 +312,6 @@ where
     fn context(self, message: impl Into<String>) -> Result<T> {
         let location = std::panic::Location::caller();
         self.map_err(|e| e.into().context_at(message, location))
-    }
-}
-
-impl<T> From<SendError<T>> for UbiblkError {
-    #[track_caller]
-    fn from(source: SendError<T>) -> Self {
-        let location = std::panic::Location::caller();
-        UbiblkError::ChannelError {
-            reason: source.to_string(),
-            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
-        }
     }
 }
 

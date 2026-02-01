@@ -79,7 +79,7 @@ impl UbiBlkBackendThread {
         let request_slots: Vec<RequestSlot> = (0..config.queue_size)
             .map(|_| RequestSlot {
                 used: false,
-                request_type: RequestType::None,
+                request_type: RequestType::Unsupported(0),
                 buffer: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
                     buf_size as usize,
                     alignment,
@@ -122,28 +122,28 @@ impl UbiBlkBackendThread {
             if self.request_slots[i].len >= len && !self.request_slots[i].used {
                 let slot = &mut self.request_slots[i];
                 slot.used = true;
-                slot.request_type = request.request_type;
-                slot.status_addr = request.status_addr;
+                slot.request_type = request.request_type();
+                slot.status_addr = request.status_addr();
                 slot.desc_chain = Some(desc_chain.clone());
-                slot.data_descriptors = request.data_descriptors.to_vec();
-                slot.request_sector = request.sector;
+                slot.data_descriptors = request.data().to_vec();
+                slot.request_sector = request.sector();
                 slot.request_len = len;
                 return i;
             }
         }
         self.request_slots.push(RequestSlot {
             used: true,
-            request_type: request.request_type,
+            request_type: request.request_type(),
             buffer: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
                 len,
                 self.alignment,
             ))),
             len,
-            request_sector: request.sector,
+            request_sector: request.sector(),
             request_len: len,
-            status_addr: request.status_addr,
+            status_addr: request.status_addr(),
             desc_chain: Some(desc_chain.clone()),
-            data_descriptors: request.data_descriptors.to_vec(),
+            data_descriptors: request.data().to_vec(),
         });
         self.request_slots.len() - 1
     }
@@ -248,7 +248,7 @@ impl UbiBlkBackendThread {
 
     pub(crate) fn request_len(&self, request: &Request) -> usize {
         let mut len = 0;
-        for (_, data_len) in &request.data_descriptors {
+        for (_, data_len) in request.data() {
             len += *data_len;
         }
         len as usize
@@ -261,7 +261,7 @@ impl UbiBlkBackendThread {
             self.complete_io(
                 vring,
                 desc_chain,
-                request.status_addr,
+                request.status_addr(),
                 VIRTIO_BLK_S_IOERR as u8,
             );
             return;
@@ -271,13 +271,13 @@ impl UbiBlkBackendThread {
 
         let sector_count = (len / SECTOR_SIZE) as u32;
         self.io_channel.add_read(
-            request.sector,
+            request.sector(),
             sector_count,
             self.request_slots[id].buffer.clone(),
             id,
         );
         self.io_tracker
-            .add_read(id, request.sector, sector_count as u64);
+            .add_read(id, request.sector(), sector_count as u64);
     }
 
     fn process_write(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
@@ -287,7 +287,7 @@ impl UbiBlkBackendThread {
             self.complete_io(
                 vring,
                 desc_chain,
-                request.status_addr,
+                request.status_addr(),
                 VIRTIO_BLK_S_IOERR as u8,
             );
             return;
@@ -297,7 +297,7 @@ impl UbiBlkBackendThread {
         let mem = desc_chain.memory();
         let mut pos: usize = 0;
         let mut read_from_guest_failed = false;
-        for (data_addr, data_len) in &request.data_descriptors {
+        for (data_addr, data_len) in request.data() {
             let mut borrow = self.request_slots[id].buffer.borrow_mut();
             let buf = borrow.as_mut_slice();
             let mut dst = &mut buf[pos..pos + *data_len as usize];
@@ -313,7 +313,7 @@ impl UbiBlkBackendThread {
             self.complete_io(
                 vring,
                 desc_chain,
-                request.status_addr,
+                request.status_addr(),
                 VIRTIO_BLK_S_IOERR as u8,
             );
             self.put_request_slot(id);
@@ -323,13 +323,13 @@ impl UbiBlkBackendThread {
         let sector_count = (len / SECTOR_SIZE) as u32;
 
         self.io_channel.add_write(
-            request.sector,
+            request.sector(),
             sector_count,
             self.request_slots[id].buffer.clone(),
             id,
         );
         self.io_tracker
-            .add_write(id, request.sector, sector_count as u64);
+            .add_write(id, request.sector(), sector_count as u64);
     }
 
     pub(crate) fn process_flush(
@@ -349,14 +349,14 @@ impl UbiBlkBackendThread {
         desc_chain: DescChain,
         vring: &mut Vring<'_>,
     ) {
-        let (data_addr, data_len) = request.data_descriptors[0];
+        let (data_addr, data_len) = request.data()[0];
         let mem = desc_chain.memory();
 
         if data_len < VIRTIO_BLK_ID_BYTES {
             self.complete_io(
                 vring,
                 &desc_chain,
-                request.status_addr,
+                request.status_addr(),
                 VIRTIO_BLK_S_IOERR as u8,
             );
             return;
@@ -372,7 +372,7 @@ impl UbiBlkBackendThread {
         } else {
             VIRTIO_BLK_S_OK
         } as u8;
-        self.complete_io(vring, &desc_chain, request.status_addr, status);
+        self.complete_io(vring, &desc_chain, request.status_addr(), status);
     }
 
     #[cfg(test)]
@@ -389,19 +389,19 @@ impl UbiBlkBackendThread {
             .pop_descriptor_chain(self.mem.memory())
         {
             match Request::parse(&mut desc_chain) {
-                Ok(request) => match request.request_type {
+                Ok(request) => match request.request_type() {
                     RequestType::In => self.process_read(&request, &desc_chain, vring),
                     RequestType::Out => self.process_write(&request, &desc_chain, vring),
                     RequestType::Flush => self.process_flush(&request, &desc_chain, vring),
-                    RequestType::GetDeviceId => {
+                    RequestType::GetDeviceID => {
                         self.process_get_device_id(&request, desc_chain, vring)
                     }
-                    RequestType::Unsupported(_) | RequestType::None => {
-                        error!("unknown request type: {:?}", request.request_type);
+                    _ => {
+                        error!("unknown request type: {:?}", request.request_type());
                         self.complete_io(
                             vring,
                             &desc_chain,
-                            request.status_addr,
+                            request.status_addr(),
                             VIRTIO_BLK_S_UNSUPP as u8,
                         );
                     }

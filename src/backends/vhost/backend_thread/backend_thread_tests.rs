@@ -2,7 +2,6 @@
 mod tests {
     use nix::sched::{sched_getaffinity, sched_setaffinity};
     use nix::unistd::Pid;
-    use smallvec::smallvec;
     use vhost_user_backend::{bitmap::BitmapMmapRegion, VringRwLock, VringT};
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
     use virtio_bindings::virtio_blk::{
@@ -181,15 +180,15 @@ mod tests {
     #[test]
     fn request_len_sums_descriptors() {
         let (thread, _mem) = create_thread();
-        let req = Request {
-            request_type: RequestType::Out,
-            sector: 0,
-            data_descriptors: smallvec![
+        let req = Request::new(
+            RequestType::Out,
+            vec![
                 (GuestAddress(0), 100u32),
                 (GuestAddress(SECTOR_SIZE as u64), 200u32),
             ],
-            status_addr: GuestAddress(0),
-        };
+            0,
+            GuestAddress(0),
+        );
         assert_eq!(thread.request_len(&req), 300);
     }
 
@@ -198,12 +197,12 @@ mod tests {
         let (mut thread, mem) = create_thread();
         let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
         let chain = build_chain(&mem, &[desc]);
-        let req = Request {
-            request_type: RequestType::In,
-            sector: 0,
-            data_descriptors: smallvec![(GuestAddress(0x2000), 64u32)],
-            status_addr: GuestAddress(0),
-        };
+        let req = Request::new(
+            RequestType::In,
+            vec![(GuestAddress(0x2000), 64u32)],
+            0,
+            GuestAddress(0),
+        );
         let idx = thread.get_request_slot(64, &req, &chain);
         let idx_new = thread.get_request_slot(64, &req, &chain);
         assert_ne!(idx, idx_new);
@@ -217,12 +216,12 @@ mod tests {
         let (mut thread, mem) = create_thread();
         let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
         let chain = build_chain(&mem, &[desc]);
-        let req = Request {
-            request_type: RequestType::In,
-            sector: 1,
-            data_descriptors: smallvec![(GuestAddress(0x2000), 128u32)],
-            status_addr: GuestAddress(0),
-        };
+        let req = Request::new(
+            RequestType::In,
+            vec![(GuestAddress(0x2000), 128u32)],
+            1,
+            GuestAddress(0),
+        );
         // first slot
         let first = thread.get_request_slot(128, &req, &chain);
         assert_eq!(first, 0);
@@ -238,12 +237,12 @@ mod tests {
         let chain = build_chain(&mem, &[desc]);
         let data_addr = GuestAddress(0x4000);
         let status_addr = GuestAddress(0x5000);
-        let request = Request {
-            request_type: RequestType::GetDeviceId,
-            sector: 0,
-            data_descriptors: smallvec![(data_addr, VIRTIO_BLK_ID_BYTES)],
+        let request = Request::new(
+            RequestType::GetDeviceID,
+            vec![(data_addr, VIRTIO_BLK_ID_BYTES)],
+            0,
             status_addr,
-        };
+        );
         let vring = setup_vring(&mem);
         let mut vring_guard = vring.get_mut();
 
@@ -264,12 +263,12 @@ mod tests {
         let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
         let chain = build_chain(&mem, &[desc]);
         let status_addr = GuestAddress(0x5000);
-        let request = Request {
-            request_type: RequestType::GetDeviceId,
-            sector: 0,
-            data_descriptors: smallvec![(GuestAddress(0x4000), 4u32)],
+        let request = Request::new(
+            RequestType::GetDeviceID,
+            vec![(GuestAddress(0x4000), 4u32)],
+            0,
             status_addr,
-        };
+        );
         let vring = setup_vring(&mem);
         let mut vring_guard = vring.get_mut();
 
@@ -284,12 +283,7 @@ mod tests {
         let (mut thread, mem) = create_thread();
         let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
         let chain = build_chain(&mem, &[desc]);
-        let request = Request {
-            request_type: RequestType::Flush,
-            sector: 0,
-            data_descriptors: smallvec![],
-            status_addr: GuestAddress(0x5000),
-        };
+        let request = Request::new(RequestType::Flush, vec![], 0, GuestAddress(0x5000));
         let vring = setup_vring(&mem);
         let mut vring_guard = vring.get_mut();
 
@@ -380,16 +374,16 @@ mod tests {
         let (mut thread, mem, device) = create_thread_with_device();
         let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
         let chain = build_chain(&mem, &[desc]);
-        let request = Request {
-            request_type: RequestType::Out,
-            sector: 0,
-            data_descriptors: smallvec![(GuestAddress(0x2000), SECTOR_SIZE as u32)],
-            status_addr: GuestAddress(0x3000),
-        };
+        let request = Request::new(
+            RequestType::Out,
+            vec![(GuestAddress(0x2000), SECTOR_SIZE as u32)],
+            0,
+            GuestAddress(0x3000),
+        );
         let id = thread.get_request_slot(SECTOR_SIZE, &request, &chain);
         thread.request_slots[id].desc_chain = None;
         thread.io_channel.add_write(
-            request.sector,
+            request.sector(),
             1,
             thread.request_slots[id].buffer.clone(),
             id,
@@ -412,15 +406,15 @@ mod tests {
         let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
         let chain = build_chain(&mem, &[desc]);
         let status_addr = GuestAddress(0x5000);
-        let request = Request {
-            request_type: RequestType::In,
-            sector: 0,
-            data_descriptors: smallvec![(GuestAddress(0x20000), SECTOR_SIZE as u32)],
+        let request = Request::new(
+            RequestType::In,
+            vec![(GuestAddress(0x20000), SECTOR_SIZE as u32)],
+            0,
             status_addr,
-        };
+        );
         let id = thread.get_request_slot(SECTOR_SIZE, &request, &chain);
         thread.io_channel.add_read(
-            request.sector,
+            request.sector(),
             1,
             thread.request_slots[id].buffer.clone(),
             id,

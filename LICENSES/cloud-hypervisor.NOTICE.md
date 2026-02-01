@@ -5,7 +5,6 @@ https://github.com/cloud-hypervisor/cloud-hypervisor
 
 Derived files:
 - src/backends/vhost/backend.rs
-- src/backends/vhost/request.rs
 
 Upstream copyright notices:
 - Copyright 2019 Red Hat, Inc.

@@ -350,6 +350,8 @@ mod tests {
     use libublk::UblkError;
     use ubiblk_macros::error_context;
 
+    use crate::block_device::BlockDevice;
+
     use super::*;
 
     fn assert_starts_with(haystack: &str, needle: &str) {
@@ -640,5 +642,37 @@ mod tests {
             line + 3
         );
         assert_eq!(rendered, expected);
+    }
+
+    #[test]
+    fn test_error_context_with_dynamic_return_type() {
+        let line = line!();
+        #[error_context("dynamic context for stripe {}", stripe_id)]
+        fn build_block_device(stripe_id: usize, fail: bool) -> Result<Box<dyn BlockDevice>> {
+            if fail {
+                Err(crate::ubiblk_error!(StripeFetchFailed {
+                    stripe: stripe_id
+                }))
+            } else {
+                Ok(crate::block_device::NullBlockDevice::new_with_sector_count(
+                    1024 * 1024,
+                ))
+            }
+        }
+        let result = build_block_device(7, true);
+        assert!(result.is_err());
+        let error = result.err().expect("expected error");
+        let rendered = format!("{error}");
+        let expected = format!(
+            "dynamic context for stripe 7 (at {}:{})\n  - caused by: Stripe fetch failed for stripe 7 (at {}:{})",
+            file!(),
+            line + 13,
+            file!(),
+            line + 4
+        );
+        assert_eq!(rendered, expected);
+
+        let block_device = build_block_device(9, false).expect("should build device");
+        assert_eq!(block_device.sector_count(), 1024 * 1024);
     }
 }

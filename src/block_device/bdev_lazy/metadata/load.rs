@@ -7,8 +7,10 @@ use crate::{
     Result,
 };
 use log::{error, info};
+use ubiblk_macros::error_context;
 
 impl UbiMetadata {
+    #[error_context("Failed to load metadata")]
     pub fn load_from_bdev(bdev: &dyn BlockDevice) -> Result<Box<Self>> {
         info!("Loading metadata from device");
 

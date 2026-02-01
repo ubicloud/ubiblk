@@ -1,3 +1,5 @@
+use ubiblk_macros::error_context;
+
 use super::*;
 
 use crate::{crypt::XtsBlockCipher, Result};
@@ -107,6 +109,7 @@ impl BlockDevice for CryptBlockDevice {
 }
 
 impl CryptBlockDevice {
+    #[error_context("Failed to create CryptBlockDevice")]
     pub fn new(base: Box<dyn BlockDevice>, key1: Vec<u8>, key2: Vec<u8>) -> Result<Box<Self>> {
         let xts_cipher = XtsBlockCipher::new(key1, key2)?;
         Ok(Box::new(CryptBlockDevice { base, xts_cipher }))

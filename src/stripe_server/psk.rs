@@ -127,7 +127,7 @@ pub fn wrap_psk_server_stream(stream: DynStream, creds: &PskCredentials) -> Resu
     Ok(Box::new(stream))
 }
 
-#[error_context("failed to build PSK TLS context")]
+#[error_context("Failed to build PSK TLS context")]
 fn build_psk_context() -> Result<SslContextBuilder> {
     let mut builder = SslContext::builder(SslMethod::tls())?;
 

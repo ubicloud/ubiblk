@@ -16,7 +16,5 @@ pub mod stripe_source;
 pub mod utils;
 
 pub use crypt::{CipherMethod, KeyEncryptionCipher};
-pub use error::{
-    Error, ErrorContext, ErrorContexts, ErrorLocation, ErrorMeta, Result, ResultExt, UbiblkError,
-};
+pub use error::{Error, ErrorLocation, ErrorMeta, Result, ResultExt, UbiblkError};
 pub use ubiblk_macros::error_context;

@@ -1,4 +1,5 @@
 use log::info;
+use ubiblk_macros::error_context;
 
 use crate::{
     archive::{ArchiveStore, FileSystemStore, S3Store},
@@ -31,6 +32,7 @@ impl StripeSourceBuilder {
         }
     }
 
+    #[error_context("Failed to build stripe source")]
     pub fn build(&self) -> Result<Box<dyn StripeSource>> {
         // If already fetched all stripes, no need to build a real source
         if self.has_fetched_all_stripes {

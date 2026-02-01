@@ -1,4 +1,5 @@
 use log::info;
+use ubiblk_macros::error_context;
 
 use crate::{
     backends::SECTOR_SIZE,
@@ -11,6 +12,7 @@ pub const METADATA_FLUSH_ID: usize = 1;
 pub const DEFAULT_STRIPE_SECTOR_COUNT_SHIFT: u8 = 11;
 
 impl UbiMetadata {
+    #[error_context("Failed to save metadata to block device")]
     pub fn save_to_bdev(&self, bdev: &dyn BlockDevice) -> Result<()> {
         let mut ch = bdev.create_channel()?;
         let metadata_size = self.metadata_size();

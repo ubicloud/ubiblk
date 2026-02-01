@@ -6,6 +6,7 @@ use std::{
 
 use log::{error, info};
 use nix::sys::statfs::statfs;
+use ubiblk_macros::error_context;
 
 use crate::{
     block_device::{
@@ -15,7 +16,7 @@ use crate::{
     config::{DeviceConfig, IoEngine},
     stripe_source::StripeSourceBuilder,
     utils::aligned_buffer::BUFFER_ALIGNMENT,
-    Result,
+    Result, ResultExt,
 };
 
 pub mod io_tracking;
@@ -45,14 +46,18 @@ pub struct BackendEnv {
 }
 
 impl BackendEnv {
+    #[error_context("Failed to build backend environment")]
     pub fn build(config: &DeviceConfig) -> Result<Self> {
         let alignment = Self::determine_alignment(&config.path)?;
 
-        let disk_device = build_block_device(&config.path, config, false)?;
+        let disk_device = build_block_device(&config.path, config, false)
+            .context("Failed to build disk device")?;
         let metadata_device = config
             .metadata_path
             .as_ref()
-            .map(|path| build_block_device(path, config, false))
+            .map(|path| {
+                build_block_device(path, config, false).context("Failed to build metadata device")
+            })
             .transpose()?;
 
         match metadata_device {
@@ -72,6 +77,7 @@ impl BackendEnv {
         }
     }
 
+    #[error_context("Failed to run bgworker thread")]
     pub fn run_bgworker_thread(&mut self) -> Result<()> {
         if let Some(config) = self.bgworker_config.take() {
             self.bgworker_thread = Some(Self::spawn_bgworker_thread(config)?);
@@ -161,6 +167,7 @@ impl BackendEnv {
         })
     }
 
+    #[error_context("Failed to determine filesystem alignment for path: {}", path)]
     fn determine_alignment(path: &str) -> Result<usize> {
         let stat = statfs(Path::new(path)).map_err(|e| {
             crate::ubiblk_error!(InvalidParameter {
@@ -171,6 +178,7 @@ impl BackendEnv {
         Ok(cmp::max(BUFFER_ALIGNMENT, stat.block_size() as usize))
     }
 
+    #[error_context("Failed to build lazy block device")]
     fn build_bdev_lazy(
         disk_device: Box<dyn BlockDevice>,
         config: &DeviceConfig,
@@ -293,9 +301,10 @@ pub fn init_metadata(config: &DeviceConfig, stripe_sector_count_shift: u8) -> Re
         })
     })?;
 
-    let base_bdev = build_block_device(&config.path, config, false)?;
+    let disk_bdev = build_block_device(&config.path, config, false)
+        .context("Failed to build disk block device")?;
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;
-    let base_stripe_count = base_bdev.stripe_count(stripe_sector_count);
+    let base_stripe_count = disk_bdev.stripe_count(stripe_sector_count);
 
     let metadata = if !config.has_stripe_source() {
         // No image source
@@ -310,11 +319,13 @@ pub fn init_metadata(config: &DeviceConfig, stripe_sector_count_shift: u8) -> Re
         )
     };
 
-    let metadata_bdev = build_block_device(metadata_path, config, false)?;
+    let metadata_bdev = build_block_device(metadata_path, config, false)
+        .context("Failed to build metadata block device")?;
     metadata.save_to_bdev(metadata_bdev.as_ref())?;
     Ok(())
 }
 
+#[error_context("Failed to create I/O engine device")]
 fn create_io_engine_device(
     engine: IoEngine,
     path: PathBuf,

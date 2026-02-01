@@ -21,6 +21,7 @@ use crate::{
 use log::{error, info, warn};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use ubiblk_macros::error_context;
 
 use crate::block_device::StatusReporter;
 
@@ -62,6 +63,7 @@ impl RpcServerHandle {
     }
 }
 
+#[error_context("Failed to start RPC server on path: {path:?}")]
 pub fn start_rpc_server<P: AsRef<Path>>(
     path: P,
     status_reporter: Option<StatusReporter>,

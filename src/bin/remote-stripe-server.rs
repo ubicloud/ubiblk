@@ -24,12 +24,15 @@ struct Args {
     listen_config_path: std::path::PathBuf,
 }
 
-fn main() -> Result<()> {
+fn main() {
     env_logger::builder().format_timestamp(None).init();
 
     let args = Args::parse();
 
-    run(args)
+    if let Err(err) = run(args) {
+        error!("{err}");
+        std::process::exit(1);
+    }
 }
 
 fn run(args: Args) -> Result<()> {

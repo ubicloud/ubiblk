@@ -1,4 +1,5 @@
 use clap::Parser;
+use log::error;
 use ubiblk::backends::init_metadata;
 use ubiblk::cli::{load_config, CommonArgs};
 use ubiblk::Result;
@@ -22,9 +23,16 @@ struct Args {
     stripe_sector_count_shift: u8,
 }
 
-fn main() -> Result<()> {
+fn main() {
     env_logger::builder().format_timestamp(None).init();
 
+    if let Err(err) = run() {
+        error!("{err}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
 
     let config = load_config(&args.common)?;

@@ -108,7 +108,21 @@ impl Default for ErrorMeta {
 
 impl std::fmt::Display for ErrorMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(at {}){}", self.location, self.contexts)
+        if f.alternate() {
+            return write!(f, "(at {})", self.location);
+        }
+        if self.contexts.0.is_empty() {
+            return Ok(());
+        }
+        let mut iter = self.contexts.0.iter().rev();
+        if let Some(context) = iter.next() {
+            write!(f, "{context}")?;
+        }
+        for context in iter {
+            write!(f, "\n  - caused by: {context}")?;
+        }
+        write!(f, "\n  - caused by: ")?;
+        Ok(())
     }
 }
 
@@ -173,103 +187,103 @@ ubiblk_error_variants! {
         #[source]
         source: std::io::Error,
         meta: ErrorMeta,
-    } => "Thread creation error: {source} {meta}",
+    } => "{meta}Thread creation error: {source} {meta:#}",
     IoChannelCreation {
         #[source]
         source: std::io::Error,
         meta: ErrorMeta,
-    } => "I/O channel creation error: {source} {meta}",
+    } => "{meta}I/O channel creation error: {source} {meta:#}",
     GuestMemoryAccess {
         #[source]
         source: vm_memory::GuestMemoryError,
         meta: ErrorMeta,
-    } => "Guest memory access error: {source} {meta}",
+    } => "{meta}Guest memory access error: {source} {meta:#}",
     IoError {
         #[source]
         source: std::io::Error,
         meta: ErrorMeta,
-    } => "I/O error: {source} {meta}",
+    } => "{meta}I/O error: {source} {meta:#}",
     ChannelError {
         reason: String,
         meta: ErrorMeta,
-    } => "Channel error: {reason} {meta}",
+    } => "{meta}Channel error: {reason} {meta:#}",
     InvalidParameter {
         description: String,
         meta: ErrorMeta,
-    } => "Invalid parameter error: {description} {meta}",
+    } => "{meta}Invalid parameter error: {description} {meta:#}",
     MetadataError {
         description: String,
         meta: ErrorMeta,
-    } => "Metadata error: {description} {meta}",
+    } => "{meta}Metadata error: {description} {meta:#}",
     ProtocolError {
         description: String,
         meta: ErrorMeta,
-    } => "Protocol error: {description} {meta}",
+    } => "{meta}Protocol error: {description} {meta:#}",
     MissingStripeMetadata {
         meta: ErrorMeta,
-    } => "Missing stripe metadata on client {meta}",
+    } => "{meta}Missing stripe metadata on client {meta:#}",
     StripeUnavailableData {
         stripe: u64,
         meta: ErrorMeta,
-    } => "Stripe {stripe} is unavailable {meta}",
+    } => "{meta}Stripe {stripe} is unavailable {meta:#}",
     StripeSizeMismatch {
         stripe: u64,
         expected: usize,
         actual: usize,
         meta: ErrorMeta,
-    } => "Stripe {stripe} size mismatch: expected {expected} bytes, got {actual} bytes {meta}",
+    } => "{meta}Stripe {stripe} size mismatch: expected {expected} bytes, got {actual} bytes {meta:#}",
     StripeFetchFailed {
         stripe: usize,
         meta: ErrorMeta,
-    } => "Stripe fetch failed for stripe {stripe} {meta}",
+    } => "{meta}Stripe fetch failed for stripe {stripe} {meta:#}",
     StripeFetchTimeout {
         stripe: usize,
         meta: ErrorMeta,
-    } => "Stripe fetch timeout for stripe {stripe} {meta}",
+    } => "{meta}Stripe fetch timeout for stripe {stripe} {meta:#}",
     RemoteStatus {
         status: u8,
         meta: ErrorMeta,
-    } => "Remote server returned error status: {status} {meta}",
+    } => "{meta}Remote server returned error status: {status} {meta:#}",
     TlsError {
         #[source]
         source: TlsErrorSource,
         meta: ErrorMeta,
-    } => "TLS setup failed: {source} {meta}",
+    } => "{meta}TLS setup failed: {source} {meta:#}",
     BackgroundWorkerError {
         description: String,
         meta: ErrorMeta,
-    } => "Background worker error: {description} {meta}",
+    } => "{meta}Background worker error: {description} {meta:#}",
     RpcError {
         description: String,
         meta: ErrorMeta,
-    } => "RPC error: {description} {meta}",
+    } => "{meta}RPC error: {description} {meta:#}",
     VhostUserError {
         #[source]
         source: vhost::vhost_user::Error,
         meta: ErrorMeta,
-    } => "Vhost user error: {source} {meta}",
+    } => "{meta}Vhost user error: {source} {meta:#}",
     VhostUserBackendError {
         reason: vhost_user_backend::Error,
         meta: ErrorMeta,
-    } => "Vhost user backend error: {reason} {meta}",
+    } => "{meta}Vhost user backend error: {reason} {meta:#}",
     ArchiveError {
         description: String,
         meta: ErrorMeta,
-    } => "Archive error: {description} {meta}",
+    } => "{meta}Archive error: {description} {meta:#}",
     CryptoError {
         description: String,
         meta: ErrorMeta,
-    } => "Cryptography error: {description} {meta}",
+    } => "{meta}Cryptography error: {description} {meta:#}",
     CpuPinning {
         #[source]
         source: nix::Error,
         meta: ErrorMeta,
-    } => "CPU pinning error: {source} {meta}",
+    } => "{meta}CPU pinning error: {source} {meta:#}",
     UblkError {
         #[source]
         source: libublk::UblkError,
         meta: ErrorMeta,
-    } => "Ublk error: {source} {meta}",
+    } => "{meta}Ublk error: {source} {meta:#}",
 }
 
 ubiblk_error_from! {
@@ -481,91 +495,97 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel::<i32>();
         drop(rx); // Close the receiver to cause a SendError
         let send_error = tx.send(42).unwrap_err();
+        let line = line!();
         let ubiblk_error: UbiblkError = send_error.into();
         let rendered = format!("{ubiblk_error}");
-        assert_starts_with(&rendered, "Channel error: sending on a closed channel (at ");
-        assert_contains(&rendered, "src/error.rs:");
+        let expected = format!(
+            "Channel error: sending on a closed channel (at {}:{})",
+            file!(),
+            line + 1
+        );
+        assert_eq!(rendered, expected);
     }
 
     #[test]
     fn test_conversion_from_openssl_error_stack() {
+        let line = line!();
         let openssl_error = openssl::error::ErrorStack::get();
         let ubiblk_error: UbiblkError = openssl_error.into();
         let rendered = format!("{ubiblk_error}");
-        assert_starts_with(&rendered, "TLS setup failed: ");
-        assert_contains(&rendered, "src/error.rs:");
+        let expected = format!(
+            "TLS setup failed: OpenSSL error (at {}:{})",
+            file!(),
+            line + 2
+        );
+        assert_eq!(rendered, expected);
     }
 
     #[test]
     fn test_conversion_from_openssl_ssl_error() {
+        let line = line!();
         let openssl_error: openssl::ssl::Error = openssl::error::ErrorStack::get().into();
         let ubiblk_error: UbiblkError = openssl_error.into();
         let rendered = format!("{ubiblk_error}");
-        assert_starts_with(&rendered, "TLS setup failed: ");
-        assert_contains(&rendered, "src/error.rs:");
+        let expected = format!(
+            "TLS setup failed: OpenSSL error (at {}:{})",
+            file!(),
+            line + 2
+        );
+        assert_eq!(rendered, expected);
     }
 
     #[test]
     fn test_context_stack_format() {
+        let line = line!();
         let error = crate::ubiblk_error!(InvalidParameter {
             description: "Test error".to_string(),
         })
         .context("inner context")
         .context("outer context");
         let rendered = format!("{error}");
-        let inner_index = rendered
-            .find("Context: inner context (at ")
-            .expect("missing inner context");
-        let outer_index = rendered
-            .find("Context: outer context (at ")
-            .expect("missing outer context");
-        assert!(inner_index < outer_index);
+        let expected = format!(
+            "outer context (at {}:{})\n  - caused by: inner context (at {}:{})\n  - caused by: Invalid parameter error: Test error (at {}:{})",
+            file!(),
+            line + 5,
+            file!(),
+            line + 4,
+            file!(),
+            line + 1
+        );
+        assert_eq!(rendered, expected);
     }
 
     #[test]
     fn test_result_ext_context_with_question_operator() {
-        fn inner_operation() -> std::result::Result<(), std::io::Error> {
-            Err(std::io::Error::other("inner error"))
-        }
-        fn middle_operation(context_line: &mut u32) -> Result<()> {
-            *context_line = line!() + 1;
-            inner_operation().context("failed during middle operation")?;
+        fn inner_operation(lines: &mut Vec<u32>) -> Result<()> {
+            lines.push(line!() + 1);
+            Err(std::io::Error::other("inner error"))?;
             Ok(())
         }
-        fn outer_operation(
-            outer_context_line: &mut u32,
-            middle_context_line: &mut u32,
-        ) -> Result<()> {
-            *outer_context_line = line!() + 1;
-            middle_operation(middle_context_line).context("failed in outer_operation")?;
+        fn middle_operation(lines: &mut Vec<u32>) -> Result<()> {
+            lines.push(line!() + 1);
+            inner_operation(lines).context("failed during middle operation")?;
             Ok(())
         }
-        let mut middle_context_line = 0;
-        let mut outer_context_line = 0;
-        let result = outer_operation(&mut outer_context_line, &mut middle_context_line);
+        fn outer_operation(lines: &mut Vec<u32>) -> Result<()> {
+            lines.push(line!() + 1);
+            middle_operation(lines).context("failed in outer_operation")?;
+            Ok(())
+        }
+        let mut lines = Vec::new();
+        let result = outer_operation(&mut lines);
         assert!(result.is_err());
         let error = result.unwrap_err();
         let rendered = format!("{error}");
-        // Verify the error contains the I/O error message
-        assert_contains(&rendered, "inner error");
-        // Verify the error contains the context message
-        assert_contains(
-            &rendered,
-            &format!(
-                "Context: failed during middle operation (at {}:{})",
-                file!(),
-                middle_context_line
-            ),
+        let expected = format!(
+            "failed in outer_operation (at {}:{})\n  - caused by: failed during middle operation (at {}:{})\n  - caused by: I/O error: inner error (at {}:{})",
+            file!(),
+            lines[0],
+            file!(),
+            lines[1],
+            file!(),
+            lines[2]
         );
-        assert_contains(
-            &rendered,
-            &format!(
-                "Context: failed in outer_operation (at {}:{})",
-                file!(),
-                outer_context_line
-            ),
-        );
-        // Verify the error is of the correct variant (IoError)
-        assert_starts_with(&rendered, "I/O error:");
+        assert_eq!(rendered, expected);
     }
 }

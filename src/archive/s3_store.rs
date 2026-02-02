@@ -85,27 +85,6 @@ impl S3Store {
         })
     }
 
-    fn validate_key_name(name: &str) -> Result<()> {
-        if name.contains(['/', '\\']) {
-            return Err(crate::ubiblk_error!(ArchiveError {
-                description: format!(
-                    "Invalid object name '{name}': must not contain path separators"
-                ),
-            }));
-        }
-        if name == "." || name == ".." {
-            return Err(crate::ubiblk_error!(ArchiveError {
-                description: format!("Invalid object name '{name}': cannot be '.' or '..'"),
-            }));
-        }
-        if name.is_empty() {
-            return Err(crate::ubiblk_error!(ArchiveError {
-                description: "Invalid object name: cannot be empty".to_string(),
-            }));
-        }
-        Ok(())
-    }
-
     fn drain_results(&mut self) {
         for result in self.result_rx.try_iter() {
             match result {
@@ -136,10 +115,6 @@ impl Drop for S3Store {
 impl ArchiveStore for S3Store {
     fn start_put_object(&mut self, name: &str, data: &[u8]) {
         debug!("Queueing S3 put object: {}", name);
-        if let Err(err) = Self::validate_key_name(name) {
-            self.finished_puts.push((name.to_string(), Err(err)));
-            return;
-        }
         let key = key_with_prefix(&self.prefix, name);
         let request = S3Request::Put {
             name: name.to_string(),
@@ -167,10 +142,6 @@ impl ArchiveStore for S3Store {
 
     fn start_get_object(&mut self, name: &str) {
         debug!("Queueing S3 get object: {}", name);
-        if let Err(err) = Self::validate_key_name(name) {
-            self.finished_gets.push((name.to_string(), Err(err)));
-            return;
-        }
         let key = key_with_prefix(&self.prefix, name);
         let request = S3Request::Get {
             name: name.to_string(),
@@ -287,24 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn start_put_object_rejects_invalid_name() {
-        let (tx, _rx) = unbounded();
-        let mut store = test_store(Some(tx));
-        store.start_put_object("bad/name", b"data");
-        let results = store.poll_puts();
-        assert_eq!(results.len(), 1);
-        let (name, result) = &results[0];
-        assert_eq!(name, "bad/name");
-        let err = result
-            .as_ref()
-            .expect_err("expected error for invalid name");
-        assert!(
-            err.to_string().contains("Invalid object name"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
     fn start_put_object_errors_when_queue_missing() {
         let mut store = test_store(None);
         store.start_put_object("object", b"data");
@@ -333,24 +286,6 @@ mod tests {
         let result = store.get_object("test-object", Duration::from_secs(5));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), b"hello");
-    }
-
-    #[test]
-    fn start_get_object_rejects_invalid_name() {
-        let (tx, _rx) = unbounded();
-        let mut store = test_store(Some(tx));
-        store.start_get_object("..");
-        let results = store.poll_gets();
-        assert_eq!(results.len(), 1);
-        let (name, result) = &results[0];
-        assert_eq!(name, "..");
-        let err = result
-            .as_ref()
-            .expect_err("expected error for invalid name");
-        assert!(
-            err.to_string().contains("Invalid object name"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]
@@ -384,35 +319,6 @@ mod tests {
         let mut objects = result.unwrap();
         objects.sort();
         assert_eq!(objects, vec!["obj1".to_string(), "obj2".to_string()]);
-    }
-
-    #[test]
-    fn test_invalid_object_name() {
-        let mut store = prepare_s3_store("test-bucket", Some("test-prefix"), &[]);
-
-        let result = store.put_object("invalid/name", b"data", Duration::from_secs(5));
-        assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("must not contain path separators"));
-
-        let result = store.get_object("..", Duration::from_secs(5));
-        assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("cannot be '.' or '..'"));
-
-        let result = store.put_object("", b"data", Duration::from_secs(5));
-        assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("cannot be empty"));
     }
 
     #[test]

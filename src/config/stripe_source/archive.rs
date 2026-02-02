@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Component, Path};
 
 use serde::Deserialize;
 
@@ -66,6 +66,7 @@ impl ArchiveStripeSourceConfig {
                 })
             })?;
         config.decrypt_with_kek(kek)?;
+        config.validate()?;
         Ok(config)
     }
 
@@ -123,6 +124,27 @@ impl ArchiveStripeSourceConfig {
     ) -> crate::Result<()> {
         if let Some(value) = secret.take() {
             *secret = Some(kek.decrypt_psk_secret(value)?);
+        }
+        Ok(())
+    }
+
+    fn validate(&self) -> crate::Result<()> {
+        if let ArchiveStripeSourceConfig::S3 { prefix, .. } = self {
+            Self::validate_prefix(prefix)?;
+        }
+        Ok(())
+    }
+
+    fn validate_prefix(prefix: &Option<String>) -> crate::Result<()> {
+        if let Some(p) = prefix {
+            if Path::new(p)
+                .components()
+                .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+            {
+                return Err(crate::ubiblk_error!(InvalidParameter {
+                    description: format!("Invalid S3 prefix (contains . or .. components): {}", p),
+                }));
+            }
         }
         Ok(())
     }
@@ -437,5 +459,16 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Failed to parse archive target config YAML"));
+    }
+
+    #[test]
+    fn test_validate_prefix_with_invalid_components() {
+        let invalid_prefix = Some("valid/../invalid".to_string());
+        let result = ArchiveStripeSourceConfig::validate_prefix(&invalid_prefix);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid S3 prefix (contains . or .. components)"));
     }
 }

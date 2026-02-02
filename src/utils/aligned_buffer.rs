@@ -10,7 +10,6 @@ pub struct AlignedBuf {
     vec: Vec<u8>,
     offset: usize,
     len: usize,
-    alignment: usize,
     pub(super) id: usize,
 }
 
@@ -26,7 +25,6 @@ impl AlignedBuf {
             align != 0 && align.is_power_of_two(),
             "Alignment must be non-zero and a power of two, got: {align}"
         );
-        let alignment = align;
         let vec = vec![0u8; len + align];
         let ptr = vec.as_ptr() as usize;
         let offset = (align - (ptr % align)) % align;
@@ -34,7 +32,6 @@ impl AlignedBuf {
             vec,
             offset,
             len,
-            alignment,
             id: 0,
         }
     }
@@ -62,14 +59,6 @@ impl AlignedBuf {
     /// Returns true if the buffer has a length of zero.
     pub fn is_empty(&self) -> bool {
         self.len == 0
-    }
-}
-
-impl Clone for AlignedBuf {
-    fn clone(&self) -> Self {
-        let mut new = AlignedBuf::new_with_alignment(self.len, self.alignment);
-        new.as_mut_slice().copy_from_slice(self.as_slice());
-        new
     }
 }
 
@@ -109,15 +98,5 @@ mod tests {
     #[should_panic(expected = "Alignment must be non-zero and a power of two")]
     fn test_zero_alignment() {
         let _ = AlignedBuf::new_with_alignment(1024, 0);
-    }
-
-    #[test]
-    fn test_clone_preserves_alignment() {
-        let len = 1024;
-        let buf = AlignedBuf::new_with_alignment(len, 8192);
-        let mut cloned = buf.clone();
-        assert_eq!(cloned.len(), len);
-        assert_eq!(cloned.as_ptr() as usize % 8192, 0);
-        assert_eq!(cloned.as_mut_ptr() as usize % 8192, 0);
     }
 }

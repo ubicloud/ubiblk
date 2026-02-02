@@ -13,11 +13,6 @@ use crate::{
     KeyEncryptionCipher, Result,
 };
 
-struct StripeState {
-    buffer: SharedBuffer,
-    buffer_index: usize,
-}
-
 pub struct StripeArchiver {
     stripe_source: Box<dyn StripeSource>,
     io_channel: Box<dyn IoChannel>,
@@ -27,7 +22,7 @@ pub struct StripeArchiver {
     block_cipher: Option<XtsBlockCipher>,
     kek: KeyEncryptionCipher,
     buffer_pool: AlignedBufferPool,
-    stripe_states: HashMap<usize, StripeState>,
+    stripe_buffers: HashMap<usize, SharedBuffer>,
 }
 
 impl StripeArchiver {
@@ -60,7 +55,7 @@ impl StripeArchiver {
             kek,
             stripe_count,
             buffer_pool,
-            stripe_states: HashMap::new(),
+            stripe_buffers: HashMap::new(),
         })
     }
 
@@ -81,7 +76,7 @@ impl StripeArchiver {
         }
 
         // Drain all in-flight operations before putting metadata
-        while !self.stripe_states.is_empty() {
+        while !self.stripe_buffers.is_empty() {
             self.poll_fetches()?;
             self.poll_uploads()?;
         }
@@ -91,13 +86,9 @@ impl StripeArchiver {
     }
 
     fn maybe_start_next_stripe(&mut self, stripe_id: usize) -> Result<bool> {
-        if let Some((buffer, buffer_index)) = self.buffer_pool.get_buffer() {
+        if let Some(buffer) = self.buffer_pool.get_buffer() {
             info!("Archiving stripe {}", stripe_id);
-            let stripe_state = StripeState {
-                buffer: buffer.clone(),
-                buffer_index,
-            };
-            self.stripe_states.insert(stripe_id, stripe_state);
+            self.stripe_buffers.insert(stripe_id, buffer.clone());
 
             self.start_fetch_stripe(stripe_id, buffer)?;
             Ok(true)
@@ -141,26 +132,26 @@ impl StripeArchiver {
     }
 
     fn start_upload_stripe(&mut self, stripe_id: usize) -> Result<()> {
-        let stripe_state = self
-            .stripe_states
+        let buffer = self
+            .stripe_buffers
             .get(&stripe_id)
             .ok_or(crate::ubiblk_error!(ArchiveError {
-                description: format!("Stripe state for stripe {} not found", stripe_id),
+                description: format!("Stripe buffer for stripe {} not found", stripe_id),
             }))?;
 
-        let mut buffer = stripe_state.buffer.borrow_mut();
+        let mut buffer_ref = buffer.borrow_mut();
         let sector_offset = self.stripe_offset(stripe_id);
         if let Some(block_cipher) = self.block_cipher.as_mut() {
             block_cipher.encrypt(
-                buffer.as_mut_slice(),
+                buffer_ref.as_mut_slice(),
                 sector_offset,
                 self.metadata.stripe_sector_count(),
             );
         }
 
-        let object_key = self.stripe_object_key(stripe_id, buffer.as_slice());
+        let object_key = self.stripe_object_key(stripe_id, buffer_ref.as_slice());
         self.archive_store
-            .start_put_object(&object_key, buffer.as_slice());
+            .start_put_object(&object_key, buffer_ref.as_slice());
 
         Ok(())
     }
@@ -171,13 +162,13 @@ impl StripeArchiver {
             result?;
             debug!("Completed uploading object {}", obj_name);
             let stripe_id = self.extract_stripe_id_from_object_key(&obj_name)?;
-            let stripe_state =
-                self.stripe_states
-                    .remove(&stripe_id)
-                    .ok_or(crate::ubiblk_error!(ArchiveError {
-                        description: format!("Stripe state for stripe {} not found", stripe_id),
-                    }))?;
-            self.buffer_pool.return_buffer(stripe_state.buffer_index);
+            let buffer = self
+                .stripe_buffers
+                .remove(&stripe_id)
+                .ok_or(crate::ubiblk_error!(ArchiveError {
+                    description: format!("Stripe buffer for stripe {} not found", stripe_id),
+                }))?;
+            self.buffer_pool.return_buffer(&buffer);
         }
         Ok(())
     }

@@ -1,6 +1,8 @@
 use crate::{
     backends::SECTOR_SIZE,
-    block_device::{metadata_flags, BlockDevice, IoChannel, SharedMetadataState, UbiMetadata},
+    block_device::{
+        metadata_flags, BlockDevice, IoChannel, SharedBuffer, SharedMetadataState, UbiMetadata,
+    },
     utils::AlignedBufferPool,
     Result,
 };
@@ -28,7 +30,7 @@ enum RequestStage {
 }
 
 struct HeaderUpdateStatus {
-    buffer_index: usize,
+    buffer: SharedBuffer,
     stage: RequestStage,
     stripe_id: usize,
     header: u8,
@@ -111,13 +113,13 @@ impl MetadataFlusher {
                 }
                 (Some(status), false) => {
                     error!("Failed to write metadata for stripe {stripe_id}");
-                    self.buffer_pool.return_buffer(status.buffer_index);
+                    self.buffer_pool.return_buffer(&status.buffer);
                     self.sectors_being_updated.remove(&status.sector);
                     self.header_updates.remove(&stripe_id);
                 }
                 (Some(status), true) => match status.stage {
                     RequestStage::Writing => {
-                        self.buffer_pool.return_buffer(status.buffer_index);
+                        self.buffer_pool.return_buffer(&status.buffer);
                         self.channel.add_flush(stripe_id);
                         status.stage = RequestStage::Flushing;
                     }
@@ -162,18 +164,19 @@ impl MetadataFlusher {
                 continue;
             }
 
-            let (buf, index) = self.buffer_pool.get_buffer().unwrap();
+            let buf = self.buffer_pool.get_buffer().unwrap();
             self.metadata.stripe_headers[req.stripe_id] |= requested_bitmask;
             buf.borrow_mut().as_mut_slice().copy_from_slice(
                 &self.metadata.stripe_headers[group * SECTOR_SIZE..(group + 1) * SECTOR_SIZE],
             );
 
-            self.channel.add_write(sector, 1, buf, req.stripe_id);
+            self.channel
+                .add_write(sector, 1, buf.clone(), req.stripe_id);
             self.sectors_being_updated.insert(sector);
             self.header_updates.insert(
                 req.stripe_id,
                 HeaderUpdateStatus {
-                    buffer_index: index,
+                    buffer: buf,
                     stage: RequestStage::Writing,
                     stripe_id: req.stripe_id,
                     header: self.metadata.stripe_headers[req.stripe_id],

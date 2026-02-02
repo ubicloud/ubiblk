@@ -11,6 +11,7 @@ pub struct AlignedBuf {
     offset: usize,
     len: usize,
     alignment: usize,
+    pub(super) id: usize,
 }
 
 impl AlignedBuf {
@@ -34,6 +35,7 @@ impl AlignedBuf {
             offset,
             len,
             alignment,
+            id: 0,
         }
     }
 

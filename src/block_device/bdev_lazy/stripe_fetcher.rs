@@ -36,7 +36,7 @@ pub struct StripeFetcher {
     shared_metadata_state: SharedMetadataState,
     stripe_states: HashMap<usize, FetchState>,
     stripe_fetch_retries: HashMap<usize, u8>,
-    allocated_buffers: HashMap<usize, (SharedBuffer, usize)>,
+    allocated_buffers: HashMap<usize, SharedBuffer>,
     finished_fetches: Vec<(usize, bool)>,
     autofetch: bool,
     disconnected: bool,
@@ -171,9 +171,8 @@ impl StripeFetcher {
         while !self.fetch_queue.is_empty() && self.buffer_pool.has_available() {
             let stripe_id = self.fetch_queue.pop_front().unwrap();
 
-            let (buf, buffer_idx) = self.buffer_pool.get_buffer().unwrap();
-            self.allocated_buffers
-                .insert(stripe_id, (buf.clone(), buffer_idx));
+            let buf = self.buffer_pool.get_buffer().unwrap();
+            self.allocated_buffers.insert(stripe_id, buf.clone());
             if let Err(e) = self.stripe_source.request(stripe_id, buf.clone()) {
                 error!("Failed to request stripe {stripe_id} from source: {e:?}");
                 self.fetch_completed(stripe_id, false);
@@ -195,7 +194,7 @@ impl StripeFetcher {
         // source complete? Start writing the successful ones to the target.
         for (stripe_id, success) in self.stripe_source.poll() {
             let buf = match self.allocated_buffers.get(&stripe_id) {
-                Some((buf, _)) => buf.clone(),
+                Some(buf) => buf.clone(),
                 None => {
                     error!("Received completion for unknown stripe {stripe_id}");
                     continue;
@@ -270,8 +269,8 @@ impl StripeFetcher {
     fn fetch_completed(&mut self, stripe_id: usize, success: bool) {
         debug!("Fetch completed for stripe {stripe_id}, success={success}");
 
-        if let Some((_, buffer_idx)) = self.allocated_buffers.remove(&stripe_id) {
-            self.buffer_pool.return_buffer(buffer_idx);
+        if let Some(buf) = self.allocated_buffers.remove(&stripe_id) {
+            self.buffer_pool.return_buffer(&buf);
         } else {
             error!("No buffer allocated for stripe {stripe_id} on completion");
         }
@@ -472,8 +471,8 @@ mod tests {
     #[test]
     fn test_retry_logic() {
         let mut state = prep(false);
-        let (buf, idx) = state.fetcher.buffer_pool.get_buffer().unwrap();
-        state.fetcher.allocated_buffers.insert(0, (buf, idx));
+        let buf = state.fetcher.buffer_pool.get_buffer().unwrap();
+        state.fetcher.allocated_buffers.insert(0, buf);
 
         state.fetcher.fetch_completed(0, false);
         assert!(!state.fetcher.fetch_queue.is_empty());
@@ -484,8 +483,8 @@ mod tests {
         );
         assert_eq!(state.fetcher.stripe_fetch_retries.get(&0), Some(&1));
 
-        let (buf, idx) = state.fetcher.buffer_pool.get_buffer().unwrap();
-        state.fetcher.allocated_buffers.insert(0, (buf, idx));
+        let buf = state.fetcher.buffer_pool.get_buffer().unwrap();
+        state.fetcher.allocated_buffers.insert(0, buf);
 
         assert!(!state.fetcher.shared_metadata_state.is_stripe_failed(0));
 
@@ -494,8 +493,8 @@ mod tests {
         state.fetcher.fetch_queue.pop_front();
         assert_eq!(state.fetcher.stripe_fetch_retries.get(&0), Some(&2));
 
-        let (buf, idx) = state.fetcher.buffer_pool.get_buffer().unwrap();
-        state.fetcher.allocated_buffers.insert(0, (buf, idx));
+        let buf = state.fetcher.buffer_pool.get_buffer().unwrap();
+        state.fetcher.allocated_buffers.insert(0, buf);
 
         assert!(!state.fetcher.shared_metadata_state.is_stripe_failed(0));
 
@@ -504,8 +503,8 @@ mod tests {
         state.fetcher.fetch_queue.pop_front();
         assert_eq!(state.fetcher.stripe_fetch_retries.get(&0), Some(&3));
 
-        let (buf, idx) = state.fetcher.buffer_pool.get_buffer().unwrap();
-        state.fetcher.allocated_buffers.insert(0, (buf, idx));
+        let buf = state.fetcher.buffer_pool.get_buffer().unwrap();
+        state.fetcher.allocated_buffers.insert(0, buf);
 
         state.fetcher.fetch_completed(0, false);
         assert!(state.fetcher.fetch_queue.is_empty());

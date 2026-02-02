@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use log::{debug, info};
 
@@ -8,7 +8,7 @@ use crate::{
     backends::SECTOR_SIZE,
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedBuffer, UbiMetadata},
     crypt::XtsBlockCipher,
-    stripe_source::{ArchiveStripeSource, StripeSource},
+    stripe_source::StripeSource,
     utils::{aligned_buffer::BUFFER_ALIGNMENT, hash::sha256_hex, AlignedBufferPool},
     KeyEncryptionCipher, Result,
 };
@@ -22,7 +22,10 @@ pub struct StripeArchiver {
     block_cipher: Option<XtsBlockCipher>,
     kek: KeyEncryptionCipher,
     buffer_pool: AlignedBufferPool,
-    stripe_buffers: HashMap<usize, SharedBuffer>,
+    inflight_object_buffers: HashMap<String, SharedBuffer>,
+    stripe_fetch_buffers: HashMap<usize, SharedBuffer>,
+    seen_hashes: HashSet<String>,
+    stripe_hashes: HashMap<usize, String>,
 }
 
 impl StripeArchiver {
@@ -55,7 +58,10 @@ impl StripeArchiver {
             kek,
             stripe_count,
             buffer_pool,
-            stripe_buffers: HashMap::new(),
+            inflight_object_buffers: HashMap::new(),
+            stripe_fetch_buffers: HashMap::new(),
+            seen_hashes: HashSet::new(),
+            stripe_hashes: HashMap::new(),
         })
     }
 
@@ -76,19 +82,20 @@ impl StripeArchiver {
         }
 
         // Drain all in-flight operations before putting metadata
-        while !self.stripe_buffers.is_empty() {
+        while !self.stripe_fetch_buffers.is_empty() || !self.inflight_object_buffers.is_empty() {
             self.poll_fetches()?;
             self.poll_uploads()?;
         }
 
         self.put_metadata()?;
+        self.put_stripe_hashes()?;
         Ok(())
     }
 
     fn maybe_start_next_stripe(&mut self, stripe_id: usize) -> Result<bool> {
         if let Some(buffer) = self.buffer_pool.get_buffer() {
             info!("Archiving stripe {}", stripe_id);
-            self.stripe_buffers.insert(stripe_id, buffer.clone());
+            self.stripe_fetch_buffers.insert(stripe_id, buffer.clone());
 
             self.start_fetch_stripe(stripe_id, buffer)?;
             Ok(true)
@@ -131,27 +138,50 @@ impl StripeArchiver {
         Ok(())
     }
 
+    fn maybe_encrypt(&mut self, stripe_id: usize, buffer: &mut [u8]) {
+        let sector_offset = self.stripe_offset(stripe_id);
+        if let Some(block_cipher) = self.block_cipher.as_mut() {
+            block_cipher.encrypt(buffer, sector_offset, self.metadata.stripe_sector_count());
+        }
+    }
+
     fn start_upload_stripe(&mut self, stripe_id: usize) -> Result<()> {
         let buffer = self
-            .stripe_buffers
-            .get(&stripe_id)
+            .stripe_fetch_buffers
+            .remove(&stripe_id)
             .ok_or(crate::ubiblk_error!(ArchiveError {
                 description: format!("Stripe buffer for stripe {} not found", stripe_id),
             }))?;
 
         let mut buffer_ref = buffer.borrow_mut();
-        let sector_offset = self.stripe_offset(stripe_id);
-        if let Some(block_cipher) = self.block_cipher.as_mut() {
-            block_cipher.encrypt(
-                buffer_ref.as_mut_slice(),
-                sector_offset,
-                self.metadata.stripe_sector_count(),
+        self.maybe_encrypt(stripe_id, buffer_ref.as_mut_slice());
+        drop(buffer_ref); // release mutable borrow
+
+        let buffer_ref = buffer.borrow();
+
+        let hash = sha256_hex(buffer_ref.as_slice());
+        self.stripe_hashes.insert(stripe_id, hash.clone());
+        if self.seen_hashes.contains(&hash) {
+            debug!(
+                "Stripe {} has duplicate hash {}, skipping upload",
+                stripe_id, hash
             );
+
+            // Return the fetch buffer to the pool. The possibly concurrent
+            // upload of the same object uses fetch buffer of the earlier stripe
+            // with the same hash, which is different from this stripe's fetch
+            // buffer.
+            self.buffer_pool.return_buffer(&buffer);
+            return Ok(());
         }
 
-        let object_key = self.stripe_object_key(stripe_id, buffer_ref.as_slice());
+        self.seen_hashes.insert(hash.clone());
+        let object_key = self.hash_to_object_key(&hash);
+
+        // We don't return the fetch buffer to the pool and reuse it for upload.
         self.archive_store
             .start_put_object(&object_key, buffer_ref.as_slice());
+        self.inflight_object_buffers.insert(hash, buffer.clone());
 
         Ok(())
     }
@@ -160,27 +190,31 @@ impl StripeArchiver {
         let results = self.archive_store.poll_puts();
         for (obj_name, result) in results {
             result?;
+            let hash = self.object_key_to_hash(&obj_name)?;
             debug!("Completed uploading object {}", obj_name);
-            let stripe_id = self.extract_stripe_id_from_object_key(&obj_name)?;
             let buffer = self
-                .stripe_buffers
-                .remove(&stripe_id)
+                .inflight_object_buffers
+                .remove(&hash)
                 .ok_or(crate::ubiblk_error!(ArchiveError {
-                    description: format!("Stripe buffer for stripe {} not found", stripe_id),
+                    description: format!("Buffer for object hash {} not found", hash),
                 }))?;
             self.buffer_pool.return_buffer(&buffer);
         }
         Ok(())
     }
 
-    fn extract_stripe_id_from_object_key(&self, object_key: &str) -> Result<usize> {
-        let (stripe_id, _) = ArchiveStripeSource::parse_stripe_object_name(object_key)?;
-        Ok(stripe_id)
+    fn hash_to_object_key(&self, hash: &str) -> String {
+        format!("data/{}", hash)
     }
 
-    fn stripe_object_key(&self, stripe_id: usize, stripe_data: &[u8]) -> String {
-        let hash = sha256_hex(stripe_data);
-        format!("stripe_{:010}_{}", stripe_id, hash)
+    fn object_key_to_hash(&self, object_key: &str) -> Result<String> {
+        if let Some(stripped) = object_key.strip_prefix("data/") {
+            Ok(stripped.to_string())
+        } else {
+            Err(crate::ubiblk_error!(ArchiveError {
+                description: format!("Invalid object key format: {}", object_key),
+            }))
+        }
     }
 
     fn stripe_should_be_archived(&self, stripe_id: usize) -> bool {
@@ -208,14 +242,28 @@ impl StripeArchiver {
 
     fn put_metadata(&mut self) -> Result<()> {
         let archive_metadata = self.archive_metadata()?;
-        let metadata_yaml = serde_yaml::to_string(&archive_metadata).map_err(|e| {
+        let metadata_json = serde_json::to_string(&archive_metadata).map_err(|e| {
             crate::ubiblk_error!(ArchiveError {
                 description: format!("Failed to serialize archive metadata: {}", e),
             })
         })?;
         self.archive_store.put_object(
-            "metadata.yaml",
-            metadata_yaml.as_bytes(),
+            "metadata.json",
+            metadata_json.as_bytes(),
+            DEFAULT_ARCHIVE_TIMEOUT,
+        )?;
+        Ok(())
+    }
+
+    fn put_stripe_hashes(&mut self) -> Result<()> {
+        let mapping_json = serde_json::to_string(&self.stripe_hashes).map_err(|e| {
+            crate::ubiblk_error!(ArchiveError {
+                description: format!("Failed to serialize stripes hashes: {}", e),
+            })
+        })?;
+        self.archive_store.put_object(
+            "stripe-hashes.json",
+            mapping_json.as_bytes(),
             DEFAULT_ARCHIVE_TIMEOUT,
         )?;
         Ok(())
@@ -263,6 +311,21 @@ mod tests {
             image_stripe_count,
         );
         let bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(bdev_size));
+        for stripe_id in 0..bdev_stripe_count {
+            // Use two disjoint byte ranges to distinguish image stripes from
+            // stripes that exist only on the backing device: image stripes get
+            // bytes in 3..5, and non-image stripes get bytes in 0..2. The
+            // modulus 3 keeps the pattern short and predictable for tests.
+            let byte = if stripe_id < image_stripe_count {
+                (stripe_id % 3 + 3) as u8
+            } else {
+                (stripe_id % 3) as u8
+            };
+            let buf = [byte; STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE];
+            let len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+            let offset = stripe_id * len;
+            bdev.write(offset, buf.as_slice(), len);
+        }
         let stripe_source =
             BlockDeviceStripeSource::new(bdev.clone(), STRIPE_SECTOR_COUNT).unwrap();
         let stripe_source = crate::stripe_source::FlakyStripeSource::new(
@@ -288,15 +351,6 @@ mod tests {
     }
 
     #[test]
-    fn test_stripe_object_key() {
-        let archiver = prep(4, 4, false, Vec::new());
-        let stripe_id = 42;
-        let stripe_data = vec![0u8; 4096];
-        let key = archiver.stripe_object_key(stripe_id, &stripe_data);
-        assert!(key.starts_with("stripe_0000000042_"));
-    }
-
-    #[test]
     fn test_stripe_should_be_archived() {
         let mut archiver = prep(16, 4, false, Vec::new());
         archiver.metadata.stripe_headers[8] |= metadata_flags::WRITTEN;
@@ -316,16 +370,35 @@ mod tests {
         let mut archiver = prep(16, 0, false, Vec::new());
         archiver.metadata.stripe_headers[2] |= metadata_flags::WRITTEN;
         archiver.metadata.stripe_headers[5] |= metadata_flags::WRITTEN;
+        archiver.metadata.stripe_headers[7] |= metadata_flags::WRITTEN;
 
         archiver.archive_all().unwrap();
 
-        let mut stored_objects = archiver.archive_store.list_objects().unwrap();
-        stored_objects.sort();
+        let stored_objects = archiver.archive_store.list_objects().unwrap();
 
-        assert_eq!(stored_objects.len(), 3);
-        assert_eq!(stored_objects[0], "metadata.yaml");
-        assert!(stored_objects[1].starts_with("stripe_0000000002_"));
-        assert!(stored_objects[2].starts_with("stripe_0000000005_"));
+        // stripes 2 and 5 have the same data, so they share the same data object
+        let stored_objects: std::collections::HashSet<String> =
+            stored_objects.into_iter().collect();
+        let expected_objects: std::collections::HashSet<String> = [
+            "metadata.json".to_string(),
+            "stripe-hashes.json".to_string(),
+            format!("data/{}", &archiver.stripe_hashes[&2]),
+            format!("data/{}", &archiver.stripe_hashes[&7]),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(stored_objects, expected_objects);
+
+        // verify stripe hashes
+        let stripe_hashes = archiver
+            .archive_store
+            .get_object("stripe-hashes.json", Duration::from_secs(5))
+            .unwrap();
+        let stripe_hashes: HashMap<usize, String> = serde_json::from_slice(&stripe_hashes).unwrap();
+        assert_eq!(stripe_hashes.len(), 3);
+        assert_eq!(stripe_hashes[&2], archiver.stripe_hashes[&2]);
+        assert_eq!(stripe_hashes[&5], archiver.stripe_hashes[&2]);
+        assert_eq!(stripe_hashes[&7], archiver.stripe_hashes[&7]);
     }
 
     #[test]
@@ -336,16 +409,35 @@ mod tests {
         archiver.metadata.stripe_headers[12] |= metadata_flags::WRITTEN;
 
         archiver.archive_all().unwrap();
-        let mut stored_objects = archiver.archive_store.list_objects().unwrap();
-        stored_objects.sort();
+        let stored_objects = archiver.archive_store.list_objects().unwrap();
 
-        assert_eq!(stored_objects.len(), 6);
-        assert_eq!(stored_objects[0], "metadata.yaml");
-        assert!(stored_objects[1].starts_with("stripe_0000000000_"));
-        assert!(stored_objects[2].starts_with("stripe_0000000001_"));
-        assert!(stored_objects[3].starts_with("stripe_0000000003_"));
-        assert!(stored_objects[4].starts_with("stripe_0000000010_"));
-        assert!(stored_objects[5].starts_with("stripe_0000000012_"));
+        // stripes 0 and 3 have the same data, so they share the same data object
+        let stored_objects: std::collections::HashSet<String> =
+            stored_objects.into_iter().collect();
+        let expected_objects: std::collections::HashSet<String> = [
+            "metadata.json".to_string(),
+            "stripe-hashes.json".to_string(),
+            format!("data/{}", &archiver.stripe_hashes[&0]),
+            format!("data/{}", &archiver.stripe_hashes[&1]),
+            format!("data/{}", &archiver.stripe_hashes[&10]),
+            format!("data/{}", &archiver.stripe_hashes[&12]),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(stored_objects, expected_objects);
+
+        // verify stripe hashes
+        let stripe_hashes = archiver
+            .archive_store
+            .get_object("stripe-hashes.json", Duration::from_secs(5))
+            .unwrap();
+        let stripe_hashes: HashMap<usize, String> = serde_json::from_slice(&stripe_hashes).unwrap();
+        assert_eq!(stripe_hashes.len(), 5);
+        assert_eq!(stripe_hashes[&0], archiver.stripe_hashes[&0]);
+        assert_eq!(stripe_hashes[&1], archiver.stripe_hashes[&1]);
+        assert_eq!(stripe_hashes[&3], archiver.stripe_hashes[&0]);
+        assert_eq!(stripe_hashes[&10], archiver.stripe_hashes[&10]);
+        assert_eq!(stripe_hashes[&12], archiver.stripe_hashes[&12]);
     }
 
     #[test]
@@ -354,9 +446,9 @@ mod tests {
         archiver.archive_all().unwrap();
         let metadata_bytes = archiver
             .archive_store
-            .get_object("metadata.yaml", Duration::from_secs(5))
+            .get_object("metadata.json", Duration::from_secs(5))
             .unwrap();
-        let metadata: ArchiveMetadata = serde_yaml::from_slice(&metadata_bytes).unwrap();
+        let metadata: ArchiveMetadata = serde_json::from_slice(&metadata_bytes).unwrap();
         assert_eq!(metadata.stripe_sector_count, STRIPE_SECTOR_COUNT);
         assert!(metadata.encryption_key.is_none());
     }
@@ -367,20 +459,11 @@ mod tests {
         archiver.archive_all().unwrap();
         let metadata_bytes = archiver
             .archive_store
-            .get_object("metadata.yaml", Duration::from_secs(5))
+            .get_object("metadata.json", Duration::from_secs(5))
             .unwrap();
-        let metadata: ArchiveMetadata = serde_yaml::from_slice(&metadata_bytes).unwrap();
+        let metadata: ArchiveMetadata = serde_json::from_slice(&metadata_bytes).unwrap();
         assert_eq!(metadata.stripe_sector_count, STRIPE_SECTOR_COUNT);
         assert!(metadata.encryption_key.is_some());
-    }
-
-    #[test]
-    fn test_object_key_large_stripe_id() {
-        let archiver = prep(10, 0, false, Vec::new());
-        let stripe_id = 1_234_567_890_123usize;
-        let stripe_data = vec![0u8; 4096];
-        let key = archiver.stripe_object_key(stripe_id, &stripe_data);
-        assert!(key.starts_with("stripe_1234567890123_"));
     }
 
     #[test]

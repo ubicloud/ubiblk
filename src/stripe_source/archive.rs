@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use ubiblk_macros::error_context;
+
 use crate::{
     archive::{ArchiveMetadata, ArchiveStore, DEFAULT_ARCHIVE_TIMEOUT},
     block_device::SharedBuffer,
@@ -11,15 +13,14 @@ use crate::{
 use super::StripeSource;
 
 struct PendingRequest {
-    stripe_id: usize,
-    buffer: SharedBuffer,
+    pending_stripes: Vec<(usize, SharedBuffer)>,
     expected_sha256: String,
 }
 
 pub struct ArchiveStripeSource {
     store: Box<dyn ArchiveStore>,
     xts_cipher: Option<XtsBlockCipher>,
-    stripe_object_names: HashMap<usize, String>,
+    stripe_hashes: HashMap<usize, String>,
     max_stripe_id: usize,
     stripe_sector_count: u64,
     finished_requests: Vec<(usize, bool)>,
@@ -27,10 +28,11 @@ pub struct ArchiveStripeSource {
 }
 
 impl ArchiveStripeSource {
+    #[error_context("Failed to create ArchiveStripeSource")]
     pub fn new(mut store: Box<dyn ArchiveStore>, kek: KeyEncryptionCipher) -> Result<Self> {
         let metadata: ArchiveMetadata = Self::fetch_metadata(store.as_mut())?;
-        let stripe_object_names = Self::fetch_stripe_info(store.as_ref())?;
-        let max_stripe_id = stripe_object_names.keys().max().cloned().unwrap_or(0);
+        let stripe_hashes = Self::fetch_stripe_hashes(store.as_mut())?;
+        let max_stripe_id = stripe_hashes.keys().max().cloned().unwrap_or(0);
         let stripe_sector_count = metadata.stripe_sector_count;
         let finished_requests = Vec::new();
         let pending_requests = HashMap::new();
@@ -41,7 +43,7 @@ impl ArchiveStripeSource {
         Ok(Self {
             store,
             xts_cipher,
-            stripe_object_names,
+            stripe_hashes,
             max_stripe_id,
             stripe_sector_count,
             finished_requests,
@@ -49,9 +51,10 @@ impl ArchiveStripeSource {
         })
     }
 
+    #[error_context("Failed to fetch archive metadata")]
     fn fetch_metadata(store: &mut dyn ArchiveStore) -> Result<ArchiveMetadata> {
-        let bytes = store.get_object("metadata.yaml", DEFAULT_ARCHIVE_TIMEOUT)?;
-        let metadata: ArchiveMetadata = serde_yaml::from_slice(&bytes).map_err(|e| {
+        let bytes = store.get_object("metadata.json", DEFAULT_ARCHIVE_TIMEOUT)?;
+        let metadata: ArchiveMetadata = serde_json::from_slice(&bytes).map_err(|e| {
             crate::ubiblk_error!(MetadataError {
                 description: format!("failed to parse archive metadata: {}", e),
             })
@@ -59,102 +62,81 @@ impl ArchiveStripeSource {
         Ok(metadata)
     }
 
-    fn fetch_stripe_info(store: &dyn ArchiveStore) -> Result<HashMap<usize, String>> {
-        let object_list = store.list_objects()?;
-        let mut stripe_object_names = HashMap::new();
-        for object_name in object_list {
-            if object_name == "metadata.yaml" {
-                continue;
-            }
-            let (stripe_id, _sha256) = Self::parse_stripe_object_name(&object_name)?;
-            if stripe_object_names.contains_key(&stripe_id) {
-                return Err(crate::ubiblk_error!(ArchiveError {
-                    description: format!(
-                        "Duplicate stripe object for stripe ID {}: {}",
-                        stripe_id, object_name
-                    ),
-                }));
-            }
-            stripe_object_names.insert(stripe_id, object_name);
-        }
-        Ok(stripe_object_names)
-    }
-
-    pub fn parse_stripe_object_name(object_name: &str) -> Result<(usize, String)> {
-        let parts: Vec<&str> = object_name.split('_').collect();
-        if parts.len() != 3 || parts[0] != "stripe" {
-            return Err(crate::ubiblk_error!(ArchiveError {
-                description: format!("Invalid stripe object name: {}", object_name),
-            }));
-        }
-        let stripe_id = parts[1].parse::<usize>().map_err(|_| {
-            crate::ubiblk_error!(ArchiveError {
-                description: format!("Invalid stripe object name: {}", object_name),
-            })
-        })?;
-        let sha256 = parts[2].to_string();
-        Ok((stripe_id, sha256))
+    #[error_context("Failed to fetch stripe hashes")]
+    fn fetch_stripe_hashes(store: &mut dyn ArchiveStore) -> Result<HashMap<usize, String>> {
+        let stripe_hashes_json = store.get_object("stripe-hashes.json", DEFAULT_ARCHIVE_TIMEOUT)?;
+        let stripe_hashes: HashMap<usize, String> = serde_json::from_slice(&stripe_hashes_json)
+            .map_err(|e| {
+                crate::ubiblk_error!(MetadataError {
+                    description: format!("failed to parse stripe-hashes.json: {}", e),
+                })
+            })?;
+        Ok(stripe_hashes)
     }
 
     fn start_fetch_stripe(
         &mut self,
         stripe_id: usize,
-        filename: String,
+        sha256: String,
         buffer: SharedBuffer,
     ) -> Result<()> {
-        let (stripe_id_parsed, expected_sha256) = Self::parse_stripe_object_name(&filename)?;
-        if stripe_id_parsed != stripe_id {
-            return Err(crate::ubiblk_error!(ArchiveError {
-                description: format!(
-                    "Stripe ID {} does not match parsed ID {} from filename {}",
-                    stripe_id, stripe_id_parsed, &filename
-                ),
-            }));
+        let object_name = format!("data/{}", sha256);
+
+        if let Some(pending) = self.pending_requests.get_mut(&object_name) {
+            pending.pending_stripes.push((stripe_id, buffer));
+            return Ok(());
         }
-        if self.pending_requests.contains_key(&filename) {
-            return Err(crate::ubiblk_error!(ArchiveError {
-                description: format!("Stripe {} is already being fetched", stripe_id),
-            }));
-        }
-        self.store.start_get_object(&filename);
+
+        self.store.start_get_object(&object_name);
         self.pending_requests.insert(
-            filename,
+            object_name,
             PendingRequest {
-                stripe_id,
-                buffer,
-                expected_sha256,
+                pending_stripes: vec![(stripe_id, buffer)],
+                expected_sha256: sha256,
             },
         );
         Ok(())
     }
 
-    fn finish_stripe_request(
+    fn finish_pending_request(&mut self, request: &PendingRequest, data: &[u8]) {
+        for (stripe_id, buffer) in &request.pending_stripes {
+            if let Err(e) =
+                self.finish_stripe_fetch(*stripe_id, buffer.clone(), data, &request.expected_sha256)
+            {
+                log::error!("Failed to finish stripe {} fetch: {}", stripe_id, e);
+                self.finished_requests.push((*stripe_id, false));
+            } else {
+                self.finished_requests.push((*stripe_id, true));
+            }
+        }
+    }
+
+    fn finish_stripe_fetch(
         &mut self,
         stripe_id: usize,
-        data: &[u8],
+        destination_buffer: SharedBuffer,
+        fetched_data: &[u8],
         expected_sha256: &str,
-        buffer: SharedBuffer,
     ) -> Result<()> {
-        Self::verify_stripe_data(stripe_id, data, expected_sha256)?;
+        Self::verify_stripe_data(stripe_id, fetched_data, expected_sha256)?;
 
-        let mut buf_ref = buffer.borrow_mut();
+        let mut buf_ref = destination_buffer.borrow_mut();
         let buf = buf_ref.as_mut_slice();
-        if data.len() > buf.len() {
+        if fetched_data.len() > buf.len() {
             return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!(
                     "Stripe {} data size {} exceeds buffer size {}",
                     stripe_id,
-                    data.len(),
+                    fetched_data.len(),
                     buf.len()
                 ),
             }));
         }
-        buf[..data.len()].copy_from_slice(data);
+        buf[..fetched_data.len()].copy_from_slice(fetched_data);
 
-        if data.len() < buf.len() {
-            buf[data.len()..].fill(0);
+        if fetched_data.len() < buf.len() {
+            buf[fetched_data.len()..].fill(0);
         }
-
         if let Some(cipher) = self.xts_cipher.as_mut() {
             let sector_start = (stripe_id as u64) * self.stripe_sector_count;
             cipher.decrypt(buf, sector_start, self.stripe_sector_count);
@@ -176,9 +158,9 @@ impl ArchiveStripeSource {
 
 impl StripeSource for ArchiveStripeSource {
     fn request(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
-        let maybe_filename = self.stripe_object_names.get(&stripe_id).cloned();
-        match maybe_filename {
-            Some(filename) => self.start_fetch_stripe(stripe_id, filename, buffer),
+        let maybe_sha256 = self.stripe_hashes.get(&stripe_id).cloned();
+        match maybe_sha256 {
+            Some(sha256) => self.start_fetch_stripe(stripe_id, sha256, buffer),
             None => {
                 buffer.borrow_mut().as_mut_slice().fill(0);
                 self.finished_requests.push((stripe_id, true));
@@ -191,21 +173,17 @@ impl StripeSource for ArchiveStripeSource {
         let completions = self.store.poll_gets();
         for (object_name, result) in completions {
             if let Some(pending) = self.pending_requests.remove(&object_name) {
-                let success = match result {
-                    Ok(data) => self
-                        .finish_stripe_request(
-                            pending.stripe_id,
-                            &data,
-                            &pending.expected_sha256,
-                            pending.buffer,
-                        )
-                        .is_ok(),
-                    Err(e) => {
-                        log::error!("Failed to fetch stripe {}: {}", pending.stripe_id, e);
-                        false
+                match result {
+                    Ok(data) => {
+                        self.finish_pending_request(&pending, &data);
                     }
-                };
-                self.finished_requests.push((pending.stripe_id, success));
+                    Err(e) => {
+                        log::error!("Failed to fetch stripe object {}: {}", object_name, e);
+                        for (stripe_id, _) in &pending.pending_stripes {
+                            self.finished_requests.push((*stripe_id, false));
+                        }
+                    }
+                }
             } else {
                 log::error!(
                     "Received unexpected completed get for object {}",
@@ -221,7 +199,7 @@ impl StripeSource for ArchiveStripeSource {
     }
 
     fn sector_count(&self) -> u64 {
-        if self.stripe_object_names.is_empty() {
+        if self.stripe_hashes.is_empty() {
             0
         } else {
             (self.max_stripe_id + 1) as u64 * self.stripe_sector_count
@@ -229,7 +207,7 @@ impl StripeSource for ArchiveStripeSource {
     }
 
     fn has_stripe(&self, stripe_id: usize) -> bool {
-        self.stripe_object_names.contains_key(&stripe_id)
+        self.stripe_hashes.contains_key(&stripe_id)
     }
 }
 
@@ -238,7 +216,6 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    use crate::UbiblkError;
     use crate::{
         backends::SECTOR_SIZE,
         block_device::{
@@ -283,8 +260,26 @@ mod tests {
         let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * SECTOR_SIZE) as u64;
         let disk_bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(bdev_size));
 
+        for stripe_id in 0..bdev_stripe_count {
+            let offset = stripe_id * STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+            // Use a small offset (3) so disk contents differ from image
+            // stripes, making it easier for tests to detect incorrect copying
+            // or omission.
+            let expected_byte = ((3 + stripe_id) % 256) as u8;
+            let buf = vec![expected_byte; STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE];
+            disk_bdev.write(offset, &buf, buf.len());
+        }
+
         let image_bdev_size = STRIPE_SECTOR_COUNT * (image_stripe_count * SECTOR_SIZE) as u64;
         let image_bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(image_bdev_size));
+
+        for stripe_id in 0..image_stripe_count {
+            let offset = stripe_id * STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+            let expected_byte = (stripe_id % 256) as u8;
+            let buf = vec![expected_byte; STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE];
+            image_bdev.write(offset, &buf, buf.len());
+        }
+
         let stripe_source =
             BlockDeviceStripeSource::new(image_bdev.clone(), STRIPE_SECTOR_COUNT).unwrap();
 
@@ -418,51 +413,37 @@ mod tests {
                     .err()
                     .unwrap()
                     .to_string()
-                    .contains("Object metadata.yaml not found")
-        );
-    }
-
-    #[test]
-    fn test_errors_on_unexpected_item() {
-        let kek = KeyEncryptionCipher::default();
-        let mut setup = prep(4, 2, false, &[0, 1], kek.clone());
-        setup.archiver.archive_all().unwrap();
-        setup
-            .store
-            .put_object("unexpected_item", b"data", Duration::from_secs(5))
-            .unwrap();
-        let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);
-        assert!(
-            result.is_err()
-                && result
-                    .err()
-                    .unwrap()
-                    .to_string()
-                    .contains("Invalid stripe object name: unexpected_item")
+                    .contains("Object metadata.json not found")
         );
     }
 
     #[test]
     fn test_errors_on_hash_mismatch() {
         let kek = KeyEncryptionCipher::default();
-        let mut setup = prep(4, 2, false, &[0, 1], kek.clone());
+        let mut setup = prep(4, 2, false, &[0, 2], kek.clone());
         setup.archiver.archive_all().unwrap();
 
-        // Corrupt one stripe object
-        setup
-            .store
-            .put_object(
-                "stripe_0000000002_invalidhash",
-                b"corrupted data",
-                Duration::from_secs(5),
-            )
-            .unwrap();
         let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);
         assert!(result.is_ok());
 
         let mut source = result.unwrap();
 
         let buf = shared_buffer((STRIPE_SECTOR_COUNT * SECTOR_SIZE as u64) as usize);
+        buf.borrow_mut().as_mut_slice().fill(0xFF);
+        let object_name = "data/".to_string()
+            + source
+                .stripe_hashes
+                .get(&2)
+                .expect("stripe 2 hash should exist");
+        // Corrupt the stripe data in the store to cause hash mismatch
+        setup
+            .store
+            .put_object(
+                &object_name,
+                buf.borrow().as_slice(),
+                Duration::from_secs(5),
+            )
+            .unwrap();
 
         // Stripe 0 & 1 should be fine
         assert!(source.request(0, buf.clone()).is_ok());
@@ -471,52 +452,38 @@ mod tests {
         // Stripe 2 should error out due to hash mismatch
         assert!(source.request(2, buf.clone()).is_ok());
 
-        let completions = source.poll();
+        let mut completions = source.poll();
+        completions.sort_by_key(|(stripe_id, _)| *stripe_id);
         assert_eq!(completions.len(), 3);
-        for (stripe_id, success) in completions {
-            match stripe_id {
-                0 | 1 => assert!(success, "stripe {} should succeed", stripe_id),
-                2 => assert!(!success, "stripe 2 should fail"),
-                _ => panic!("unexpected stripe id {}", stripe_id),
-            }
-        }
+        assert_eq!(completions[0], (0, true));
+        assert_eq!(completions[1], (1, true));
+        assert_eq!(completions[2], (2, false));
     }
 
     #[test]
-    fn test_errors_on_duplicate_stripe_object() {
-        let kek = KeyEncryptionCipher::default();
-        let mut setup = prep(4, 2, false, &[0, 1], kek.clone());
-        setup.archiver.archive_all().unwrap();
-
-        // Add duplicate stripe object
-        setup
-            .store
+    fn test_fetch_stripe_hashes_bad_json() {
+        let mut store = MemStore::new();
+        store
             .put_object(
-                "stripe_0000000001_somehash",
-                b"some data",
+                "metadata.json",
+                br#"{"stripe_sector_count":16,"encryption_key":null}"#,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        store
+            .put_object(
+                "stripe-hashes.json",
+                br#"{"0":"hash0","1":12345}"#, // invalid JSON: value for key "1" should be a string
                 Duration::from_secs(5),
             )
             .unwrap();
 
-        let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);
+        let result = ArchiveStripeSource::new(Box::new(store), KeyEncryptionCipher::default());
         assert!(result.is_err());
         assert!(result
             .err()
             .unwrap()
             .to_string()
-            .contains("Duplicate stripe object for stripe ID 1"));
-    }
-
-    #[test]
-    fn test_errors_on_duplicate_request() {
-        let kek = KeyEncryptionCipher::default();
-        let mut setup = prep(4, 2, false, &[0], kek.clone());
-        setup.archiver.archive_all().unwrap();
-
-        let mut source = ArchiveStripeSource::new(clone_memstore(&setup.store), kek).unwrap();
-        let buf = shared_buffer((STRIPE_SECTOR_COUNT * SECTOR_SIZE as u64) as usize);
-        source.request(0, buf.clone()).unwrap();
-        let err = source.request(0, buf).unwrap_err();
-        assert!(matches!(err, UbiblkError::ArchiveError { .. }));
+            .contains("failed to parse stripe-hashes.json"));
     }
 }

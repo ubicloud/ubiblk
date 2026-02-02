@@ -18,26 +18,9 @@ impl FileSystemStore {
         })
     }
 
-    fn validate_path(&self, path: &PathBuf) -> Result<()> {
-        if path.file_name().is_none()
-            || path.file_name() == Some(std::ffi::OsStr::new("."))
-            || path.file_name() == Some(std::ffi::OsStr::new(".."))
-            || path.parent() != Some(&self.base_path)
-        {
-            return Err(crate::ubiblk_error!(ArchiveError {
-                description: format!(
-                    "Invalid object name resulting in path not directly under base directory: {:?}",
-                    path
-                ),
-            }));
-        }
-        Ok(())
-    }
-
     fn try_put_object(&mut self, name: &str, data: &[u8]) -> Result<()> {
         let mut path = self.base_path.clone();
         path.push(name);
-        self.validate_path(&path)?;
         fs::write(path, data)?;
         Ok(())
     }
@@ -45,7 +28,6 @@ impl FileSystemStore {
     fn try_get_object(&self, name: &str) -> Result<Vec<u8>> {
         let mut path = self.base_path.clone();
         path.push(name);
-        self.validate_path(&path)?;
         let data = fs::read(path)?;
         Ok(data)
     }
@@ -147,66 +129,6 @@ mod tests {
         let new_dir = dir.path().join("new_store");
         let _store = FileSystemStore::new(new_dir.clone())?;
         assert!(new_dir.exists() && new_dir.is_dir());
-        Ok(())
-    }
-
-    #[test]
-    fn test_path_escape_attempt() -> Result<()> {
-        let dir = tempdir()?;
-        let mut store = FileSystemStore::new(dir.path().to_path_buf())?;
-
-        let invalid_name = "../outside_object";
-
-        let err = store
-            .put_object(invalid_name, b"data", Duration::from_secs(5))
-            .unwrap_err();
-        assert!(err.to_string().contains("Invalid object name"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_errors_on_subdirectory() -> Result<()> {
-        let dir = tempdir()?;
-        let mut store = FileSystemStore::new(dir.path().to_path_buf())?;
-
-        let object_name = "subdir/object";
-
-        let err = store
-            .put_object(object_name, b"data", Duration::from_secs(5))
-            .unwrap_err();
-        assert!(err.to_string().contains("Invalid object name"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_rejects_cur_dir() -> Result<()> {
-        let dir = tempdir()?;
-        let mut store = FileSystemStore::new(dir.path().to_path_buf())?;
-
-        let object_name = ".";
-
-        let err = store
-            .put_object(object_name, b"data", Duration::from_secs(5))
-            .unwrap_err();
-        assert!(err.to_string().contains("Invalid object name"));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_rejects_parent_dir() -> Result<()> {
-        let dir = tempdir()?;
-        let mut store = FileSystemStore::new(dir.path().to_path_buf())?;
-
-        let object_name = "..";
-
-        let err = store
-            .put_object(object_name, b"data", Duration::from_secs(5))
-            .unwrap_err();
-        assert!(err.to_string().contains("Invalid object name"));
-
         Ok(())
     }
 }

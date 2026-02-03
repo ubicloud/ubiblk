@@ -1,5 +1,6 @@
 use clap::Parser;
 use log::error;
+use std::path::PathBuf;
 use ubiblk::backends::ublk::ublk_backend_loop;
 use ubiblk::cli::{load_config, CommonArgs};
 use ubiblk::Result;
@@ -14,6 +15,10 @@ use ubiblk::Result;
 struct Args {
     #[command(flatten)]
     common: CommonArgs,
+
+    /// Create a symlink pointing to the created /dev/ublkbN device.
+    #[arg(long = "device-symlink", value_name = "PATH")]
+    device_symlink: Option<PathBuf>,
 }
 
 fn main() {
@@ -29,5 +34,5 @@ fn run() -> Result<()> {
     let args = Args::parse();
 
     let config = load_config(&args.common)?;
-    ublk_backend_loop(&config)
+    ublk_backend_loop(&config, args.device_symlink)
 }

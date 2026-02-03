@@ -268,9 +268,11 @@ fn serve_ublk_queue(qid: u16, dev: &UblkDev, bdev: Box<dyn BlockDevice>, alignme
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::umask_guard::UMASK_LOCK;
 
     #[test]
     fn test_create_device_symlink() {
+        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let target = tmp_dir.path().join("ublk-target");
         let link = tmp_dir.path().join("ublk-symlink");
@@ -283,6 +285,7 @@ mod tests {
 
     #[test]
     fn test_create_device_symlink_existing() {
+        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let target = tmp_dir.path().join("ublk-target");
         let link = tmp_dir.path().join("ublk-symlink");
@@ -294,6 +297,7 @@ mod tests {
 
     #[test]
     fn test_remove_device_symlink() {
+        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let link = tmp_dir.path().join("ublk-symlink");
         std::os::unix::fs::symlink("/dev/ublk-target", &link).expect("Failed to create symlink");

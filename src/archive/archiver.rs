@@ -4,7 +4,10 @@ use log::{debug, info};
 
 use super::ArchiveStore;
 use crate::{
-    archive::{ArchiveCompressionAlgorithm, ArchiveMetadata, DEFAULT_ARCHIVE_TIMEOUT},
+    archive::{
+        ArchiveCompressionAlgorithm, ArchiveMetadata, ARCHIVE_FORMAT_VERSION,
+        DEFAULT_ARCHIVE_TIMEOUT,
+    },
     backends::SECTOR_SIZE,
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedBuffer, UbiMetadata},
     crypt::XtsBlockCipher,
@@ -268,6 +271,7 @@ impl StripeArchiver {
             None
         };
         let archive_metadata = ArchiveMetadata {
+            format_version: ARCHIVE_FORMAT_VERSION,
             stripe_sector_count: self.metadata.stripe_sector_count(),
             encryption_key,
             compression: self.compression.clone(),
@@ -443,6 +447,7 @@ mod tests {
             .get_object("metadata.json", Duration::from_secs(5))
             .unwrap();
         let metadata: ArchiveMetadata = serde_json::from_slice(&metadata_bytes).unwrap();
+        assert_eq!(metadata.format_version, ARCHIVE_FORMAT_VERSION);
         assert_eq!(metadata.stripe_sector_count, STRIPE_SECTOR_COUNT);
         assert!(metadata.encryption_key.is_none());
     }
@@ -456,6 +461,7 @@ mod tests {
             .get_object("metadata.json", Duration::from_secs(5))
             .unwrap();
         let metadata: ArchiveMetadata = serde_json::from_slice(&metadata_bytes).unwrap();
+        assert_eq!(metadata.format_version, ARCHIVE_FORMAT_VERSION);
         assert_eq!(metadata.stripe_sector_count, STRIPE_SECTOR_COUNT);
         assert!(metadata.encryption_key.is_some());
     }

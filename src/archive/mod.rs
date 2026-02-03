@@ -7,6 +7,9 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const ARCHIVE_FORMAT_VERSION: u32 = 1;
+pub const ARCHIVE_FORMAT_VERSION_MIN: u32 = ARCHIVE_FORMAT_VERSION;
+pub const ARCHIVE_FORMAT_VERSION_MAX: u32 = ARCHIVE_FORMAT_VERSION;
 
 /// Abstraction over a backend that can store and retrieve archived objects.
 pub trait ArchiveStore {
@@ -74,9 +77,11 @@ pub enum ArchiveCompressionAlgorithm {
     Snappy,
 }
 
-/// Representation of `metadata.yaml` stored alongside archived stripes.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Representation of `metadata.json` stored alongside archived stripes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveMetadata {
+    /// Archive format version.
+    pub format_version: u32,
     /// Number of sectors per stripe.
     pub stripe_sector_count: u64,
     /// Optional encrypted keys used for encrypting the archived data.
@@ -88,6 +93,29 @@ pub struct ArchiveMetadata {
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
     #[serde(default)]
     pub compression: ArchiveCompressionAlgorithm,
+}
+
+impl Default for ArchiveMetadata {
+    fn default() -> Self {
+        Self {
+            format_version: ARCHIVE_FORMAT_VERSION,
+            stripe_sector_count: 0,
+            encryption_key: None,
+            compression: ArchiveCompressionAlgorithm::None,
+        }
+    }
+}
+
+pub fn validate_format_version(version: u32) -> Result<()> {
+    if !(ARCHIVE_FORMAT_VERSION_MIN..=ARCHIVE_FORMAT_VERSION_MAX).contains(&version) {
+        return Err(crate::ubiblk_error!(MetadataError {
+            description: format!(
+                "unsupported archive format version {} (supported {}..={})",
+                version, ARCHIVE_FORMAT_VERSION_MIN, ARCHIVE_FORMAT_VERSION_MAX
+            ),
+        }));
+    }
+    Ok(())
 }
 
 mod archiver;

@@ -4,7 +4,8 @@ use ubiblk_macros::error_context;
 
 use crate::{
     archive::{
-        ArchiveCompressionAlgorithm, ArchiveMetadata, ArchiveStore, DEFAULT_ARCHIVE_TIMEOUT,
+        validate_format_version, ArchiveCompressionAlgorithm, ArchiveMetadata, ArchiveStore,
+        DEFAULT_ARCHIVE_TIMEOUT,
     },
     backends::SECTOR_SIZE,
     block_device::SharedBuffer,
@@ -64,6 +65,7 @@ impl ArchiveStripeSource {
                 description: format!("failed to parse archive metadata: {}", e),
             })
         })?;
+        validate_format_version(metadata.format_version)?;
         Ok(metadata)
     }
 
@@ -468,6 +470,64 @@ mod tests {
     }
 
     #[test]
+    fn test_errors_on_missing_format_version() {
+        let mut store = MemStore::new();
+        store
+            .put_object(
+                "metadata.json",
+                br#"{"stripe_sector_count":16,"encryption_key":null}"#,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+
+        let result = ArchiveStripeSource::new(Box::new(store), KeyEncryptionCipher::default());
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("missing field `format_version`"));
+    }
+
+    #[test]
+    fn test_errors_on_future_format_version() {
+        let mut store = MemStore::new();
+        store
+            .put_object(
+                "metadata.json",
+                br#"{"format_version":99,"stripe_sector_count":16,"encryption_key":null}"#,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+
+        let result = ArchiveStripeSource::new(Box::new(store), KeyEncryptionCipher::default());
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("unsupported archive format version 99 (supported 1..=1)"));
+    }
+
+    #[test]
+    fn test_accepts_supported_format_version() {
+        let mut store = MemStore::new();
+        store
+            .put_object(
+                "metadata.json",
+                br#"{"format_version":1,"stripe_sector_count":16,"encryption_key":null}"#,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        store
+            .put_object("stripe-hashes.json", br#"{}"#, Duration::from_secs(5))
+            .unwrap();
+
+        let result = ArchiveStripeSource::new(Box::new(store), KeyEncryptionCipher::default());
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_errors_on_hash_mismatch() {
         let kek = KeyEncryptionCipher::default();
         let mut setup = prep(
@@ -523,7 +583,7 @@ mod tests {
         store
             .put_object(
                 "metadata.json",
-                br#"{"stripe_sector_count":16,"encryption_key":null}"#,
+                br#"{"format_version":1,"stripe_sector_count":16,"encryption_key":null}"#,
                 Duration::from_secs(5),
             )
             .unwrap();

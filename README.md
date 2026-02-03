@@ -199,6 +199,11 @@ stripe_source:
   source: archive
   type: filesystem
   path: "/path/to/archive"
+  archive_kek:                       # Optional: KEK for archive encryption keys
+    method: "aes256-gcm"
+    key: "BASE64-ENCODED-KEY"
+    init_vector: "BASE64-ENCODED-IV"
+    auth_data: "BASE64-ENCODED-AAD"
 ```
 
 To use an archive stripe source from an S3-compatible object store:
@@ -215,6 +220,12 @@ stripe_source:
   credentials:                        # Optional: KEK-encrypted credentials
     access_key_id: "BASE64-ENCODED-ACCESS-KEY-ID"
     secret_access_key: "BASE64-ENCODED-SECRET-ACCESS-KEY"
+  connections: 16                     # Optional: number of connections
+  archive_kek:                        # Optional: KEK for archive encryption keys
+    method: "aes256-gcm"
+    key: "BASE64-ENCODED-KEY"
+    init_vector: "BASE64-ENCODED-IV"
+    auth_data: "BASE64-ENCODED-AAD"
 ```
 
 The legacy `image_path` option is still accepted for backward compatibility, but it is deprecated.
@@ -239,7 +250,8 @@ on `copy_on_read`:
 
 The metadata is created with `init-metadata` and stored at `metadata_path`. The
 first sector contains a magic header, and subsequent sectors store a byte for
-each stripe indicating whether that stripe has been fetched.
+each stripe. Each byte includes bit flags for whether the stripe has been
+fetched, written, and whether it exists in the source.
 
 Setting `autofetch` to `true` instructs the backend to keep fetching stripes in
 the background whenever no manual fetch requests are pending. This can be used
@@ -260,9 +272,9 @@ auth_data: "dm0zamdlejhfMA=="       # Base64 encoded auth data
 
 Initialises the metadata file required when running the backend in lazy stripe
 fetch mode. The tool creates the binary metadata at `metadata_path` using the
-`UbiMetadata` layout, which stores a magic identifier, version fields and a byte
-for each stripe indicating whether it has been fetched. This file may reside on
-a regular file or block device and is loaded by the backend on startup.
+`UbiMetadata` layout, which stores a magic identifier, version fields, and a
+byte per stripe containing fetched, written, and has-source flags. This file
+is loaded by the backend on startup.
 
 ```bash
 init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \

@@ -16,6 +16,7 @@ archive --config <CONFIG_YAML> --target-config <TARGET_CONFIG_YAML> [options]
 - `--kek` (`-k`): Path to the key encryption key file.
 - `--unlink-kek` (`-u`): Delete the KEK file after use.
 - `--encrypt` (`-e`): Encrypt archived stripes with a random AES-XTS key.
+- `--compress` (`-c`): Compress archived stripes with Snappy before optional encryption.
 
 **Target config format:**
 ```yaml
@@ -57,45 +58,61 @@ archive -f config.yaml --target-config archive_target.yaml
 
 ## Archive format
 
-Archives consist of a `metadata.yaml` file and one object per stripe. Only
-stripes which contain data are archived. That is:
+Archives consist of a `metadata.json` file, a `stripe-hashes.json` mapping
+file, and one data object per unique stripe payload. Only stripes which contain
+data are archived. That is:
 
 - Either the stripe had data written to it.
 - Or the stripe had data in the disk's stripe source.
 
-### `metadata.yaml`
+### `metadata.json`
 
 The metadata file stores the stripe layout and, optionally, encrypted keys for
-encrypted archives.
+encrypted archives. It also includes a required format version that readers use
+to validate compatibility.
 
-```yaml
-stripe_sector_count: 2048
-# When encryption is enabled, two KEK-encrypted AES-XTS keys are recorded as
-# base64 strings. When disabled, this field is null.
-encryption_key:
-  - <BASE64-ENCODED-KEY-1>
-  - <BASE64-ENCODED-KEY-2>
+```json
+{
+  "format_version": 1,
+  "stripe_sector_count": 2048,
+  "encryption_key": [
+    "<BASE64-ENCODED-KEY-1>",
+    "<BASE64-ENCODED-KEY-2>"
+  ],
+  "compression": "snappy"
+}
 ```
 
 `stripe_sector_count` indicates the number of 512-byte sectors per stripe. When
 `--encrypt` is enabled, the two keys stored in `encryption_key` are encrypted
-with the KEK (if provided) before being base64 encoded.
+with the KEK (if provided) before being base64 encoded; otherwise,
+`encryption_key` is `null`. The `compression` field records the algorithm used
+to store stripe payloads.
+
+### `stripe-hashes.json`
+
+The stripe hash map stores the SHA-256 hash for every archived stripe index.
+Stripe indices that were skipped are absent from the map.
+
+```json
+{
+  "0": "7ab2d7cbb0c4e0e1e8fe2a5f7a8f1b5b56c2b7f8d4022ec3e6f4c3e8b1f66f33",
+  "5": "7ab2d7cbb0c4e0e1e8fe2a5f7a8f1b5b56c2b7f8d4022ec3e6f4c3e8b1f66f33",
+  "7": "2f1c5d6c2cceaa1c6bbd2a0e8a3bb5b5b3dd44cb1a25d2f11f0e0a533b7e3f7c"
+}
+```
+
 
 ### Stripe objects
 
-Each archived stripe is stored as its own object with the following key
+Each archived stripe payload is stored as its own object with the following key
 format:
 
 ```
-stripe_<10-digit stripe index>_<sha256 hash>
+data/<sha256 hash>
 ```
 
-For example:
-```
-stripe_0000000042_7ab2d7cbb0c4e0e1e8fe2a5f7a8f1b5b56c2b7f8d4022ec3e6f4c3e8b1f66f33
-```
-
-The content is the raw stripe payload. When encryption is enabled, the bytes
-are AES-XTS encrypted per sector before being written, and the hash is computed
-on the encrypted payload. Consumers verify the SHA-256 hash before decrypting
-and returning the stripe.
+The content is the raw stripe payload, optionally compressed, then optionally
+encrypted. The SHA-256 hash is computed on the stored bytes (after compression
+and encryption). Consumers verify the hash, decrypt if needed, and then
+decompress if needed before returning the stripe.

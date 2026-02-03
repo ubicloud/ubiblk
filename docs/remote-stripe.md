@@ -39,7 +39,7 @@ are encrypted using the KEK if provided.
 ```yaml
 address: "127.0.0.1:4555"
 psk_identity: "client1"
-psk_secret: "<base64-encrypted-secret>"
+psk_secret: "<base64-encoded-secret>" # Optional: KEK-encrypted PSK secret
 ```
 
 `psk_identity` and `psk_secret` must be set together to enable TLS-PSK.

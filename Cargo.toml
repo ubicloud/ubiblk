@@ -52,6 +52,7 @@ crossbeam-channel = "0.5.15"
 libublk = "0.4.5"
 ctrlc = "3.5.1"
 ubiblk-macros = { path = "crates/ubiblk-macros" }
+snap = "1.1.1"
 
 [build-dependencies]
 bindgen = "0.72.1"

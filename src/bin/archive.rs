@@ -4,7 +4,7 @@ use clap::Parser;
 use log::error;
 
 use ubiblk::{
-    archive::StripeArchiver,
+    archive::{ArchiveCompressionAlgorithm, StripeArchiver},
     backends::build_block_device,
     block_device::UbiMetadata,
     cli::{load_config_and_kek, CommonArgs},
@@ -42,6 +42,10 @@ struct Args {
     /// Encrypt archived stripes.
     #[arg(short = 'e', long = "encrypt", default_value_t = false)]
     encrypt: bool,
+
+    /// Compress archived stripes.
+    #[arg(short = 'c', long = "compress", default_value_t = false)]
+    compress: bool,
 }
 
 fn main() {
@@ -82,12 +86,19 @@ fn run() -> Result<()> {
         ArchiveStripeSourceConfig::load_from_file_with_kek(&args.target_config_path, &config_kek)?;
     let store = StripeSourceBuilder::build_archive_store(&target_config)?;
 
+    let compression = if args.compress {
+        ArchiveCompressionAlgorithm::Snappy
+    } else {
+        ArchiveCompressionAlgorithm::None
+    };
+
     let mut archiver = StripeArchiver::new(
         stripe_source,
         disk_dev.as_ref(),
         metadata,
         store,
         args.encrypt,
+        compression,
         target_config.archive_kek().clone(),
         target_config.connections(),
     )?;

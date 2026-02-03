@@ -3,13 +3,15 @@ use libublk::{
     io::{BufDescList, UblkDev, UblkQueue},
     UblkError, UblkFlags,
 };
-use log::{error, info};
+use log::{error, info, warn};
+use std::path::{Path, PathBuf};
+use ubiblk_macros::error_context;
 
 use crate::{
     backends::common::{run_backend_loop, BackendEnv, SECTOR_SIZE},
     block_device::BlockDevice,
     config::DeviceConfig,
-    Result,
+    Result, ResultExt,
 };
 
 mod io_handler;
@@ -44,11 +46,14 @@ struct UblkIoRequest {
     bytes: usize,
 }
 
-pub fn ublk_backend_loop(config: &DeviceConfig) -> Result<()> {
-    run_backend_loop(config, "ublk", false, serve_ublk)
+pub fn ublk_backend_loop(config: &DeviceConfig, device_symlink: Option<PathBuf>) -> Result<()> {
+    run_backend_loop(config, "ublk", false, move |backend_env| {
+        serve_ublk(backend_env, device_symlink.clone())
+    })
 }
 
-fn serve_ublk(backend_env: &BackendEnv) -> Result<()> {
+#[error_context("Failed to serve ublk backend")]
+fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Result<()> {
     info!("Creating ublk backend ...");
 
     let bdev = backend_env.bdev();
@@ -75,23 +80,44 @@ fn serve_ublk(backend_env: &BackendEnv) -> Result<()> {
     // Ensure the kernel device is torn down on Ctrl-C so we don't leave a stale
     // /dev/ublk* entry if the process exits without a clean shutdown.
     let ctrl_sig = ctrl.clone();
-    if let Err(e) = ctrlc::set_handler(move || handle_ctrlc_shutdown(&ctrl_sig)) {
+    let ctrl_symlink = device_symlink.clone();
+    if let Err(e) = ctrlc::set_handler(move || {
+        handle_ctrlc_shutdown(&ctrl_sig, ctrl_symlink.as_deref());
+    }) {
         log::warn!("Failed to set Ctrl-C handler: {e}");
     }
 
+    let announce_symlink = device_symlink.clone();
     ctrl.run_target(
         move |dev| configure_ublk_device(dev, device_size),
         move |qid, dev| serve_ublk_queue(qid, dev, bdev.clone(), backend_alignment),
-        announce_ublk_device,
+        move |ctrl| announce_ublk_device(ctrl, announce_symlink.as_deref()),
     )?;
+
+    if let Some(symlink_path) = device_symlink.as_deref() {
+        if let Err(err) = remove_device_symlink(symlink_path) {
+            warn!(
+                "Failed to remove device symlink {}: {err}",
+                symlink_path.display()
+            );
+        }
+    }
 
     Ok(())
 }
 
-fn handle_ctrlc_shutdown(ctrl: &UblkCtrl) {
+fn handle_ctrlc_shutdown(ctrl: &UblkCtrl, device_symlink: Option<&Path>) {
     let dev_id = ctrl.dev_info().dev_id;
     if let Err(e) = UblkCtrl::new_simple(dev_id as i32).and_then(|c| c.del_dev()) {
         log::error!("Failed to delete ublk device (dev_id={dev_id}): {e}");
+    }
+    if let Some(symlink_path) = device_symlink {
+        if let Err(err) = remove_device_symlink(symlink_path) {
+            log::error!(
+                "Failed to remove device symlink {}: {err}",
+                symlink_path.display()
+            );
+        }
     }
 }
 
@@ -103,8 +129,82 @@ fn configure_ublk_device(
     Ok(())
 }
 
-fn announce_ublk_device(ctrl: &UblkCtrl) {
-    info!("ublk device is available at {}", ctrl.get_bdev_path());
+fn announce_ublk_device(ctrl: &UblkCtrl, device_symlink: Option<&Path>) {
+    let bdev_path = ctrl.get_bdev_path();
+    info!("ublk device is available at {}", bdev_path);
+    if let Some(symlink_path) = device_symlink {
+        if let Err(err) = create_device_symlink(Path::new(&bdev_path), symlink_path) {
+            warn!(
+                "Failed to create device symlink {} -> {}: {err}",
+                symlink_path.display(),
+                bdev_path
+            );
+        }
+    }
+}
+
+#[error_context("Failed to create device symlink")]
+fn create_device_symlink(target: &Path, link: &Path) -> Result<()> {
+    if let Some(parent) = link.parent() {
+        std::fs::create_dir_all(parent).context(format!(
+            "Failed to create parent directory: {}",
+            parent.display()
+        ))?;
+    }
+
+    match std::fs::symlink_metadata(link) {
+        Ok(_) => {
+            warn!("{} already exists; removing it", link.display());
+            std::fs::remove_file(link).context(format!(
+                "Failed to remove existing path: {}",
+                link.display()
+            ))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).context(format!("Failed to read metadata for: {}", link.display()));
+        }
+    }
+
+    std::os::unix::fs::symlink(target, link).context(format!(
+        "Failed to create symlink: {} -> {}",
+        link.display(),
+        target.display()
+    ))?;
+
+    info!(
+        "Created device symlink {} -> {}",
+        link.display(),
+        target.display()
+    );
+
+    Ok(())
+}
+
+#[error_context("Failed to remove device symlink")]
+fn remove_device_symlink(link: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(link) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_symlink() {
+                warn!(
+                    "{} exists but is not a symlink; leaving it in place",
+                    link.display()
+                );
+                return Ok(());
+            }
+            std::fs::remove_file(link).context(format!(
+                "Failed to remove device symlink: {}",
+                link.display()
+            ))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(e).context(format!("Failed to read metadata for: {}", link.display()));
+        }
+    }
+
+    info!("Removed device symlink {}", link.display());
+    Ok(())
 }
 
 fn set_thread_name(name: &str) {
@@ -163,4 +263,41 @@ fn serve_ublk_queue(qid: u16, dev: &UblkDev, bdev: Box<dyn BlockDevice>, alignme
     );
 
     queue.wait_and_handle_io(move |q, tag, io| handler.handle(q, tag, io));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_create_device_symlink() {
+        let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let target = tmp_dir.path().join("ublk-target");
+        let link = tmp_dir.path().join("ublk-symlink");
+
+        create_device_symlink(&target, &link).expect("Failed to create device symlink");
+
+        let symlink_target = std::fs::read_link(&link).expect("Failed to read symlink");
+        assert_eq!(symlink_target, target);
+    }
+
+    #[test]
+    fn test_create_device_symlink_existing() {
+        let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let target = tmp_dir.path().join("ublk-target");
+        let link = tmp_dir.path().join("ublk-symlink");
+        std::fs::write(&link, b"existing").expect("Failed to create existing file");
+        create_device_symlink(&target, &link).expect("Failed to create device symlink");
+        let symlink_target = std::fs::read_link(&link).expect("Failed to read symlink");
+        assert_eq!(symlink_target, target);
+    }
+
+    #[test]
+    fn test_remove_device_symlink() {
+        let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let link = tmp_dir.path().join("ublk-symlink");
+        std::os::unix::fs::symlink("/dev/ublk-target", &link).expect("Failed to create symlink");
+        remove_device_symlink(&link).expect("Failed to remove device symlink");
+        assert!(!link.exists());
+    }
 }

@@ -84,7 +84,7 @@ extensively as `vhost-backend`.
 
 **Usage:**
 ```bash
-ublk-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek]
+ublk-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] [--device-symlink <PATH>]
 ```
 
 **Notes:**

@@ -35,8 +35,15 @@ impl RemoteStripeSource {
             }));
         }
 
-        let source_sector_count = metadata
-            .stripe_count()
+        let stripe_count_with_data = remote_headers
+            .iter()
+            .rposition(|header| {
+                header & (metadata_flags::WRITTEN | metadata_flags::HAS_SOURCE) != 0
+            })
+            .map(|index| index as u64 + 1)
+            .unwrap_or(0);
+
+        let source_sector_count = stripe_count_with_data
             .checked_mul(remote_stripe_sector_count)
             .ok_or_else(|| {
                 crate::ubiblk_error!(InvalidParameter {
@@ -255,10 +262,7 @@ mod tests {
     #[test]
     fn test_sector_count() {
         let source = prep();
-        assert_eq!(
-            source.sector_count(),
-            (STRIPE_SECTORS as u64) * (TOTAL_STRIPES as u64)
-        );
+        assert_eq!(source.sector_count(), (STRIPE_SECTORS as u64) * 3);
     }
 
     #[test]

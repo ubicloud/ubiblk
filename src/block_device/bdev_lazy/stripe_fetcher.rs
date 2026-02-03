@@ -67,7 +67,10 @@ impl StripeFetcher {
         let target_sector_count = target_dev.sector_count();
         if target_sector_count < source_sector_count {
             return Err(crate::ubiblk_error!(InvalidParameter {
-                description: "target device too small".into(),
+                description: format!(
+                    "target device too small ({} sectors) for source device ({} sectors)",
+                    target_sector_count, source_sector_count
+                ),
             }));
         }
 

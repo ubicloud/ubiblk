@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread::JoinHandle, time::Duration};
+use std::{sync::Arc, thread::JoinHandle};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{debug, error, info};
@@ -21,9 +21,6 @@ enum S3Request {
     Get {
         name: String,
         key: String,
-    },
-    List {
-        respond_to: Sender<Result<Vec<String>>>,
     },
 }
 
@@ -69,7 +66,6 @@ impl S3Store {
         let workers = spawn_workers(
             client,
             Arc::clone(&bucket),
-            normalized_prefix.clone(),
             worker_threads,
             request_rx,
             result_tx,
@@ -175,32 +171,6 @@ impl ArchiveStore for S3Store {
         self.drain_results();
         std::mem::take(&mut self.finished_gets)
     }
-
-    fn list_objects(&self) -> Result<Vec<String>> {
-        let (response_tx, response_rx) = unbounded();
-        let sender = self
-            .request_tx
-            .as_ref()
-            .ok_or(crate::ubiblk_error!(ArchiveError {
-                description: "S3 worker queue is unavailable".to_string(),
-            }))?;
-        sender
-            .send(S3Request::List {
-                respond_to: response_tx,
-            })
-            .map_err(|err| {
-                crate::ubiblk_error!(ArchiveError {
-                    description: format!("Failed to enqueue S3 list request: {err}"),
-                })
-            })?;
-        response_rx
-            .recv_timeout(Duration::from_secs(60))
-            .map_err(|err| {
-                crate::ubiblk_error!(ArchiveError {
-                    description: format!("Failed to receive S3 list response: {err}"),
-                })
-            })?
-    }
 }
 
 fn key_with_prefix(prefix: &Option<String>, name: &str) -> String {
@@ -213,13 +183,9 @@ fn key_with_prefix(prefix: &Option<String>, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use aws_sdk_s3::{
-        operation::{
-            get_object::GetObjectOutput, list_objects_v2::ListObjectsV2Output,
-            put_object::PutObjectOutput,
-        },
-        types::Object,
-    };
+    use std::time::Duration;
+
+    use aws_sdk_s3::operation::{get_object::GetObjectOutput, put_object::PutObjectOutput};
     use aws_smithy_mocks::{mock, mock_client, Rule};
 
     use super::*;
@@ -301,74 +267,6 @@ mod tests {
         assert!(
             err.to_string().contains("S3 worker queue is unavailable"),
             "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn test_list_objects() {
-        let list_rule = mock!(S3Client::list_objects_v2).then_output(|| {
-            ListObjectsV2Output::builder()
-                .contents(Object::builder().key("my/prefix/obj1").build())
-                .contents(Object::builder().key("my/prefix/obj2").build())
-                .is_truncated(false)
-                .build()
-        });
-        let store = prepare_s3_store("test-bucket", Some("my/prefix"), &[list_rule]);
-        let result = store.list_objects();
-        assert!(result.is_ok());
-        let mut objects = result.unwrap();
-        objects.sort();
-        assert_eq!(objects, vec!["obj1".to_string(), "obj2".to_string()]);
-    }
-
-    #[test]
-    fn test_no_prefix_handling() {
-        let list_rule = mock!(S3Client::list_objects_v2).then_output(|| {
-            ListObjectsV2Output::builder()
-                .contents(Object::builder().key("obj1").build())
-                .contents(Object::builder().key("obj2").build())
-                .is_truncated(false)
-                .build()
-        });
-        let store = prepare_s3_store("test-bucket", None, &[list_rule]);
-
-        let result = store.list_objects();
-        assert!(result.is_ok());
-        let mut objects = result.unwrap();
-        objects.sort();
-        assert_eq!(objects, vec!["obj1".to_string(), "obj2".to_string()]);
-    }
-
-    #[test]
-    fn test_paginated_list_objects() {
-        let list_rule_page1 = mock!(S3Client::list_objects_v2).then_output(|| {
-            ListObjectsV2Output::builder()
-                .contents(Object::builder().key("prefix/obj1").build())
-                .contents(Object::builder().key("prefix/obj2").build())
-                .is_truncated(true)
-                .next_continuation_token("token1")
-                .build()
-        });
-        let list_rule_page2 = mock!(S3Client::list_objects_v2).then_output(|| {
-            ListObjectsV2Output::builder()
-                .contents(Object::builder().key("prefix/obj3").build())
-                .is_truncated(false)
-                .build()
-        });
-
-        let store = prepare_s3_store(
-            "test-bucket",
-            Some("prefix"),
-            &[list_rule_page1, list_rule_page2],
-        );
-
-        let result = store.list_objects();
-        assert!(result.is_ok());
-        let mut objects = result.unwrap();
-        objects.sort();
-        assert_eq!(
-            objects,
-            vec!["obj1".to_string(), "obj2".to_string(), "obj3".to_string()]
         );
     }
 }

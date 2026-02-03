@@ -55,32 +55,12 @@ impl ArchiveStore for FileSystemStore {
     fn poll_gets(&mut self) -> Vec<(String, Result<Vec<u8>>)> {
         std::mem::take(&mut self.finished_gets)
     }
-
-    fn list_objects(&self) -> Result<Vec<String>> {
-        let mut objects = Vec::new();
-        for entry in fs::read_dir(&self.base_path)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_file() {
-                continue;
-            }
-
-            match entry.file_name().to_str() {
-                Some(name) => objects.push(name.to_string()),
-                None => {
-                    return Err(crate::ubiblk_error!(ArchiveError {
-                        description: format!("Invalid UTF-8 in file name: {:?}", entry.file_name()),
-                    }));
-                }
-            }
-        }
-        Ok(objects)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{os::unix::ffi::OsStringExt, time::Duration};
+    use std::time::Duration;
     use tempfile::tempdir;
 
     #[test]
@@ -92,38 +72,6 @@ mod tests {
         store.put_object(object_name, object_data, Duration::from_secs(5))?;
         let retrieved_data = store.get_object(object_name, Duration::from_secs(5))?;
         assert_eq!(object_data.to_vec(), retrieved_data);
-        Ok(())
-    }
-
-    #[test]
-    fn test_filesystem_list_objects() -> Result<()> {
-        let dir = tempdir()?;
-        let mut store = FileSystemStore::new(dir.path().to_path_buf())?;
-        let object_names = vec!["obj1", "obj2", "obj3"];
-        for name in &object_names {
-            store.put_object(name, b"data", Duration::from_secs(5))?;
-        }
-        let listed_objects = store.list_objects()?;
-        assert_eq!(listed_objects.len(), object_names.len());
-        for name in &object_names {
-            assert!(listed_objects.contains(&name.to_string()));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn test_invalid_utf8_file_name() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let store = FileSystemStore::new(dir.path().to_path_buf())?;
-
-        let invalid_name = std::ffi::OsString::from_vec(vec![0xff, 0xfe, 0xfd]);
-
-        let path = dir.path().join(&invalid_name);
-        fs::write(&path, b"data")?;
-
-        let err = store.list_objects().unwrap_err();
-        assert!(err.to_string().contains("Invalid UTF-8"));
-
         Ok(())
     }
 

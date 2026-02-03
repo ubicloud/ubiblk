@@ -12,13 +12,11 @@ use crate::Result;
 struct WorkerContext {
     client: S3Client,
     bucket: Arc<String>,
-    prefix: Option<String>,
 }
 
 pub(super) fn spawn_workers(
     client: S3Client,
     bucket: Arc<String>,
-    prefix: Option<String>,
     mut worker_threads: usize,
     request_rx: Receiver<S3Request>,
     result_tx: Sender<S3Result>,
@@ -40,7 +38,6 @@ pub(super) fn spawn_workers(
         let ctx = WorkerContext {
             client: S3Client::from_conf(client_config.clone()),
             bucket: Arc::clone(&bucket),
-            prefix: prefix.clone(),
         };
         let rx = request_rx.clone();
         let tx = result_tx.clone();
@@ -97,12 +94,6 @@ async fn process_request(ctx: &WorkerContext, req: S3Request, tx: &Sender<S3Resu
                 error!("Failed to send S3Result::Get for {}: {}", name, e);
             }
         }
-        S3Request::List { respond_to } => {
-            let result = list_objects_async(&ctx.client, &ctx.bucket, &ctx.prefix).await;
-            if let Err(e) = respond_to.send(result) {
-                error!("Failed to send S3 list response: {}", e);
-            }
-        }
     }
 }
 
@@ -145,79 +136,11 @@ async fn fetch_object(ctx: &WorkerContext, key: &str) -> Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
-async fn list_objects_async(
-    client: &S3Client,
-    bucket: &str,
-    prefix: &Option<String>,
-) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    let mut continuation_token = None;
-
-    loop {
-        let (page, next_continuation_token, truncated) =
-            list_objects_page_async(client, bucket, prefix, continuation_token).await?;
-        out.extend(page);
-
-        if !truncated {
-            break;
-        }
-        continuation_token = next_continuation_token;
-    }
-
-    Ok(out)
-}
-
-async fn list_objects_page_async(
-    client: &S3Client,
-    bucket: &str,
-    prefix: &Option<String>,
-    continuation_token: Option<String>,
-) -> Result<(Vec<String>, Option<String>, bool)> {
-    let resp = client
-        .list_objects_v2()
-        .bucket(bucket)
-        .set_prefix(prefix.clone())
-        .set_continuation_token(continuation_token)
-        .send()
-        .await
-        .map_err(|e| {
-            crate::ubiblk_error!(ArchiveError {
-                description: format!("Failed to list objects in S3: {e}"),
-            })
-        })?;
-
-    let page_keys = resp
-        .contents()
-        .iter()
-        .filter_map(|o| o.key())
-        .map(|k| strip_prefix(prefix, k).to_string())
-        .collect::<Vec<_>>();
-
-    let truncated = resp.is_truncated().unwrap_or(false);
-    let next = resp.next_continuation_token().map(|s| s.to_string());
-
-    Ok((page_keys, next, truncated))
-}
-
-fn strip_prefix<'a>(prefix: &Option<String>, key: &'a str) -> &'a str {
-    if let Some(prefix) = prefix.as_deref() {
-        key.strip_prefix(prefix).unwrap_or(key)
-    } else {
-        key
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use aws_sdk_s3::{
-        operation::{
-            get_object::GetObjectOutput, list_objects_v2::ListObjectsV2Output,
-            put_object::PutObjectOutput,
-        },
-        types::Object,
-    };
+    use aws_sdk_s3::operation::{get_object::GetObjectOutput, put_object::PutObjectOutput};
     use aws_smithy_mocks::{mock, mock_client, Rule};
     use crossbeam_channel::unbounded;
 
@@ -231,7 +154,6 @@ mod tests {
         let workers = spawn_workers(
             mock_client!(aws_sdk_s3, rules),
             Arc::new("test-bucket".to_string()),
-            Some("prefix/".to_string()),
             1,
             request_rx,
             result_tx,
@@ -300,36 +222,6 @@ mod tests {
             }
             _ => panic!("expected put result second after sort"),
         }
-
-        drop(request_tx);
-        join_workers(workers);
-    }
-
-    #[test]
-    fn test_worker_list_objects() {
-        let list_rule = mock!(S3Client::list_objects_v2).then_output(|| {
-            ListObjectsV2Output::builder()
-                .contents(Object::builder().key("prefix/a").build())
-                .contents(Object::builder().key("prefix/b").build())
-                .is_truncated(false)
-                .build()
-        });
-
-        let (request_tx, _result_rx, workers) = spawn_test_workers(&[list_rule]);
-        let (response_tx, response_rx) = unbounded();
-
-        request_tx
-            .send(S3Request::List {
-                respond_to: response_tx,
-            })
-            .expect("failed to send list request");
-
-        let result = response_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("missing list response")
-            .expect("list response error");
-
-        assert_eq!(result, vec!["a".to_string(), "b".to_string()]);
 
         drop(request_tx);
         join_workers(workers);

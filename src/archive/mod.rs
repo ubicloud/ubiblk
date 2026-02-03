@@ -12,7 +12,7 @@ pub const DEFAULT_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(30);
 pub trait ArchiveStore {
     /// Asynchronously store an object under the given `name`. Completion can be
     /// polled via `poll_puts`.
-    fn start_put_object(&mut self, name: &str, data: &[u8]);
+    fn start_put_object(&mut self, name: &str, data: Vec<u8>);
     /// Asynchronously retrieve an object by its `name`. Completion can be
     /// polled via `poll_gets`.
     fn start_get_object(&mut self, name: &str);
@@ -28,7 +28,7 @@ pub trait ArchiveStore {
     /// Convenience method to synchronously put an object.
     /// NOTE: Asynchronous and synchronous operations should not be mixed.
     fn put_object(&mut self, name: &str, data: &[u8], timeout: Duration) -> Result<()> {
-        self.start_put_object(name, data);
+        self.start_put_object(name, data.to_vec());
         let start_time = Instant::now();
 
         while start_time.elapsed() < timeout {
@@ -68,6 +68,14 @@ pub trait ArchiveStore {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveCompressionAlgorithm {
+    #[default]
+    None,
+    Snappy,
+}
+
 /// Representation of `metadata.yaml` stored alongside archived stripes.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ArchiveMetadata {
@@ -80,9 +88,12 @@ pub struct ArchiveMetadata {
         serialize_with = "encode_optional_key_pair"
     )]
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
+    #[serde(default)]
+    pub compression: ArchiveCompressionAlgorithm,
 }
 
 mod archiver;
+mod compression;
 mod fs_store;
 mod s3_store;
 

@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use ubiblk_macros::error_context;
 
 use crate::{
-    archive::{ArchiveMetadata, ArchiveStore, DEFAULT_ARCHIVE_TIMEOUT},
+    archive::{
+        ArchiveCompressionAlgorithm, ArchiveMetadata, ArchiveStore, DEFAULT_ARCHIVE_TIMEOUT,
+    },
+    backends::SECTOR_SIZE,
     block_device::SharedBuffer,
     crypt::XtsBlockCipher,
     utils::hash::sha256_hex,
@@ -23,6 +26,7 @@ pub struct ArchiveStripeSource {
     stripe_hashes: HashMap<usize, String>,
     max_stripe_id: usize,
     stripe_sector_count: u64,
+    compression: ArchiveCompressionAlgorithm,
     finished_requests: Vec<(usize, bool)>,
     pending_requests: HashMap<String, PendingRequest>,
 }
@@ -48,6 +52,7 @@ impl ArchiveStripeSource {
             stripe_sector_count,
             finished_requests,
             pending_requests,
+            compression: metadata.compression,
         })
     }
 
@@ -111,6 +116,25 @@ impl ArchiveStripeSource {
         }
     }
 
+    fn maybe_decrypt(&mut self, data: &mut [u8], stripe_id: usize) -> Result<()> {
+        if let Some(cipher) = self.xts_cipher.as_mut() {
+            if !data.len().is_multiple_of(SECTOR_SIZE) {
+                return Err(crate::ubiblk_error!(ArchiveError {
+                    description: format!(
+                        "Stripe {} data size {} is not a multiple of sector size {}",
+                        stripe_id,
+                        data.len(),
+                        SECTOR_SIZE
+                    ),
+                }));
+            }
+            let sector_start = (stripe_id as u64) * self.stripe_sector_count;
+            let sector_count = data.len() as u64 / SECTOR_SIZE as u64;
+            cipher.decrypt(data, sector_start, sector_count);
+        }
+        Ok(())
+    }
+
     fn finish_stripe_fetch(
         &mut self,
         stripe_id: usize,
@@ -120,26 +144,27 @@ impl ArchiveStripeSource {
     ) -> Result<()> {
         Self::verify_stripe_data(stripe_id, fetched_data, expected_sha256)?;
 
+        let mut decrypted_data = fetched_data.to_vec();
+        self.maybe_decrypt(&mut decrypted_data, stripe_id)?;
+
+        let decompressed_data = self.compression.decompress(&decrypted_data)?;
+
         let mut buf_ref = destination_buffer.borrow_mut();
         let buf = buf_ref.as_mut_slice();
-        if fetched_data.len() > buf.len() {
+        if decompressed_data.len() > buf.len() {
             return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!(
                     "Stripe {} data size {} exceeds buffer size {}",
                     stripe_id,
-                    fetched_data.len(),
+                    decompressed_data.len(),
                     buf.len()
                 ),
             }));
         }
-        buf[..fetched_data.len()].copy_from_slice(fetched_data);
+        buf[..decompressed_data.len()].copy_from_slice(&decompressed_data);
 
-        if fetched_data.len() < buf.len() {
-            buf[fetched_data.len()..].fill(0);
-        }
-        if let Some(cipher) = self.xts_cipher.as_mut() {
-            let sector_start = (stripe_id as u64) * self.stripe_sector_count;
-            cipher.decrypt(buf, sector_start, self.stripe_sector_count);
+        if decompressed_data.len() < buf.len() {
+            buf[decompressed_data.len()..].fill(0);
         }
 
         Ok(())
@@ -217,6 +242,7 @@ mod tests {
     use std::time::Duration;
 
     use crate::{
+        archive::ArchiveCompressionAlgorithm,
         backends::SECTOR_SIZE,
         block_device::{
             bdev_test::TestBlockDevice, metadata_flags, shared_buffer, BlockDevice, UbiMetadata,
@@ -247,6 +273,7 @@ mod tests {
         encrypted: bool,
         written_stripes: &[usize],
         kek: KeyEncryptionCipher,
+        compression: ArchiveCompressionAlgorithm,
     ) -> Setup {
         let mut metadata = UbiMetadata::new(
             STRIPE_SECTOR_COUNT_SHIFT,
@@ -291,6 +318,7 @@ mod tests {
             metadata,
             clone_memstore(store.as_ref()),
             encrypted,
+            compression,
             kek,
             1,
         )
@@ -304,7 +332,11 @@ mod tests {
         }
     }
 
-    fn do_test_archive_stripe_source(encrypted: bool, kek: KeyEncryptionCipher) {
+    fn do_test_archive_stripe_source(
+        encrypted: bool,
+        kek: KeyEncryptionCipher,
+        compression: ArchiveCompressionAlgorithm,
+    ) {
         let bdev_stripe_count = 16;
         let image_stripe_count = 10;
         let written_stripes = vec![2, 7, 11, 14];
@@ -315,6 +347,7 @@ mod tests {
             encrypted,
             &written_stripes,
             kek.clone(),
+            compression,
         );
 
         // populate image bdev before archiving
@@ -383,7 +416,11 @@ mod tests {
 
     #[test]
     fn test_archive_stripe_source_encrypted_no_key_encryption() {
-        do_test_archive_stripe_source(true, KeyEncryptionCipher::default());
+        do_test_archive_stripe_source(
+            true,
+            KeyEncryptionCipher::default(),
+            ArchiveCompressionAlgorithm::None,
+        );
     }
 
     #[test]
@@ -394,12 +431,25 @@ mod tests {
             init_vector: Some(vec![0xCD; 12]),
             auth_data: Some("ubiblk_test".as_bytes().to_vec()),
         };
-        do_test_archive_stripe_source(true, kek);
+        do_test_archive_stripe_source(true, kek, ArchiveCompressionAlgorithm::None);
     }
 
     #[test]
     fn test_archive_stripe_source_unencrypted() {
-        do_test_archive_stripe_source(false, KeyEncryptionCipher::default());
+        do_test_archive_stripe_source(
+            false,
+            KeyEncryptionCipher::default(),
+            ArchiveCompressionAlgorithm::None,
+        );
+    }
+
+    #[test]
+    fn test_archive_stripe_source_snappy_encrypted() {
+        do_test_archive_stripe_source(
+            true,
+            KeyEncryptionCipher::default(),
+            ArchiveCompressionAlgorithm::Snappy,
+        );
     }
 
     #[test]
@@ -420,7 +470,14 @@ mod tests {
     #[test]
     fn test_errors_on_hash_mismatch() {
         let kek = KeyEncryptionCipher::default();
-        let mut setup = prep(4, 2, false, &[0, 2], kek.clone());
+        let mut setup = prep(
+            4,
+            2,
+            false,
+            &[0, 2],
+            kek.clone(),
+            ArchiveCompressionAlgorithm::None,
+        );
         setup.archiver.archive_all().unwrap();
 
         let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);

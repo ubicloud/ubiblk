@@ -4,7 +4,7 @@ use log::{debug, info};
 
 use super::ArchiveStore;
 use crate::{
-    archive::{ArchiveMetadata, DEFAULT_ARCHIVE_TIMEOUT},
+    archive::{ArchiveCompressionAlgorithm, ArchiveMetadata, DEFAULT_ARCHIVE_TIMEOUT},
     backends::SECTOR_SIZE,
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedBuffer, UbiMetadata},
     crypt::XtsBlockCipher,
@@ -22,19 +22,22 @@ pub struct StripeArchiver {
     block_cipher: Option<XtsBlockCipher>,
     kek: KeyEncryptionCipher,
     buffer_pool: AlignedBufferPool,
-    inflight_object_buffers: HashMap<String, SharedBuffer>,
+    inflight_puts: usize,
     stripe_fetch_buffers: HashMap<usize, SharedBuffer>,
     seen_hashes: HashSet<String>,
     stripe_hashes: HashMap<usize, String>,
+    compression: ArchiveCompressionAlgorithm,
 }
 
 impl StripeArchiver {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stripe_source: Box<dyn StripeSource>,
         bdev: &dyn BlockDevice,
         metadata: Box<UbiMetadata>,
         archive_store: Box<dyn ArchiveStore>,
         encrypt: bool,
+        compression: ArchiveCompressionAlgorithm,
         kek: KeyEncryptionCipher,
         concurrency: usize,
     ) -> Result<Self> {
@@ -58,10 +61,11 @@ impl StripeArchiver {
             kek,
             stripe_count,
             buffer_pool,
-            inflight_object_buffers: HashMap::new(),
+            inflight_puts: 0,
             stripe_fetch_buffers: HashMap::new(),
             seen_hashes: HashSet::new(),
             stripe_hashes: HashMap::new(),
+            compression,
         })
     }
 
@@ -82,7 +86,7 @@ impl StripeArchiver {
         }
 
         // Drain all in-flight operations before putting metadata
-        while !self.stripe_fetch_buffers.is_empty() || !self.inflight_object_buffers.is_empty() {
+        while !self.stripe_fetch_buffers.is_empty() || self.inflight_puts > 0 {
             self.poll_fetches()?;
             self.poll_uploads()?;
         }
@@ -140,8 +144,13 @@ impl StripeArchiver {
 
     fn maybe_encrypt(&mut self, stripe_id: usize, buffer: &mut [u8]) {
         let sector_offset = self.stripe_offset(stripe_id);
+        assert!(
+            buffer.len().is_multiple_of(SECTOR_SIZE),
+            "Buffer length must be a multiple of sector size"
+        );
+        let sector_count = buffer.len() as u64 / SECTOR_SIZE as u64;
         if let Some(block_cipher) = self.block_cipher.as_mut() {
-            block_cipher.encrypt(buffer, sector_offset, self.metadata.stripe_sector_count());
+            block_cipher.encrypt(buffer, sector_offset, sector_count);
         }
     }
 
@@ -153,35 +162,28 @@ impl StripeArchiver {
                 description: format!("Stripe buffer for stripe {} not found", stripe_id),
             }))?;
 
-        let mut buffer_ref = buffer.borrow_mut();
-        self.maybe_encrypt(stripe_id, buffer_ref.as_mut_slice());
-        drop(buffer_ref); // release mutable borrow
-
         let buffer_ref = buffer.borrow();
+        let mut object_data = self.compression.compress(buffer_ref.as_slice())?;
+        self.buffer_pool.return_buffer(&buffer);
 
-        let hash = sha256_hex(buffer_ref.as_slice());
+        self.maybe_encrypt(stripe_id, &mut object_data);
+
+        let hash = sha256_hex(&object_data);
         self.stripe_hashes.insert(stripe_id, hash.clone());
         if self.seen_hashes.contains(&hash) {
             debug!(
                 "Stripe {} has duplicate hash {}, skipping upload",
                 stripe_id, hash
             );
-
-            // Return the fetch buffer to the pool. The possibly concurrent
-            // upload of the same object uses fetch buffer of the earlier stripe
-            // with the same hash, which is different from this stripe's fetch
-            // buffer.
-            self.buffer_pool.return_buffer(&buffer);
             return Ok(());
         }
 
         self.seen_hashes.insert(hash.clone());
         let object_key = self.hash_to_object_key(&hash);
 
-        // We don't return the fetch buffer to the pool and reuse it for upload.
         self.archive_store
-            .start_put_object(&object_key, buffer_ref.as_slice());
-        self.inflight_object_buffers.insert(hash, buffer.clone());
+            .start_put_object(&object_key, object_data);
+        self.inflight_puts += 1;
 
         Ok(())
     }
@@ -190,31 +192,21 @@ impl StripeArchiver {
         let results = self.archive_store.poll_puts();
         for (obj_name, result) in results {
             result?;
-            let hash = self.object_key_to_hash(&obj_name)?;
             debug!("Completed uploading object {}", obj_name);
-            let buffer = self
-                .inflight_object_buffers
-                .remove(&hash)
-                .ok_or(crate::ubiblk_error!(ArchiveError {
-                    description: format!("Buffer for object hash {} not found", hash),
-                }))?;
-            self.buffer_pool.return_buffer(&buffer);
+            self.inflight_puts = self.inflight_puts.checked_sub(1).ok_or_else(|| {
+                crate::ubiblk_error!(ArchiveError {
+                    description: format!(
+                        "Unexpected upload completion for {} with no inflight puts",
+                        obj_name
+                    ),
+                })
+            })?;
         }
         Ok(())
     }
 
     fn hash_to_object_key(&self, hash: &str) -> String {
         format!("data/{}", hash)
-    }
-
-    fn object_key_to_hash(&self, object_key: &str) -> Result<String> {
-        if let Some(stripped) = object_key.strip_prefix("data/") {
-            Ok(stripped.to_string())
-        } else {
-            Err(crate::ubiblk_error!(ArchiveError {
-                description: format!("Invalid object key format: {}", object_key),
-            }))
-        }
     }
 
     fn stripe_should_be_archived(&self, stripe_id: usize) -> bool {
@@ -278,6 +270,7 @@ impl StripeArchiver {
         let archive_metadata = ArchiveMetadata {
             stripe_sector_count: self.metadata.stripe_sector_count(),
             encryption_key,
+            compression: self.compression.clone(),
         };
         Ok(archive_metadata)
     }
@@ -344,6 +337,7 @@ mod tests {
             metadata,
             store,
             encrypted,
+            ArchiveCompressionAlgorithm::None,
             KeyEncryptionCipher::default(),
             1,
         )

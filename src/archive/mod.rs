@@ -22,8 +22,6 @@ pub trait ArchiveStore {
     /// Poll for completed get operations. Each returned tuple contains the
     /// object name and the result of the operation.
     fn poll_gets(&mut self) -> Vec<(String, Result<Vec<u8>>)>;
-    /// List all stored object names.
-    fn list_objects(&self) -> Result<Vec<String>>;
 
     /// Convenience method to synchronously put an object.
     /// NOTE: Asynchronous and synchronous operations should not be mixed.

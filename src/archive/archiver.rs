@@ -296,7 +296,7 @@ mod tests {
         image_stripe_count: usize,
         encrypted: bool,
         fail_stripe_fetches: Vec<usize>,
-    ) -> StripeArchiver {
+    ) -> (StripeArchiver, Box<MemStore>) {
         let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * SECTOR_SIZE) as u64;
         let metadata = UbiMetadata::new(
             STRIPE_SECTOR_COUNT_SHIFT,
@@ -331,22 +331,24 @@ mod tests {
 
         let store = Box::new(MemStore::default());
 
-        StripeArchiver::new(
+        let archiver = StripeArchiver::new(
             Box::new(stripe_source),
             bdev.as_ref(),
             metadata,
-            store,
+            Box::new(MemStore::new_with_objects(store.objects.clone())),
             encrypted,
             ArchiveCompressionAlgorithm::None,
             KeyEncryptionCipher::default(),
             1,
         )
-        .unwrap()
+        .unwrap();
+
+        (archiver, store)
     }
 
     #[test]
     fn test_stripe_should_be_archived() {
-        let mut archiver = prep(16, 4, false, Vec::new());
+        let (mut archiver, _store) = prep(16, 4, false, Vec::new());
         archiver.metadata.stripe_headers[8] |= metadata_flags::WRITTEN;
 
         for stripe_id in 0..16 {
@@ -361,14 +363,14 @@ mod tests {
 
     #[test]
     fn test_archive_all_no_image_stripes() {
-        let mut archiver = prep(16, 0, false, Vec::new());
+        let (mut archiver, mut store) = prep(16, 0, false, Vec::new());
         archiver.metadata.stripe_headers[2] |= metadata_flags::WRITTEN;
         archiver.metadata.stripe_headers[5] |= metadata_flags::WRITTEN;
         archiver.metadata.stripe_headers[7] |= metadata_flags::WRITTEN;
 
         archiver.archive_all().unwrap();
 
-        let stored_objects = archiver.archive_store.list_objects().unwrap();
+        let stored_objects = store.list_objects().unwrap();
 
         // stripes 2 and 5 have the same data, so they share the same data object
         let stored_objects: std::collections::HashSet<String> =
@@ -384,8 +386,7 @@ mod tests {
         assert_eq!(stored_objects, expected_objects);
 
         // verify stripe hashes
-        let stripe_hashes = archiver
-            .archive_store
+        let stripe_hashes = store
             .get_object("stripe-hashes.json", Duration::from_secs(5))
             .unwrap();
         let stripe_hashes: HashMap<usize, String> = serde_json::from_slice(&stripe_hashes).unwrap();
@@ -397,13 +398,13 @@ mod tests {
 
     #[test]
     fn test_archive_all_with_image_stripes() {
-        let mut archiver = prep(16, 4, false, Vec::new());
+        let (mut archiver, mut store) = prep(16, 4, false, Vec::new());
         archiver.metadata.stripe_headers[2] &= !metadata_flags::HAS_SOURCE;
         archiver.metadata.stripe_headers[10] |= metadata_flags::WRITTEN;
         archiver.metadata.stripe_headers[12] |= metadata_flags::WRITTEN;
 
         archiver.archive_all().unwrap();
-        let stored_objects = archiver.archive_store.list_objects().unwrap();
+        let stored_objects = store.list_objects().unwrap();
 
         // stripes 0 and 3 have the same data, so they share the same data object
         let stored_objects: std::collections::HashSet<String> =
@@ -421,8 +422,7 @@ mod tests {
         assert_eq!(stored_objects, expected_objects);
 
         // verify stripe hashes
-        let stripe_hashes = archiver
-            .archive_store
+        let stripe_hashes = store
             .get_object("stripe-hashes.json", Duration::from_secs(5))
             .unwrap();
         let stripe_hashes: HashMap<usize, String> = serde_json::from_slice(&stripe_hashes).unwrap();
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn test_archive_metadata_not_encrypted() {
-        let mut archiver = prep(4, 4, false, Vec::new());
+        let (mut archiver, _store) = prep(4, 4, false, Vec::new());
         archiver.archive_all().unwrap();
         let metadata_bytes = archiver
             .archive_store
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_archive_metadata_encrypted() {
-        let mut archiver = prep(4, 4, true, Vec::new());
+        let (mut archiver, _store) = prep(4, 4, true, Vec::new());
         archiver.archive_all().unwrap();
         let metadata_bytes = archiver
             .archive_store
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn stripe_fetch_failure() {
-        let mut archiver = prep(4, 4, false, vec![2]);
+        let (mut archiver, _store) = prep(4, 4, false, vec![2]);
         let result = archiver.archive_all();
         assert!(result.is_err());
         let err = result.err().unwrap();

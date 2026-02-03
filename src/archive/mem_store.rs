@@ -51,6 +51,11 @@ impl MemStore {
             })
         })
     }
+
+    #[cfg(test)]
+    pub fn list_objects(&self) -> Result<Vec<String>> {
+        Ok(self.objects.borrow().keys().cloned().collect())
+    }
 }
 
 impl ArchiveStore for MemStore {
@@ -74,10 +79,6 @@ impl ArchiveStore for MemStore {
 
     fn poll_gets(&mut self) -> Vec<(String, Result<Vec<u8>>)> {
         std::mem::take(&mut self.finished_gets)
-    }
-
-    fn list_objects(&self) -> Result<Vec<String>> {
-        Ok(self.objects.borrow().keys().cloned().collect())
     }
 }
 

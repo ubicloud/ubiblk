@@ -1,5 +1,5 @@
 use super::ArchiveStore;
-use crate::Result;
+use crate::{Result, ResultExt};
 use std::{fs, path::PathBuf};
 
 pub struct FileSystemStore {
@@ -21,21 +21,25 @@ impl FileSystemStore {
     fn try_put_object(&mut self, name: &str, data: &[u8]) -> Result<()> {
         let mut path = self.base_path.clone();
         path.push(name);
-        fs::write(path, data)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .context(format!("Failed to create dir {}", parent.display()))?;
+        }
+        fs::write(&path, data).context(format!("Failed to write {}", path.display()))?;
         Ok(())
     }
 
     fn try_get_object(&self, name: &str) -> Result<Vec<u8>> {
         let mut path = self.base_path.clone();
         path.push(name);
-        let data = fs::read(path)?;
+        let data = fs::read(&path).context(format!("Failed to read {}", path.display()))?;
         Ok(data)
     }
 }
 
 impl ArchiveStore for FileSystemStore {
-    fn start_put_object(&mut self, name: &str, data: &[u8]) {
-        let result = self.try_put_object(name, data);
+    fn start_put_object(&mut self, name: &str, data: Vec<u8>) {
+        let result = self.try_put_object(name, &data);
         self.finished_puts.push((name.to_string(), result));
     }
 

@@ -39,10 +39,8 @@ impl MemStore {
         }
     }
 
-    fn try_put_object(&mut self, name: &str, data: &[u8]) -> Result<()> {
-        self.objects
-            .borrow_mut()
-            .insert(name.to_string(), data.to_vec());
+    fn try_put_object(&mut self, name: &str, data: Vec<u8>) -> Result<()> {
+        self.objects.borrow_mut().insert(name.to_string(), data);
         Ok(())
     }
 
@@ -56,7 +54,7 @@ impl MemStore {
 }
 
 impl ArchiveStore for MemStore {
-    fn start_put_object(&mut self, name: &str, data: &[u8]) {
+    fn start_put_object(&mut self, name: &str, data: Vec<u8>) {
         let result = self.try_put_object(name, data);
         if self.ack_puts {
             self.finished_puts.push((name.to_string(), result));

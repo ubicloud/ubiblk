@@ -113,13 +113,13 @@ impl Drop for S3Store {
 }
 
 impl ArchiveStore for S3Store {
-    fn start_put_object(&mut self, name: &str, data: &[u8]) {
+    fn start_put_object(&mut self, name: &str, data: Vec<u8>) {
         debug!("Queueing S3 put object: {}", name);
         let key = key_with_prefix(&self.prefix, name);
         let request = S3Request::Put {
             name: name.to_string(),
             key,
-            data: data.to_vec(),
+            data,
         };
         if let Some(sender) = self.request_tx.as_ref() {
             if let Err(err) = sender.send(request) {
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn start_put_object_errors_when_queue_missing() {
         let mut store = test_store(None);
-        store.start_put_object("object", b"data");
+        store.start_put_object("object", b"data".to_vec());
         let results = store.poll_puts();
         assert_eq!(results.len(), 1);
         let err = results[0]

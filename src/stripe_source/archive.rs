@@ -4,13 +4,14 @@ use ubiblk_macros::error_context;
 
 use crate::{
     archive::{
-        validate_format_version, ArchiveCompressionAlgorithm, ArchiveMetadata, ArchiveStore,
+        deserialize_stripe_mapping, validate_format_version, ArchiveCompressionAlgorithm,
+        ArchiveMetadata, ArchiveStore, StripeContentMap, StripeContentSpecifier,
         DEFAULT_ARCHIVE_TIMEOUT,
     },
     backends::SECTOR_SIZE,
     block_device::SharedBuffer,
     crypt::XtsBlockCipher,
-    utils::hash::sha256_hex,
+    utils::hash::sha256_bytes,
     KeyEncryptionCipher, Result,
 };
 
@@ -18,13 +19,13 @@ use super::StripeSource;
 
 struct PendingRequest {
     pending_stripes: Vec<(usize, SharedBuffer)>,
-    expected_sha256: String,
+    expected_sha256: [u8; 32],
 }
 
 pub struct ArchiveStripeSource {
     store: Box<dyn ArchiveStore>,
     xts_cipher: Option<XtsBlockCipher>,
-    stripe_hashes: HashMap<usize, String>,
+    stripe_hashes: StripeContentMap,
     max_stripe_id: usize,
     stripe_sector_count: u64,
     compression: ArchiveCompressionAlgorithm,
@@ -36,15 +37,17 @@ impl ArchiveStripeSource {
     #[error_context("Failed to create ArchiveStripeSource")]
     pub fn new(mut store: Box<dyn ArchiveStore>, kek: KeyEncryptionCipher) -> Result<Self> {
         let metadata: ArchiveMetadata = Self::fetch_metadata(store.as_mut())?;
-        let stripe_hashes = Self::fetch_stripe_hashes(store.as_mut())?;
-        let max_stripe_id = stripe_hashes.keys().max().cloned().unwrap_or(0);
-        let stripe_sector_count = metadata.stripe_sector_count;
-        let finished_requests = Vec::new();
-        let pending_requests = HashMap::new();
+        let hmac_key = Self::decrypt_hmac_key(&metadata, &kek)?;
         let xts_cipher = match metadata.encryption_key {
             None => None,
             Some(key) => Some(XtsBlockCipher::from_encrypted(key.0, key.1, &kek)?),
         };
+        let stripe_hashes =
+            Self::fetch_stripe_hashes(store.as_mut(), hmac_key.as_ref(), xts_cipher.clone())?;
+        let max_stripe_id = stripe_hashes.keys().max().cloned().unwrap_or(0);
+        let stripe_sector_count = metadata.stripe_sector_count;
+        let finished_requests = Vec::new();
+        let pending_requests = HashMap::new();
         Ok(Self {
             store,
             xts_cipher,
@@ -70,24 +73,47 @@ impl ArchiveStripeSource {
     }
 
     #[error_context("Failed to fetch stripe hashes")]
-    fn fetch_stripe_hashes(store: &mut dyn ArchiveStore) -> Result<HashMap<usize, String>> {
-        let stripe_hashes_json = store.get_object("stripe-hashes.json", DEFAULT_ARCHIVE_TIMEOUT)?;
-        let stripe_hashes: HashMap<usize, String> = serde_json::from_slice(&stripe_hashes_json)
+    fn fetch_stripe_hashes(
+        store: &mut dyn ArchiveStore,
+        hmac_key: Option<&[u8; 32]>,
+        xts_cipher: Option<XtsBlockCipher>,
+    ) -> Result<StripeContentMap> {
+        let manifest_name = "stripe-mapping";
+        let stripe_hashes_bytes = store.get_object(manifest_name, DEFAULT_ARCHIVE_TIMEOUT)?;
+        let hmac_key = hmac_key.ok_or_else(|| {
+            crate::ubiblk_error!(MetadataError {
+                description: format!("missing HMAC key for {manifest_name}"),
+            })
+        })?;
+        let stripe_hashes = deserialize_stripe_mapping(&stripe_hashes_bytes, hmac_key, xts_cipher)
             .map_err(|e| {
                 crate::ubiblk_error!(MetadataError {
-                    description: format!("failed to parse stripe-hashes.json: {}", e),
+                    description: e.to_string(),
                 })
             })?;
         Ok(stripe_hashes)
     }
 
+    fn decrypt_hmac_key(
+        metadata: &ArchiveMetadata,
+        kek: &KeyEncryptionCipher,
+    ) -> Result<Option<[u8; 32]>> {
+        let key = kek.decrypt_key_data(&metadata.hmac_key)?;
+        let key_array: [u8; 32] = key.try_into().map_err(|_| {
+            crate::ubiblk_error!(MetadataError {
+                description: "invalid HMAC key length in metadata".to_string(),
+            })
+        })?;
+        Ok(Some(key_array))
+    }
+
     fn start_fetch_stripe(
         &mut self,
         stripe_id: usize,
-        sha256: String,
+        sha256: [u8; 32],
         buffer: SharedBuffer,
     ) -> Result<()> {
-        let object_name = format!("data/{}", sha256);
+        let object_name = self.object_key(&sha256);
 
         if let Some(pending) = self.pending_requests.get_mut(&object_name) {
             pending.pending_stripes.push((stripe_id, buffer));
@@ -142,7 +168,7 @@ impl ArchiveStripeSource {
         stripe_id: usize,
         destination_buffer: SharedBuffer,
         fetched_data: &[u8],
-        expected_sha256: &str,
+        expected_sha256: &[u8; 32],
     ) -> Result<()> {
         Self::verify_stripe_data(stripe_id, fetched_data, expected_sha256)?;
 
@@ -172,22 +198,33 @@ impl ArchiveStripeSource {
         Ok(())
     }
 
-    fn verify_stripe_data(stripe_id: usize, data: &[u8], expected_sha256: &str) -> Result<()> {
-        let computed_hash = sha256_hex(data);
-        if computed_hash != expected_sha256 {
+    fn verify_stripe_data(stripe_id: usize, data: &[u8], expected_sha256: &[u8; 32]) -> Result<()> {
+        let computed_hash = sha256_bytes(data);
+        if &computed_hash != expected_sha256 {
             return Err(crate::ubiblk_error!(ArchiveError {
                 description: format!("sha256 hash mismatch for stripe {}", stripe_id),
             }));
         }
         Ok(())
     }
+
+    fn object_key(&self, hash: &[u8; 32]) -> String {
+        format!("data/{}", hex::encode(hash))
+    }
 }
 
 impl StripeSource for ArchiveStripeSource {
     fn request(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
-        let maybe_sha256 = self.stripe_hashes.get(&stripe_id).cloned();
-        match maybe_sha256 {
-            Some(sha256) => self.start_fetch_stripe(stripe_id, sha256, buffer),
+        let maybe_specifier = self.stripe_hashes.get(&stripe_id).cloned();
+        match maybe_specifier {
+            Some(StripeContentSpecifier::Zero) => {
+                buffer.borrow_mut().as_mut_slice().fill(0);
+                self.finished_requests.push((stripe_id, true));
+                Ok(())
+            }
+            Some(StripeContentSpecifier::Some(sha256)) => {
+                self.start_fetch_stripe(stripe_id, sha256, buffer)
+            }
             None => {
                 buffer.borrow_mut().as_mut_slice().fill(0);
                 self.finished_requests.push((stripe_id, true));
@@ -242,6 +279,9 @@ impl StripeSource for ArchiveStripeSource {
 mod tests {
     use std::rc::Rc;
     use std::time::Duration;
+
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
 
     use crate::{
         archive::ArchiveCompressionAlgorithm,
@@ -512,15 +552,24 @@ mod tests {
     #[test]
     fn test_accepts_supported_format_version() {
         let mut store = MemStore::new();
+        let hmac_key = [0x11u8; 32];
+        let stripe_mapping =
+            crate::archive::serialize_stripe_mapping(&StripeContentMap::new(), &hmac_key, None)
+                .unwrap();
+        let hmac_key_b64 = STANDARD.encode(hmac_key);
         store
             .put_object(
                 "metadata.json",
-                br#"{"format_version":1,"stripe_sector_count":16,"encryption_key":null}"#,
+                format!(
+                    r#"{{"format_version":1,"stripe_sector_count":16,"encryption_key":null,"hmac_key":"{}"}}"#,
+                    hmac_key_b64
+                )
+                .as_bytes(),
                 Duration::from_secs(5),
             )
             .unwrap();
         store
-            .put_object("stripe-hashes.json", br#"{}"#, Duration::from_secs(5))
+            .put_object("stripe-mapping", &stripe_mapping, Duration::from_secs(5))
             .unwrap();
 
         let result = ArchiveStripeSource::new(Box::new(store), KeyEncryptionCipher::default());
@@ -547,11 +596,15 @@ mod tests {
 
         let buf = shared_buffer((STRIPE_SECTOR_COUNT * SECTOR_SIZE as u64) as usize);
         buf.borrow_mut().as_mut_slice().fill(0xFF);
-        let object_name = "data/".to_string()
-            + source
-                .stripe_hashes
-                .get(&2)
-                .expect("stripe 2 hash should exist");
+        let stripe_hash = match source
+            .stripe_hashes
+            .get(&2)
+            .expect("stripe 2 hash should exist")
+        {
+            StripeContentSpecifier::Some(hash) => hash,
+            StripeContentSpecifier::Zero => panic!("stripe 2 unexpectedly zero"),
+        };
+        let object_name = source.object_key(stripe_hash);
         // Corrupt the stripe data in the store to cause hash mismatch
         setup
             .store
@@ -578,21 +631,24 @@ mod tests {
     }
 
     #[test]
-    fn test_fetch_stripe_hashes_bad_json() {
+    fn test_fetch_stripe_hashes_bad_cbor() {
         let mut store = MemStore::new();
+        let hmac_key = [0x22u8; 32];
+        let stripe_mapping = b"not-cbor";
+        let hmac_key_b64 = STANDARD.encode(hmac_key);
         store
             .put_object(
                 "metadata.json",
-                br#"{"format_version":1,"stripe_sector_count":16,"encryption_key":null}"#,
+                format!(
+                    r#"{{"format_version":1,"stripe_sector_count":16,"encryption_key":null,"hmac_key":"{}"}}"#,
+                    hmac_key_b64
+                )
+                .as_bytes(),
                 Duration::from_secs(5),
             )
             .unwrap();
         store
-            .put_object(
-                "stripe-hashes.json",
-                br#"{"0":"hash0","1":12345}"#, // invalid JSON: value for key "1" should be a string
-                Duration::from_secs(5),
-            )
+            .put_object("stripe-mapping", stripe_mapping, Duration::from_secs(5))
             .unwrap();
 
         let result = ArchiveStripeSource::new(Box::new(store), KeyEncryptionCipher::default());
@@ -601,6 +657,6 @@ mod tests {
             .err()
             .unwrap()
             .to_string()
-            .contains("failed to parse stripe-hashes.json"));
+            .contains("failed to parse stripe-mapping"));
     }
 }

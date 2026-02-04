@@ -1,14 +1,14 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    crypt::{decode_optional_key_pair, encode_optional_key_pair},
+    crypt::{decode_key, decode_optional_key_pair, encode_key, encode_optional_key_pair},
     Result,
 };
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const ARCHIVE_FORMAT_VERSION: u32 = 1;
-pub const ARCHIVE_FORMAT_VERSION_MIN: u32 = ARCHIVE_FORMAT_VERSION;
+pub const ARCHIVE_FORMAT_VERSION_MIN: u32 = 1;
 pub const ARCHIVE_FORMAT_VERSION_MAX: u32 = ARCHIVE_FORMAT_VERSION;
 
 /// Abstraction over a backend that can store and retrieve archived objects.
@@ -93,17 +93,12 @@ pub struct ArchiveMetadata {
     pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
     #[serde(default)]
     pub compression: ArchiveCompressionAlgorithm,
-}
-
-impl Default for ArchiveMetadata {
-    fn default() -> Self {
-        Self {
-            format_version: ARCHIVE_FORMAT_VERSION,
-            stripe_sector_count: 0,
-            encryption_key: None,
-            compression: ArchiveCompressionAlgorithm::None,
-        }
-    }
+    #[serde(
+        default,
+        deserialize_with = "decode_key",
+        serialize_with = "encode_key"
+    )]
+    pub hmac_key: Vec<u8>,
 }
 
 pub fn validate_format_version(version: u32) -> Result<()> {
@@ -119,13 +114,19 @@ pub fn validate_format_version(version: u32) -> Result<()> {
 }
 
 mod archiver;
+mod bytes32;
 mod compression;
 mod fs_store;
 mod s3_store;
+mod stripe_hashes;
 
 pub use archiver::StripeArchiver;
 pub use fs_store::FileSystemStore;
 pub use s3_store::S3Store;
+pub use stripe_hashes::{compute_manifest_hmac_tag, verify_manifest_hmac_tag};
+pub use stripe_hashes::{
+    deserialize_stripe_mapping, serialize_stripe_mapping, StripeContentMap, StripeContentSpecifier,
+};
 
 #[cfg(test)]
 mod mem_store;

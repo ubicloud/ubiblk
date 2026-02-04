@@ -58,7 +58,7 @@ archive -f config.yaml --target-config archive_target.yaml
 
 ## Archive format
 
-Archives consist of a `metadata.json` file, a `stripe-hashes.json` mapping
+Archives consist of a `metadata.json` file, a `stripe-mapping` mapping
 file, and one data object per unique stripe payload. Only stripes which contain
 data are archived. That is:
 
@@ -79,7 +79,8 @@ to validate compatibility.
     "<BASE64-ENCODED-KEY-1>",
     "<BASE64-ENCODED-KEY-2>"
   ],
-  "compression": "snappy"
+  "compression": "snappy",
+  "hmac_key": "<BASE64-ENCODED-ENCRYPTED-HMAC-KEY>"
 }
 ```
 
@@ -87,32 +88,45 @@ to validate compatibility.
 `--encrypt` is enabled, the two keys stored in `encryption_key` are encrypted
 with the KEK (if provided) before being base64 encoded; otherwise,
 `encryption_key` is `null`. The `compression` field records the algorithm used
-to store stripe payloads.
+to store stripe payloads. `hmac_key` stores a KEK-encrypted HMAC key used to
+authenticate `stripe-mapping`.
 
-### `stripe-hashes.json`
+### `stripe-mapping`
 
-The stripe hash map stores the SHA-256 hash for every archived stripe index.
-Stripe indices that were skipped are absent from the map.
+The stripe mapping stores a content descriptor for every archived stripe index.
+Stripe indices that are not archived are absent from the map. These include
+stripes that don't exist in the stripe source and are never written to.
 
-```json
-{
-  "0": "7ab2d7cbb0c4e0e1e8fe2a5f7a8f1b5b56c2b7f8d4022ec3e6f4c3e8b1f66f33",
-  "5": "7ab2d7cbb0c4e0e1e8fe2a5f7a8f1b5b56c2b7f8d4022ec3e6f4c3e8b1f66f33",
-  "7": "2f1c5d6c2cceaa1c6bbd2a0e8a3bb5b5b3dd44cb1a25d2f11f0e0a533b7e3f7c"
-}
+The mapping is encoded as CBOR. Each stripe entry is either `Zero` (an all-zero
+stripe, with no stripe object stored) or `Some`, containing a 32-byte SHA-256
+digest of the **stored stripe bytes** (computed after compression and optional
+encryption).
+
+The CBOR mapping is padded to a 512-byte sector size and stored together with
+the original plaintext length. When archive encryption is enabled, the padded
+bytes are encrypted using AES-XTS before storage; when encryption is disabled,
+the stored bytes are the padded plaintext.
+
+An HMAC tag is included with the file and verified on read. The HMAC is computed
+over:
+
+```
+domain || version || plaintext_len || ciphertext
 ```
 
+where:
+- `domain` is a fixed ASCII string identifying the archive stripe-mapping HMAC;
+- `version` is encoded as a 4-byte little-endian unsigned integer (`u32`);
+- `plaintext_len` is encoded as an 8-byte little-endian unsigned integer (`u64`);
+- `ciphertext` is the full encrypted (or, if encryption is disabled, padded plaintext) CBOR mapping bytes.
+
+This authenticates the stripe mapping and detects any corruption or tampering
+before the mapping is parsed or trusted.
 
 ### Stripe objects
 
-Each archived stripe payload is stored as its own object with the following key
-format:
-
-```
-data/<sha256 hash>
-```
-
-The content is the raw stripe payload, optionally compressed, then optionally
-encrypted. The SHA-256 hash is computed on the stored bytes (after compression
-and encryption). Consumers verify the hash, decrypt if needed, and then
-decompress if needed before returning the stripe.
+Each archived stripe payload is stored as its own object under
+`data/<sha256 hash>`. The SHA-256 hash is computed on the stored stripe bytes
+(after compression and optional encryption). Consumers verify the hash before
+decrypting (if needed) and decompressing (if needed) before returning the
+stripe.

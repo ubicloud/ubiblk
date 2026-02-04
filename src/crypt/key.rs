@@ -142,6 +142,26 @@ impl KeyEncryptionCipher {
             param_err(msg)
         })
     }
+
+    pub fn encrypt_key_data(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
+        match self.method {
+            CipherMethod::None => Ok(plaintext.to_vec()),
+            CipherMethod::Aes256Gcm => {
+                let (cipher, nonce, auth) = self.init_cipher_context()?;
+                encrypt_bytes(&cipher, &nonce, auth, plaintext)
+            }
+        }
+    }
+
+    pub fn decrypt_key_data(&self, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        match self.method {
+            CipherMethod::None => Ok(ciphertext.to_vec()),
+            CipherMethod::Aes256Gcm => {
+                let (cipher, nonce, auth) = self.init_cipher_context()?;
+                decrypt_bytes(&cipher, &nonce, auth, ciphertext)
+            }
+        }
+    }
 }
 
 fn decrypt_bytes(

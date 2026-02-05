@@ -55,6 +55,7 @@ libublk = "0.4.5"
 ctrlc = "3.5.1"
 ubiblk-macros = { path = "crates/ubiblk-macros" }
 snap = "1.1.1"
+zstd = "0.13.3"
 
 [build-dependencies]
 bindgen = "0.72.1"

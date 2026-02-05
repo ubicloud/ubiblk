@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use log::error;
 
 use ubiblk::{
@@ -44,8 +44,23 @@ struct Args {
     encrypt: bool,
 
     /// Compress archived stripes.
-    #[arg(short = 'c', long = "compress", default_value_t = false)]
-    compress: bool,
+    #[arg(long = "compression", value_enum, default_value_t = CompressionChoice::None)]
+    compression: CompressionChoice,
+
+    /// Compression level for zstd (lower is faster).
+    #[arg(
+        long = "zstd-level",
+        default_value_t = 3,
+        value_parser = clap::value_parser!(i32).range(1..=22)
+    )]
+    zstd_level: i32,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum CompressionChoice {
+    None,
+    Snappy,
+    Zstd,
 }
 
 fn main() {
@@ -86,10 +101,12 @@ fn run() -> Result<()> {
         ArchiveStripeSourceConfig::load_from_file_with_kek(&args.target_config_path, &config_kek)?;
     let store = StripeSourceBuilder::build_archive_store(&target_config)?;
 
-    let compression = if args.compress {
-        ArchiveCompressionAlgorithm::Snappy
-    } else {
-        ArchiveCompressionAlgorithm::None
+    let compression = match args.compression {
+        CompressionChoice::None => ArchiveCompressionAlgorithm::None,
+        CompressionChoice::Snappy => ArchiveCompressionAlgorithm::Snappy,
+        CompressionChoice::Zstd => ArchiveCompressionAlgorithm::Zstd {
+            level: args.zstd_level,
+        },
     };
 
     let mut archiver = StripeArchiver::new(

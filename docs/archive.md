@@ -16,7 +16,8 @@ archive --config <CONFIG_YAML> --target-config <TARGET_CONFIG_YAML> [options]
 - `--kek` (`-k`): Path to the key encryption key file.
 - `--unlink-kek` (`-u`): Delete the KEK file after use.
 - `--encrypt` (`-e`): Encrypt archived stripes with a random AES-XTS key.
-- `--compress` (`-c`): Compress archived stripes with Snappy before optional encryption.
+- `--compression`: Compression algorithm (`none`, `snappy`, or `zstd`). Defaults to `none`.
+- `--zstd-level`: Zstd compression level. Defaults to `3`.
 
 **Target config format:**
 ```yaml
@@ -54,6 +55,9 @@ archive -f config.yaml --target-config archive_target.yaml
 
 # Archive to S3 with a prefix
 archive -f config.yaml --target-config archive_target.yaml
+
+# Archive with zstd compression (level 3)
+archive -f config.yaml --target-config archive_target.yaml --compression zstd --zstd-level 3
 ```
 
 ## Archive format
@@ -79,7 +83,11 @@ to validate compatibility.
     "<BASE64-ENCODED-KEY-1>",
     "<BASE64-ENCODED-KEY-2>"
   ],
-  "compression": "snappy",
+  "compression": {
+    "zstd": {
+      "level": 3
+    }
+  },
   "hmac_key": "<BASE64-ENCODED-ENCRYPTED-HMAC-KEY>"
 }
 ```
@@ -88,8 +96,11 @@ to validate compatibility.
 `--encrypt` is enabled, the two keys stored in `encryption_key` are encrypted
 with the KEK (if provided) before being base64 encoded; otherwise,
 `encryption_key` is `null`. The `compression` field records the algorithm used
-to store stripe payloads. `hmac_key` stores a KEK-encrypted HMAC key used to
-authenticate `stripe-mapping`.
+to store stripe payloads. For `none` and `snappy`, this is a string value.
+For zstd, this is an object containing the configured compression level.
+The `level` field is required when `compression` is `zstd`.
+`hmac_key` stores a KEK-encrypted HMAC key used to authenticate
+`stripe-mapping`.
 
 ### `stripe-mapping`
 

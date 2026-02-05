@@ -75,6 +75,9 @@ pub enum ArchiveCompressionAlgorithm {
     #[default]
     None,
     Snappy,
+    Zstd {
+        level: i32,
+    },
 }
 
 /// Representation of `metadata.json` stored alongside archived stripes.

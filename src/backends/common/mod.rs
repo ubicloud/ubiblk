@@ -4,7 +4,7 @@ use std::{
     sync::mpsc::{channel, Receiver, Sender},
 };
 
-use log::{error, info};
+use log::{error, info, warn};
 use nix::sys::statfs::statfs;
 use ubiblk_macros::error_context;
 
@@ -56,6 +56,7 @@ impl BackendEnv {
             .metadata_path
             .as_ref()
             .map(|path| {
+                warn_if_no_atomic_write_support(path);
                 build_block_device(path, config, false).context("Failed to build metadata device")
             })
             .transpose()?;
@@ -367,6 +368,61 @@ pub fn build_raw_image_device(config: &DeviceConfig) -> Result<Option<Box<dyn Bl
     }
 }
 
+/// Check whether a metadata device path supports atomic sector writes via
+/// `statx(STATX_WRITE_ATOMIC)` (Linux 6.13+). Logs a warning if the device
+/// does not report atomic write support or if the check is unavailable.
+/// Never fails — errors are silently ignored so startup is never blocked.
+fn warn_if_no_atomic_write_support(path: &str) {
+    // STATX_WRITE_ATOMIC was added in Linux 6.13. The constant is not yet in
+    // the libc crate, so we define it ourselves. The kernel zeroes unknown mask
+    // bits in the statx result, making this safe on older kernels.
+    const STATX_WRITE_ATOMIC: u32 = 0x0001_0000;
+
+    let c_path = match std::ffi::CString::new(path) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let mut stx: libc::statx = unsafe { std::mem::zeroed() };
+    let ret = unsafe {
+        libc::statx(
+            libc::AT_FDCWD,
+            c_path.as_ptr(),
+            0,
+            STATX_WRITE_ATOMIC,
+            &mut stx,
+        )
+    };
+
+    if ret != 0 {
+        // statx syscall failed (ENOSYS on very old kernels, or other error).
+        // Don't warn about atomic writes — we simply can't check.
+        return;
+    }
+
+    // If the kernel populated the WRITE_ATOMIC field, check the value.
+    // On kernels < 6.13, the bit won't be set in stx_mask and the atomic
+    // write fields in the spare area will be zero.
+    if stx.stx_mask & STATX_WRITE_ATOMIC != 0 {
+        // Kernel supports STATX_WRITE_ATOMIC. The stx_atomic_write_unit_min
+        // field lives at offset 0xa0 in the kernel statx struct (start of
+        // the spare area). Read it via byte-offset pointer arithmetic since
+        // the libc crate's __statx_pad3 field is private.
+        let base = std::ptr::addr_of!(stx) as *const u8;
+        let atomic_write_unit_min = unsafe { (base.add(0xa0) as *const u32).read_unaligned() };
+        if atomic_write_unit_min >= SECTOR_SIZE as u32 {
+            return; // Device reports atomic write support
+        }
+    }
+
+    warn!(
+        "Metadata device '{}' does not report atomic write support. \
+         Torn metadata writes are possible on power failure. \
+         Consider using an NVMe device or metadata format v2 (with checksums) for protection.",
+        path
+    );
+}
+
 pub fn build_block_device(
     path: &str,
     config: &DeviceConfig,
@@ -490,6 +546,20 @@ mod tests {
 
         let result = BackendEnv::build(&config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn warn_if_no_atomic_write_support_does_not_panic() {
+        // Calling on a tempfile should not panic or crash, regardless of
+        // kernel support for STATX_WRITE_ATOMIC.
+        let tmpfile = tempfile::NamedTempFile::new().unwrap();
+        warn_if_no_atomic_write_support(tmpfile.path().to_str().unwrap());
+    }
+
+    #[test]
+    fn warn_if_no_atomic_write_support_nonexistent_path() {
+        // Should not panic for a path that doesn't exist (statx will fail).
+        warn_if_no_atomic_write_support("/nonexistent/path/for/testing");
     }
 
     #[test]

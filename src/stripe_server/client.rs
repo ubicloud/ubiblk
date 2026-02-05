@@ -2,9 +2,12 @@ use std::net::{SocketAddr, TcpStream};
 
 use log::{info, warn};
 
+use crate::backends::SECTOR_SIZE;
 use crate::config::RemoteStripeSourceConfig;
 
 use super::*;
+
+const MAX_REMOTE_METADATA_SIZE: usize = 64 * 1024 * 1024;
 
 impl StripeServerClient {
     pub fn new(stream: DynStream) -> Self {
@@ -32,13 +35,32 @@ impl StripeServerClient {
         // Read metadata size
         let mut size_bytes = [0u8; 8];
         self.stream.read_exact(&mut size_bytes)?;
-        let metadata_size = u64::from_le_bytes(size_bytes) as usize;
+        let metadata_size_u64 = u64::from_le_bytes(size_bytes);
+        let metadata_size = usize::try_from(metadata_size_u64).map_err(|_| {
+            crate::ubiblk_error!(ProtocolError {
+                description: format!(
+                    "Remote metadata size {metadata_size_u64} exceeds local limits"
+                ),
+            })
+        })?;
+        if metadata_size < SECTOR_SIZE {
+            return Err(crate::ubiblk_error!(ProtocolError {
+                description: format!("Remote metadata size {metadata_size} is too small"),
+            }));
+        }
+        if metadata_size > MAX_REMOTE_METADATA_SIZE {
+            return Err(crate::ubiblk_error!(ProtocolError {
+                description: format!(
+                    "Remote metadata size {metadata_size} exceeds maximum {MAX_REMOTE_METADATA_SIZE}"
+                ),
+            }));
+        }
 
         // Read metadata
         let mut metadata_bytes = vec![0u8; metadata_size];
         self.stream.read_exact(&mut metadata_bytes)?;
 
-        let metadata = UbiMetadata::from_bytes(&metadata_bytes);
+        let metadata = UbiMetadata::from_bytes(&metadata_bytes)?;
         self.metadata = Some(*metadata);
 
         Ok(())

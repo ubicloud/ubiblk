@@ -1,12 +1,9 @@
 use crate::{
     backends::SECTOR_SIZE,
-    block_device::{
-        bdev_lazy::metadata::types::{METADATA_VERSION_MAJOR, METADATA_VERSION_MINOR, UBI_MAGIC},
-        shared_buffer, wait_for_completion, BlockDevice, UbiMetadata,
-    },
+    block_device::{shared_buffer, wait_for_completion, BlockDevice, UbiMetadata},
     Result,
 };
-use log::{error, info};
+use log::info;
 use ubiblk_macros::error_context;
 
 impl UbiMetadata {
@@ -29,35 +26,7 @@ impl UbiMetadata {
 
         wait_for_completion(io_channel.as_mut(), 0, std::time::Duration::from_secs(30))?;
 
-        let metadata = UbiMetadata::from_bytes(buf.borrow().as_slice());
-
-        if metadata.magic != *UBI_MAGIC {
-            error!(
-                "Metadata magic mismatch: expected {:?}, found {:?}",
-                UBI_MAGIC, metadata.magic
-            );
-            return Err(crate::ubiblk_error!(MetadataError {
-                description: format!(
-                    "Metadata magic mismatch! Expected: {:?}, Found: {:?}",
-                    UBI_MAGIC, metadata.magic
-                ),
-            }));
-        }
-
-        let version_major = metadata.version_major_u16();
-        let version_minor = metadata.version_minor_u16();
-        if version_major != METADATA_VERSION_MAJOR || version_minor != METADATA_VERSION_MINOR {
-            error!(
-                "Metadata version mismatch: expected {}.{}, found {}.{}",
-                METADATA_VERSION_MAJOR, METADATA_VERSION_MINOR, version_major, version_minor
-            );
-            return Err(crate::ubiblk_error!(MetadataError {
-                description: format!(
-                    "Metadata version mismatch! Expected: {}.{}, Found: {}.{}",
-                    METADATA_VERSION_MAJOR, METADATA_VERSION_MINOR, version_major, version_minor
-                ),
-            }));
-        }
+        let metadata = UbiMetadata::from_bytes(buf.borrow().as_slice())?;
 
         info!("Metadata loaded successfully");
 
@@ -67,7 +36,9 @@ impl UbiMetadata {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::block_device::{
+        bdev_lazy::metadata::types::METADATA_VERSION_MINOR, bdev_test::TestBlockDevice,
+    };
 
     use super::*;
 
@@ -100,14 +71,16 @@ mod tests {
     #[test]
     fn test_invalid_magic() {
         let device = TestBlockDevice::new(1024 * 1024);
+        let mut metadata = UbiMetadata::new(11, 16, 16);
+        metadata.magic.copy_from_slice(b"BAD_MAGIC");
+        metadata.save_to_bdev(&device).expect("save metadata");
+
         let result = UbiMetadata::load_from_bdev(&device);
-        assert!(
-            result.is_err()
-                && result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Metadata magic mismatch")
-        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Metadata magic mismatch"));
     }
 
     #[test]

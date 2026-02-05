@@ -99,7 +99,7 @@ mod tests {
 
         metadata_file.as_file().set_len(4 * 1024 * 1024)?;
         let mut buf = vec![0u8; metadata.metadata_size()];
-        metadata.write_to_buf(&mut buf);
+        metadata.write_to_buf(&mut buf)?;
         metadata_file.as_file().write_all(&buf)?;
 
         let config = config(

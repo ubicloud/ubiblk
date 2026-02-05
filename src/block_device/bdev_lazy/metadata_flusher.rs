@@ -1,6 +1,7 @@
 use crate::{
     backends::SECTOR_SIZE,
     block_device::{
+        bdev_lazy::metadata::types::{write_sector_with_crc32, STRIPE_HEADERS_PER_SECTOR},
         metadata_flags, BlockDevice, IoChannel, SharedBuffer, SharedMetadataState, UbiMetadata,
     },
     utils::AlignedBufferPool,
@@ -104,6 +105,18 @@ impl MetadataFlusher {
         self.poll_channel();
     }
 
+    fn cleanup_failed_submission(&mut self, stripe_ids: &[usize], return_buffer: bool) {
+        for stripe_id in stripe_ids {
+            if let Some(status) = self.header_updates.remove(stripe_id) {
+                self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
+                if return_buffer {
+                    self.buffer_pool.return_buffer(&status.buffer);
+                }
+                self.sectors_being_updated.remove(&status.sector);
+            }
+        }
+    }
+
     fn poll_channel(&mut self) {
         let mut finished_stripes = Vec::new();
         let mut newly_flushing = Vec::new();
@@ -161,12 +174,7 @@ impl MetadataFlusher {
             // The kernel never received the flush SQEs. Clean up entries
             // that just transitioned to Flushing to avoid permanently
             // blocking the affected sectors.
-            for stripe_id in newly_flushing {
-                if let Some(status) = self.header_updates.remove(&stripe_id) {
-                    self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
-                    self.sectors_being_updated.remove(&status.sector);
-                }
-            }
+            self.cleanup_failed_submission(&newly_flushing, false);
         }
     }
 
@@ -175,8 +183,8 @@ impl MetadataFlusher {
 
         while !self.queued_requests.is_empty() && self.buffer_pool.has_available() {
             let req = *self.queued_requests.front().unwrap();
-            let group = req.stripe_id / SECTOR_SIZE;
-            let sector = (group + 1) as u64;
+            let group = UbiMetadata::stripe_id_to_group(req.stripe_id);
+            let sector = UbiMetadata::stripe_id_to_sector(req.stripe_id);
             if self.sectors_being_updated.contains(&sector) {
                 // Updates to each sector should be serialized
                 break;
@@ -195,9 +203,12 @@ impl MetadataFlusher {
 
             let buf = self.buffer_pool.get_buffer().unwrap();
             self.metadata.stripe_headers[req.stripe_id] |= requested_bitmask;
-            buf.borrow_mut().as_mut_slice().copy_from_slice(
-                &self.metadata.stripe_headers[group * SECTOR_SIZE..(group + 1) * SECTOR_SIZE],
-            );
+
+            let headers_start = group * STRIPE_HEADERS_PER_SECTOR;
+            let headers_end =
+                (headers_start + STRIPE_HEADERS_PER_SECTOR).min(self.metadata.stripe_headers.len());
+            let headers = &self.metadata.stripe_headers[headers_start..headers_end];
+            write_sector_with_crc32(buf.borrow_mut().as_mut_slice(), headers);
 
             self.channel
                 .add_write(sector, 1, buf.clone(), req.stripe_id);
@@ -226,13 +237,7 @@ impl MetadataFlusher {
             // The kernel never received the SQEs, so no completions will
             // arrive. Revert all entries we just added to avoid permanently
             // blocking the affected sectors.
-            for stripe_id in newly_added {
-                if let Some(status) = self.header_updates.remove(&stripe_id) {
-                    self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
-                    self.buffer_pool.return_buffer(&status.buffer);
-                    self.sectors_being_updated.remove(&status.sector);
-                }
-            }
+            self.cleanup_failed_submission(&newly_added, true);
         }
     }
 }
@@ -387,7 +392,7 @@ mod tests {
         assert!(shared_state.stripe_fetched(5));
 
         // Now try to set stripe 5 as written, but inject a failure.
-        // Stripe 5 is in sector group 0 (stripe 5 / 512 = 0), sector 1.
+        // Stripe 5 is in sector group 0 (stripe 5 / 508 = 0), sector 1.
         metadata_flusher.set_stripe_written(5);
         metadata_dev
             .fail_next

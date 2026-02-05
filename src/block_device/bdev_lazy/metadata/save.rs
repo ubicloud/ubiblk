@@ -40,7 +40,7 @@ impl UbiMetadata {
 
         let buf = shared_buffer(total_size);
 
-        self.write_to_buf(&mut buf.borrow_mut().as_mut_slice()[..metadata_size]);
+        self.write_to_buf(&mut buf.borrow_mut().as_mut_slice()[..metadata_size])?;
 
         let timeout = std::time::Duration::from_secs(30);
 

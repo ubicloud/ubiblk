@@ -13,6 +13,7 @@ pub struct TestDeviceMetrics {
 struct TestIoChannel {
     mem: Arc<RwLock<Vec<u8>>>,
     fail_next: Arc<AtomicBool>,
+    fail_submit: Arc<AtomicBool>,
     finished_requests: Vec<(usize, bool)>,
     metrics: Arc<RwLock<TestDeviceMetrics>>,
 }
@@ -80,6 +81,15 @@ impl IoChannel for TestIoChannel {
     }
 
     fn submit(&mut self) -> Result<()> {
+        if self
+            .fail_submit
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.finished_requests.clear();
+            return Err(crate::ubiblk_error!(IoError {
+                source: std::io::Error::other("injected submit failure"),
+            }));
+        }
         Ok(())
     }
 
@@ -97,6 +107,7 @@ pub struct TestBlockDevice {
     pub mem: Arc<RwLock<Vec<u8>>>,
     pub metrics: Arc<RwLock<TestDeviceMetrics>>,
     pub fail_next: Arc<AtomicBool>,
+    pub fail_submit: Arc<AtomicBool>,
 }
 
 impl TestBlockDevice {
@@ -108,6 +119,7 @@ impl TestBlockDevice {
         let sector_count = size / SECTOR_SIZE as u64;
         let mem = Arc::new(RwLock::new(vec![0u8; size as usize]));
         let fail_next = Arc::new(AtomicBool::new(false));
+        let fail_submit = Arc::new(AtomicBool::new(false));
         TestBlockDevice {
             sector_count,
             mem,
@@ -117,6 +129,7 @@ impl TestBlockDevice {
                 flushes: 0,
             })),
             fail_next,
+            fail_submit,
         }
     }
 
@@ -146,6 +159,7 @@ impl BlockDevice for TestBlockDevice {
             finished_requests: Vec::new(),
             metrics: self.metrics.clone(),
             fail_next: self.fail_next.clone(),
+            fail_submit: self.fail_submit.clone(),
         }))
     }
 
@@ -159,6 +173,7 @@ impl BlockDevice for TestBlockDevice {
             mem: self.mem.clone(),
             metrics: self.metrics.clone(),
             fail_next: self.fail_next.clone(),
+            fail_submit: self.fail_submit.clone(),
         })
     }
 }

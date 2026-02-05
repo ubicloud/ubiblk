@@ -34,6 +34,8 @@ struct HeaderUpdateStatus {
     stage: RequestStage,
     stripe_id: usize,
     header: u8,
+    /// The specific flag bit(s) added by this request, used to revert on failure.
+    requested_bitmask: u8,
     sector: u64,
 }
 
@@ -113,6 +115,10 @@ impl MetadataFlusher {
                 }
                 (Some(status), false) => {
                     error!("Failed to write metadata for stripe {stripe_id}");
+                    // Revert only the specific flag bit we added, so a future
+                    // retry for the same operation won't be skipped by the
+                    // dedup check in start_writes.
+                    self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
                     self.buffer_pool.return_buffer(&status.buffer);
                     self.sectors_being_updated.remove(&status.sector);
                     self.header_updates.remove(&stripe_id);
@@ -180,6 +186,7 @@ impl MetadataFlusher {
                     stage: RequestStage::Writing,
                     stripe_id: req.stripe_id,
                     header: self.metadata.stripe_headers[req.stripe_id],
+                    requested_bitmask,
                     sector,
                 },
             );
@@ -292,6 +299,72 @@ mod tests {
                 assert!(!shared_state.stripe_written(stripe_id));
             }
         }
+    }
+
+    #[test]
+    fn test_write_failure_allows_retry() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // Queue a fetched request and inject a write failure
+        metadata_flusher.set_stripe_fetched(5);
+        metadata_dev
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // First update: start_writes issues add_write (which fails), poll_channel sees failure
+        metadata_flusher.update();
+
+        // Stripe 5 should NOT be marked fetched in shared state
+        assert!(!shared_state.stripe_fetched(5));
+        // Flusher should not be busy (failure was handled, no pending requests)
+        assert!(!metadata_flusher.busy());
+
+        // Retry: queue the same request again - should NOT be skipped by dedup
+        metadata_flusher.set_stripe_fetched(5);
+        wait_for_completion(&mut metadata_flusher);
+
+        // Now it should succeed
+        assert!(shared_state.stripe_fetched(5));
+    }
+
+    #[test]
+    fn test_write_failure_does_not_affect_other_stripes() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // First, successfully set stripe 5 as fetched
+        metadata_flusher.set_stripe_fetched(5);
+        wait_for_completion(&mut metadata_flusher);
+        assert!(shared_state.stripe_fetched(5));
+
+        // Now try to set stripe 5 as written, but inject a failure.
+        // Stripe 5 is in sector group 0 (stripe 5 / 512 = 0), sector 1.
+        metadata_flusher.set_stripe_written(5);
+        metadata_dev
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        metadata_flusher.update();
+
+        // The written flag should NOT be set, but fetched should still be set
+        assert!(shared_state.stripe_fetched(5));
+        assert!(!shared_state.stripe_written(5));
+
+        // Retry written - should succeed
+        metadata_flusher.set_stripe_written(5);
+        wait_for_completion(&mut metadata_flusher);
+        assert!(shared_state.stripe_written(5));
+        assert!(shared_state.stripe_fetched(5));
     }
 
     #[test]

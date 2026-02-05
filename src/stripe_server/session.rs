@@ -67,7 +67,7 @@ impl StripeServerSession {
 
         let metadata_size = self.metadata.metadata_size();
         let mut metadata_buf = vec![0u8; metadata_size];
-        self.metadata.write_to_buf(&mut metadata_buf);
+        self.metadata.write_to_buf(&mut metadata_buf)?;
 
         self.stream.write_all(&[STATUS_OK])?;
         let metadata_size_bytes = (metadata_size as u64).to_le_bytes();
@@ -219,7 +219,9 @@ mod tests {
 
         let metadata_size = metadata.metadata_size();
         let mut metadata_buf = vec![0u8; metadata_size];
-        metadata.write_to_buf(&mut metadata_buf);
+        metadata
+            .write_to_buf(&mut metadata_buf)
+            .expect("write to buffer");
 
         let mut expected = vec![STATUS_OK];
         expected.extend_from_slice(&(metadata_size as u64).to_le_bytes());

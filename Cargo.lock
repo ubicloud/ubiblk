@@ -3633,6 +3633,7 @@ dependencies = [
  "bindgen 0.72.1",
  "ciborium",
  "clap",
+ "crc32fast",
  "crossbeam-channel",
  "ctrlc",
  "env_logger",

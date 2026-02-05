@@ -495,6 +495,15 @@ mod tests {
     }
 
     #[test]
+    fn test_archive_stripe_source_zstd_encrypted() {
+        do_test_archive_stripe_source(
+            true,
+            KeyEncryptionCipher::default(),
+            ArchiveCompressionAlgorithm::Zstd { level: 3 },
+        );
+    }
+
+    #[test]
     fn test_errors_on_empty_source() {
         let store = Box::new(MemStore::new());
         let kek = KeyEncryptionCipher::default();
@@ -658,5 +667,81 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("failed to parse stripe-mapping"));
+    }
+
+    #[test]
+    fn test_errors_when_zstd_level_missing() {
+        let mut store = MemStore::new();
+        let hmac_key = [0x33u8; 32];
+        let stripe_mapping =
+            crate::archive::serialize_stripe_mapping(&StripeContentMap::new(), &hmac_key, None)
+                .unwrap();
+        let hmac_key_b64 = STANDARD.encode(hmac_key);
+        store
+            .put_object(
+                "metadata.json",
+                serde_json::to_string(&serde_json::json!({
+                    "format_version": 1,
+                    "stripe_sector_count": 16,
+                    "encryption_key": null,
+                    "compression": { "zstd": {} },
+                    "hmac_key": hmac_key_b64
+                }))
+                .unwrap()
+                .as_bytes(),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        store
+            .put_object("stripe-mapping", &stripe_mapping, Duration::from_secs(5))
+            .unwrap();
+
+        let result = ArchiveStripeSource::new(Box::new(store), KeyEncryptionCipher::default());
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("missing field `level`"));
+    }
+
+    #[test]
+    fn test_errors_when_zstd_level_invalid() {
+        let mut store = MemStore::new();
+        let hmac_key = [0x44u8; 32];
+        let stripe_mapping =
+            crate::archive::serialize_stripe_mapping(&StripeContentMap::new(), &hmac_key, None)
+                .unwrap();
+        let hmac_key_b64 = STANDARD.encode(hmac_key);
+        store
+            .put_object(
+                "metadata.json",
+                serde_json::to_string(&serde_json::json!({
+                    "format_version": 1,
+                    "stripe_sector_count": 16,
+                    "encryption_key": null,
+                    "compression": {
+                        "zstd": {
+                            "level": 2147483648i64
+                        }
+                    },
+                    "hmac_key": hmac_key_b64,
+                }))
+                .unwrap()
+                .as_bytes(),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        store
+            .put_object("stripe-mapping", &stripe_mapping, Duration::from_secs(5))
+            .unwrap();
+
+        let result = ArchiveStripeSource::new(Box::new(store), KeyEncryptionCipher::default());
+        assert!(result.is_err());
+        let error = result.err().unwrap().to_string();
+        assert!(
+            error.contains("invalid value") && error.contains("i32"),
+            "unexpected error: {error}"
+        );
     }
 }

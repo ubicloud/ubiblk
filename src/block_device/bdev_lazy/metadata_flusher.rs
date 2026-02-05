@@ -120,7 +120,13 @@ impl MetadataFlusher {
                     // retry for the same operation won't be skipped by the
                     // dedup check in start_writes.
                     self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
-                    self.buffer_pool.return_buffer(&status.buffer);
+                    // Only return the buffer if it hasn't already been returned.
+                    // On write success the buffer is returned before transitioning
+                    // to Flushing, so a subsequent flush failure must not return
+                    // it a second time.
+                    if status.stage == RequestStage::Writing {
+                        self.buffer_pool.return_buffer(&status.buffer);
+                    }
                     self.sectors_being_updated.remove(&status.sector);
                     self.header_updates.remove(&stripe_id);
                 }
@@ -457,6 +463,75 @@ mod tests {
         assert!(!metadata_flusher.busy());
 
         // Retry: queue the same request again - should NOT be blocked
+        metadata_flusher.set_stripe_fetched(5);
+        wait_for_completion(&mut metadata_flusher);
+
+        // Now it should succeed
+        assert!(shared_state.stripe_fetched(5));
+    }
+
+    #[test]
+    fn test_flush_failure_no_double_buffer_return() {
+        // Regression: when a write succeeds and the subsequent flush fails,
+        // the error handler must NOT return the buffer a second time (it was
+        // already returned when transitioning to Flushing).
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // Queue a request and let the write complete normally
+        metadata_flusher.set_stripe_fetched(5);
+        metadata_flusher.start_writes();
+
+        // Set fail_next so that add_flush() (called when poll_channel
+        // processes the write completion) will enqueue a flush failure.
+        metadata_dev
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        metadata_flusher.poll_channel();
+
+        // Now poll_channel again to process the flush failure.
+        // Without the fix this panics due to double buffer return.
+        metadata_flusher.poll_channel();
+
+        // Stripe 5 should NOT be marked fetched (flush failed)
+        assert!(!shared_state.stripe_fetched(5));
+        // Flusher should not be busy (failure was cleaned up)
+        assert!(!metadata_flusher.busy());
+    }
+
+    #[test]
+    fn test_flush_failure_allows_retry() {
+        // After a flush failure, the same stripe operation can be retried
+        // and should succeed.
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // Queue a request and let the write complete normally
+        metadata_flusher.set_stripe_fetched(5);
+        metadata_flusher.start_writes();
+
+        // Inject flush failure
+        metadata_dev
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        metadata_flusher.poll_channel();
+        metadata_flusher.poll_channel();
+
+        // Verify the failure state
+        assert!(!shared_state.stripe_fetched(5));
+        assert!(!metadata_flusher.busy());
+
+        // Retry: queue the same request again - should NOT be skipped by dedup
         metadata_flusher.set_stripe_fetched(5);
         wait_for_completion(&mut metadata_flusher);
 

@@ -116,6 +116,41 @@ pub struct DeviceConfig {
 impl DeviceConfig {
     #[allow(deprecated)]
     fn validate(&self) -> crate::Result<()> {
+        // Bounds on resource-controlling fields to prevent OOM, thread exhaustion,
+        // and division-by-zero from misconfigured or malicious configs.
+        if self.num_queues == 0 || self.num_queues > 256 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "num_queues {} is out of range (must be 1..=256)",
+                    self.num_queues
+                ),
+            }));
+        }
+        if self.queue_size == 0 || self.queue_size > 65536 || !self.queue_size.is_power_of_two() {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "queue_size {} is invalid (must be a non-zero power of two, max 65536)",
+                    self.queue_size
+                ),
+            }));
+        }
+        if self.seg_size_max == 0 || self.seg_size_max > 1_048_576 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "seg_size_max {} is out of range (must be 1..=1048576)",
+                    self.seg_size_max
+                ),
+            }));
+        }
+        if self.seg_count_max == 0 || self.seg_count_max > 256 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "seg_count_max {} is out of range (must be 1..=256)",
+                    self.seg_count_max
+                ),
+            }));
+        }
+
         if self.image_path.is_some() && self.stripe_source.is_some() {
             return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "Only one stripe source may be specified".to_string(),
@@ -576,5 +611,151 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Failed to read device config file"));
+    }
+
+    #[test]
+    fn test_num_queues_zero_rejected() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        num_queues: 0
+        "#;
+        let result = DeviceConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("num_queues 0 is out of range"));
+    }
+
+    #[test]
+    fn test_num_queues_too_large_rejected() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        num_queues: 999999
+        "#;
+        let result = DeviceConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("num_queues 999999 is out of range"));
+    }
+
+    #[test]
+    fn test_num_queues_max_accepted() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        num_queues: 256
+        "#;
+        let config = DeviceConfig::load_from_str(yaml).unwrap();
+        assert_eq!(config.num_queues, 256);
+    }
+
+    #[test]
+    fn test_queue_size_zero_rejected() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        queue_size: 0
+        "#;
+        let result = DeviceConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("queue_size 0 is invalid"));
+    }
+
+    #[test]
+    fn test_queue_size_not_power_of_two_rejected() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        queue_size: 30
+        "#;
+        let result = DeviceConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("queue_size 30 is invalid"));
+    }
+
+    #[test]
+    fn test_queue_size_too_large_rejected() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        queue_size: 131072
+        "#;
+        let result = DeviceConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("queue_size 131072 is invalid"));
+    }
+
+    #[test]
+    fn test_queue_size_max_accepted() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        queue_size: 65536
+        "#;
+        let config = DeviceConfig::load_from_str(yaml).unwrap();
+        assert_eq!(config.queue_size, 65536);
+    }
+
+    #[test]
+    fn test_seg_size_max_zero_rejected() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        seg_size_max: 0
+        "#;
+        let result = DeviceConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("seg_size_max 0 is out of range"));
+    }
+
+    #[test]
+    fn test_seg_size_max_too_large_rejected() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        seg_size_max: 2000000
+        "#;
+        let result = DeviceConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("seg_size_max 2000000 is out of range"));
+    }
+
+    #[test]
+    fn test_seg_count_max_zero_rejected() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        seg_count_max: 0
+        "#;
+        let result = DeviceConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("seg_count_max 0 is out of range"));
+    }
+
+    #[test]
+    fn test_seg_count_max_too_large_rejected() {
+        let yaml = r#"
+        path: "/path/to/disk"
+        seg_count_max: 1000
+        "#;
+        let result = DeviceConfig::load_from_str(yaml);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("seg_count_max 1000 is out of range"));
     }
 }

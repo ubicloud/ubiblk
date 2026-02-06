@@ -1,0 +1,165 @@
+# TLA+ to Rust Code Mapping Manifest
+#
+# Used by scripts/check-tla-drift.py to detect when Rust code changes
+# might invalidate TLA+ models. Each section declares a relationship
+# between a TLA+ spec and the Rust source files it models.
+#
+# Paths are relative to the ubiblk repo root.
+
+# ============================================================
+# Spec-to-file mappings
+# ============================================================
+
+[[mapping]]
+tla_spec = "MetadataDurability.tla"
+description = "Safety: durability-before-visibility with crash model"
+rust_files = [
+    "src/block_device/bdev_lazy/metadata/shared_state.rs",
+    "src/block_device/bdev_lazy/stripe_fetcher.rs",
+    "src/block_device/bdev_lazy/metadata_flusher.rs",
+    "src/block_device/bdev_lazy/bgworker.rs",
+    "src/block_device/bdev_lazy/metadata/types.rs",
+]
+
+[[mapping]]
+tla_spec = "LivenessSpec.tla"
+description = "Liveness: P7/P8 request completion under fairness"
+rust_files = [
+    "src/block_device/bdev_lazy/metadata/shared_state.rs",
+    "src/block_device/bdev_lazy/stripe_fetcher.rs",
+    "src/block_device/bdev_lazy/metadata_flusher.rs",
+    "src/block_device/bdev_lazy/bgworker.rs",
+    "src/block_device/bdev_lazy/device.rs",
+]
+
+[[mapping]]
+tla_spec = "LivenessMixed.tla"
+description = "Liveness with non-deterministic I/O (demonstrates no-rollback bug)"
+rust_files = [
+    "src/block_device/bdev_lazy/metadata/shared_state.rs",
+    "src/block_device/bdev_lazy/stripe_fetcher.rs",
+    "src/block_device/bdev_lazy/metadata_flusher.rs",
+    "src/block_device/bdev_lazy/bgworker.rs",
+    "src/block_device/bdev_lazy/device.rs",
+]
+
+[[mapping]]
+tla_spec = "MetadataLiveness.tla"
+description = "Full safety + liveness with crashes and fairness"
+rust_files = [
+    "src/block_device/bdev_lazy/metadata/shared_state.rs",
+    "src/block_device/bdev_lazy/stripe_fetcher.rs",
+    "src/block_device/bdev_lazy/metadata_flusher.rs",
+    "src/block_device/bdev_lazy/bgworker.rs",
+    "src/block_device/bdev_lazy/device.rs",
+    "src/block_device/bdev_lazy/metadata/types.rs",
+]
+
+[[mapping]]
+tla_spec = "LivenessMixedFixed.tla"
+description = "Liveness with corrected metadata failure handling"
+rust_files = [
+    "src/block_device/bdev_lazy/metadata/shared_state.rs",
+    "src/block_device/bdev_lazy/stripe_fetcher.rs",
+    "src/block_device/bdev_lazy/metadata_flusher.rs",
+    "src/block_device/bdev_lazy/bgworker.rs",
+    "src/block_device/bdev_lazy/device.rs",
+]
+
+[[mapping]]
+tla_spec = "GuestFlushDurability.tla"
+description = "Safety: P5 guest flush durability across crashes"
+rust_files = [
+    "src/block_device/bdev_lazy/metadata/shared_state.rs",
+    "src/block_device/bdev_lazy/stripe_fetcher.rs",
+    "src/block_device/bdev_lazy/metadata_flusher.rs",
+    "src/block_device/bdev_lazy/bgworker.rs",
+    "src/block_device/bdev_lazy/device.rs",
+    "src/block_device/bdev_lazy/metadata/types.rs",
+]
+
+[[mapping]]
+tla_spec = "StripeStateTransitions.tla"
+description = "State machine monotonicity and terminal stability"
+rust_files = [
+    "src/block_device/bdev_lazy/metadata/shared_state.rs",
+    "src/block_device/bdev_lazy/stripe_fetcher.rs",
+    "src/block_device/bdev_lazy/metadata/types.rs",
+]
+
+# ============================================================
+# Constants: TLA+ values that must match Rust code
+# ============================================================
+
+[[constant]]
+tla_name = "MAX_RETRIES"
+tla_value = "3"
+rust_file = "src/block_device/bdev_lazy/stripe_fetcher.rs"
+rust_pattern = "MAX_FETCH_RETRIES.*=\\s*(\\d+)"
+description = "Max fetch retry count per stripe"
+specs = ["MetadataDurability.tla", "LivenessSpec.tla", "LivenessMixed.tla", "MetadataLiveness.tla", "LivenessMixedFixed.tla", "StripeStateTransitions.tla"]
+
+# ============================================================
+# Enums: state value mappings between TLA+ and Rust
+# ============================================================
+
+[[enum]]
+name = "FetchState"
+tla_values = ["NotFetched=0", "Fetched=1", "Failed=2", "NoSource=3"]
+rust_file = "src/block_device/bdev_lazy/metadata/shared_state.rs"
+rust_patterns = [
+    "\\bNotFetched:\\s*u8\\s*=\\s*(\\d+)",
+    "\\bconst Fetched:\\s*u8\\s*=\\s*(\\d+)",
+    "\\bFailed:\\s*u8\\s*=\\s*(\\d+)",
+    "\\bNoSource:\\s*u8\\s*=\\s*(\\d+)",
+]
+description = "Stripe fetch state values (AtomicU8)"
+specs = ["MetadataDurability.tla", "LivenessSpec.tla", "LivenessMixed.tla", "MetadataLiveness.tla", "LivenessMixedFixed.tla", "GuestFlushDurability.tla", "StripeStateTransitions.tla"]
+
+[[enum]]
+name = "WriteState"
+tla_values = ["NotWritten=0", "Written=1"]
+rust_file = "src/block_device/bdev_lazy/metadata/shared_state.rs"
+rust_patterns = [
+    "\\bNotWritten:\\s*u8\\s*=\\s*(\\d+)",
+    "\\bconst Written:\\s*u8\\s*=\\s*(\\d+)",
+]
+description = "Stripe write state values (AtomicU8)"
+specs = ["MetadataDurability.tla", "MetadataLiveness.tla", "GuestFlushDurability.tla", "StripeStateTransitions.tla"]
+
+[[enum]]
+name = "MetadataFlags"
+tla_values = ["FETCHED=1", "WRITTEN=2", "HAS_SOURCE=4"]
+rust_file = "src/block_device/bdev_lazy/metadata/types.rs"
+rust_patterns = [
+    "\\bconst FETCHED:\\s*u8\\s*=\\s*1\\s*<<\\s*(\\d+)",
+    "\\bconst WRITTEN:\\s*u8\\s*=\\s*1\\s*<<\\s*(\\d+)",
+    "\\bconst HAS_SOURCE:\\s*u8\\s*=\\s*1\\s*<<\\s*(\\d+)",
+]
+description = "Metadata header flag bits"
+specs = ["MetadataDurability.tla", "MetadataLiveness.tla", "GuestFlushDurability.tla", "StripeStateTransitions.tla"]
+
+# ============================================================
+# Ordering: memory ordering constraints that must be preserved
+# ============================================================
+
+[[ordering]]
+name = "fetch_state_publish"
+description = "Fetch state publish uses AcqRel swap (durability-before-visibility)"
+rust_file = "src/block_device/bdev_lazy/metadata/shared_state.rs"
+rust_pattern = "\\.swap\\(Fetched.*Ordering::AcqRel\\)"
+specs = ["MetadataDurability.tla", "StripeStateTransitions.tla"]
+
+[[ordering]]
+name = "fetch_state_fail"
+description = "Failed state uses Release store"
+rust_file = "src/block_device/bdev_lazy/metadata/shared_state.rs"
+rust_pattern = "\\.store\\(Failed.*Ordering::Release\\)"
+specs = ["StripeStateTransitions.tla"]
+
+[[ordering]]
+name = "write_state_publish"
+description = "Write state publish uses Release store"
+rust_file = "src/block_device/bdev_lazy/metadata/shared_state.rs"
+rust_pattern = "\\.store\\(Written.*Ordering::Release\\)"
+specs = ["StripeStateTransitions.tla"]

@@ -1,0 +1,69 @@
+name: TLA+ Model Checking
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tla/*.tla'
+      - 'tla/*.cfg'
+      - 'src/block_device/bdev_lazy/**/*.rs'
+      - 'scripts/run-tla-checks.sh'
+      - '.github/workflows/tla-model-check.yaml'
+  pull_request:
+    paths:
+      - 'tla/*.tla'
+      - 'tla/*.cfg'
+      - 'src/block_device/bdev_lazy/**/*.rs'
+      - 'scripts/run-tla-checks.sh'
+      - '.github/workflows/tla-model-check.yaml'
+  workflow_dispatch:
+  schedule:
+    # Nightly at 03:00 UTC
+    - cron: '0 3 * * *'
+
+jobs:
+  tla-model-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Cache TLA+ tools
+        uses: actions/cache@v4
+        with:
+          path: tla2tools.jar
+          key: tla2tools-v1.8.0
+
+      - name: Download TLA+ tools
+        run: |
+          if [ ! -f tla2tools.jar ]; then
+            wget -q https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+          fi
+
+      - name: Run TLC (fast configs)
+        if: github.event_name != 'schedule'
+        run: ./scripts/run-tla-checks.sh
+        env:
+          TLA2TOOLS_JAR: tla2tools.jar
+          TLA_DIR: tla
+
+      - name: Run TLC (nightly - large configs)
+        if: github.event_name == 'schedule'
+        run: ./scripts/run-tla-checks.sh --nightly
+        timeout-minutes: 30
+        env:
+          TLA2TOOLS_JAR: tla2tools.jar
+          TLA_DIR: tla
+
+      - name: Check TLA+ drift
+        run: python3 scripts/check-tla-drift.py --repo . --values-only
+        env:
+          TLA_DIR: tla

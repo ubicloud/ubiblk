@@ -7,7 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(30);
-pub const ARCHIVE_FORMAT_VERSION: u32 = 1;
+pub const ARCHIVE_FORMAT_VERSION: u32 = 2;
 pub const ARCHIVE_FORMAT_VERSION_MIN: u32 = 1;
 pub const ARCHIVE_FORMAT_VERSION_MAX: u32 = ARCHIVE_FORMAT_VERSION;
 
@@ -80,6 +80,8 @@ pub enum ArchiveCompressionAlgorithm {
     },
 }
 
+const METADATA_HMAC_DOMAIN: &[u8] = b"ubiblk-archive-metadata";
+
 /// Representation of `metadata.json` stored alongside archived stripes.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ArchiveMetadata {
@@ -102,6 +104,60 @@ pub struct ArchiveMetadata {
         serialize_with = "encode_key"
     )]
     pub hmac_key: Vec<u8>,
+    /// HMAC-SHA256 tag over all metadata fields (v2+). Absent in v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_hmac: Option<String>,
+}
+
+/// Build the canonical byte string for metadata HMAC computation.
+/// Covers: domain || format_version || stripe_sector_count || compression_json || encryption_key_bytes || hmac_key_bytes
+fn metadata_hmac_input(metadata: &ArchiveMetadata) -> Vec<u8> {
+    let compression_json = serde_json::to_string(&metadata.compression)
+        .expect("compression serialization cannot fail");
+    let encryption_key_bytes: Vec<u8> = match &metadata.encryption_key {
+        Some((a, b)) => {
+            let mut v = Vec::with_capacity(a.len() + b.len());
+            v.extend_from_slice(a);
+            v.extend_from_slice(b);
+            v
+        }
+        None => Vec::new(),
+    };
+    let mut data = Vec::new();
+    data.extend_from_slice(METADATA_HMAC_DOMAIN);
+    data.extend_from_slice(&metadata.format_version.to_le_bytes());
+    data.extend_from_slice(&metadata.stripe_sector_count.to_le_bytes());
+    data.extend_from_slice(compression_json.as_bytes());
+    data.extend_from_slice(&encryption_key_bytes);
+    data.extend_from_slice(&metadata.hmac_key);
+    data
+}
+
+/// Compute the metadata HMAC tag for a v2 archive.
+pub fn compute_metadata_hmac(hmac_key: &[u8], metadata: &ArchiveMetadata) -> Result<String> {
+    let input = metadata_hmac_input(metadata);
+    let tag = compute_manifest_hmac_tag(hmac_key, &input)?;
+    Ok(hex::encode(tag))
+}
+
+/// Verify the metadata HMAC tag. Returns Ok(()) on match, Err on mismatch.
+pub fn verify_metadata_hmac(
+    hmac_key: &[u8],
+    metadata: &ArchiveMetadata,
+    tag_hex: &str,
+) -> Result<()> {
+    let input = metadata_hmac_input(metadata);
+    let tag_bytes = hex::decode(tag_hex).map_err(|e| {
+        crate::ubiblk_error!(MetadataError {
+            description: format!("invalid metadata HMAC hex encoding: {e}"),
+        })
+    })?;
+    verify_manifest_hmac_tag(hmac_key, &input, &tag_bytes).map_err(|_| {
+        crate::ubiblk_error!(MetadataError {
+            description: "metadata HMAC verification failed: metadata may have been tampered with"
+                .to_string(),
+        })
+    })
 }
 
 impl std::fmt::Debug for ArchiveMetadata {

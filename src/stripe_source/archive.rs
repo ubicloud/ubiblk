@@ -36,7 +36,7 @@ pub struct ArchiveStripeSource {
 impl ArchiveStripeSource {
     #[error_context("Failed to create ArchiveStripeSource")]
     pub fn new(mut store: Box<dyn ArchiveStore>, kek: KeyEncryptionCipher) -> Result<Self> {
-        let metadata: ArchiveMetadata = Self::fetch_metadata(store.as_mut())?;
+        let metadata: ArchiveMetadata = Self::fetch_metadata(store.as_mut(), &kek)?;
         let hmac_key = Self::decrypt_hmac_key(&metadata, &kek)?;
         let xts_cipher = match metadata.encryption_key {
             None => None,
@@ -61,7 +61,10 @@ impl ArchiveStripeSource {
     }
 
     #[error_context("Failed to fetch archive metadata")]
-    fn fetch_metadata(store: &mut dyn ArchiveStore) -> Result<ArchiveMetadata> {
+    fn fetch_metadata(
+        store: &mut dyn ArchiveStore,
+        kek: &KeyEncryptionCipher,
+    ) -> Result<ArchiveMetadata> {
         let bytes = store.get_object("metadata.json", DEFAULT_ARCHIVE_TIMEOUT)?;
         let metadata: ArchiveMetadata = serde_json::from_slice(&bytes).map_err(|e| {
             crate::ubiblk_error!(MetadataError {
@@ -69,7 +72,36 @@ impl ArchiveStripeSource {
             })
         })?;
         validate_format_version(metadata.format_version)?;
+        Self::verify_metadata_integrity(&metadata, kek)?;
         Ok(metadata)
+    }
+
+    fn verify_metadata_integrity(
+        metadata: &ArchiveMetadata,
+        kek: &KeyEncryptionCipher,
+    ) -> Result<()> {
+        if metadata.format_version >= 2 {
+            let tag_hex = metadata.metadata_hmac.as_deref().ok_or_else(|| {
+                crate::ubiblk_error!(MetadataError {
+                    description: "v2 metadata missing metadata_hmac field".to_string(),
+                })
+            })?;
+            let hmac_key = Self::decrypt_hmac_key(metadata, kek)?;
+            let hmac_key = hmac_key.ok_or_else(|| {
+                crate::ubiblk_error!(MetadataError {
+                    description: "missing HMAC key for metadata verification".to_string(),
+                })
+            })?;
+            let mut verification_metadata = metadata.clone();
+            verification_metadata.metadata_hmac = None;
+            crate::archive::verify_metadata_hmac(&hmac_key, &verification_metadata, tag_hex)?;
+        } else {
+            log::warn!(
+                "Loading v1 archive metadata without integrity protection. \
+                 Re-archive to upgrade to v2 format with metadata HMAC."
+            );
+        }
+        Ok(())
     }
 
     #[error_context("Failed to fetch stripe hashes")]
@@ -554,7 +586,7 @@ mod tests {
             .err()
             .unwrap()
             .to_string()
-            .contains("unsupported archive format version 99 (supported 1..=1)"));
+            .contains("unsupported archive format version 99 (supported 1..=2)"));
     }
 
     #[test]
@@ -741,6 +773,187 @@ mod tests {
         assert!(
             error.contains("invalid value") && error.contains("i32"),
             "unexpected error: {error}"
+        );
+    }
+
+    /// Helper: archive some data, then return the raw metadata.json bytes
+    /// alongside the store (for tampering tests).
+    fn archive_and_get_metadata(
+        kek: KeyEncryptionCipher,
+    ) -> (Box<MemStore>, Vec<u8>, KeyEncryptionCipher) {
+        let mut setup = prep(
+            4,
+            2,
+            false,
+            &[0, 2],
+            kek.clone(),
+            ArchiveCompressionAlgorithm::None,
+        );
+        setup.archiver.archive_all().unwrap();
+        let metadata_bytes = setup
+            .store
+            .get_object("metadata.json", Duration::from_secs(5))
+            .unwrap();
+        (setup.store, metadata_bytes, kek)
+    }
+
+    fn tamper_metadata_field(
+        metadata_bytes: &[u8],
+        field: &str,
+        new_value: serde_json::Value,
+    ) -> Vec<u8> {
+        let mut metadata: serde_json::Value = serde_json::from_slice(metadata_bytes).unwrap();
+        metadata[field] = new_value;
+        serde_json::to_vec(&metadata).unwrap()
+    }
+
+    #[test]
+    fn test_v2_metadata_hmac_present() {
+        let kek = KeyEncryptionCipher::default();
+        let (_, metadata_bytes, _) = archive_and_get_metadata(kek);
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata_bytes).unwrap();
+        assert_eq!(metadata["format_version"], 2);
+        assert!(metadata["metadata_hmac"].is_string());
+    }
+
+    #[test]
+    fn test_tampered_stripe_sector_count_rejected() {
+        let kek = KeyEncryptionCipher::default();
+        let (mut store, metadata_bytes, kek) = archive_and_get_metadata(kek);
+        let tampered = tamper_metadata_field(
+            &metadata_bytes,
+            "stripe_sector_count",
+            serde_json::json!(999),
+        );
+        store
+            .put_object("metadata.json", &tampered, Duration::from_secs(5))
+            .unwrap();
+        let result = ArchiveStripeSource::new(
+            Box::new(MemStore::new_with_objects(store.objects.clone())),
+            kek,
+        );
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("metadata HMAC verification failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_tampered_compression_rejected() {
+        let kek = KeyEncryptionCipher::default();
+        let (mut store, metadata_bytes, kek) = archive_and_get_metadata(kek);
+        let tampered =
+            tamper_metadata_field(&metadata_bytes, "compression", serde_json::json!("snappy"));
+        store
+            .put_object("metadata.json", &tampered, Duration::from_secs(5))
+            .unwrap();
+        let result = ArchiveStripeSource::new(
+            Box::new(MemStore::new_with_objects(store.objects.clone())),
+            kek,
+        );
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("metadata HMAC verification failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_tampered_format_version_rejected() {
+        let kek = KeyEncryptionCipher::default();
+        let (mut store, metadata_bytes, kek) = archive_and_get_metadata(kek);
+        // Change format_version from 2 to still-valid 2 but with a different
+        // value that would pass version check — try 2 with tampered hmac
+        let mut metadata: serde_json::Value = serde_json::from_slice(&metadata_bytes).unwrap();
+        // Tamper the HMAC tag itself to simulate corruption
+        metadata["metadata_hmac"] = serde_json::json!("00".repeat(32));
+        let tampered = serde_json::to_vec(&metadata).unwrap();
+        store
+            .put_object("metadata.json", &tampered, Duration::from_secs(5))
+            .unwrap();
+        let result = ArchiveStripeSource::new(
+            Box::new(MemStore::new_with_objects(store.objects.clone())),
+            kek,
+        );
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("metadata HMAC verification failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_v2_missing_hmac_tag_rejected() {
+        let kek = KeyEncryptionCipher::default();
+        let (mut store, metadata_bytes, kek) = archive_and_get_metadata(kek);
+        let mut metadata: serde_json::Value = serde_json::from_slice(&metadata_bytes).unwrap();
+        // Remove the metadata_hmac field entirely
+        metadata.as_object_mut().unwrap().remove("metadata_hmac");
+        let tampered = serde_json::to_vec(&metadata).unwrap();
+        store
+            .put_object("metadata.json", &tampered, Duration::from_secs(5))
+            .unwrap();
+        let result = ArchiveStripeSource::new(
+            Box::new(MemStore::new_with_objects(store.objects.clone())),
+            kek,
+        );
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("v2 metadata missing metadata_hmac field"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_v1_metadata_loads_without_hmac() {
+        // Simulate a v1 archive: no metadata_hmac field
+        let mut store = MemStore::new();
+        let hmac_key = [0x55u8; 32];
+        let stripe_mapping =
+            crate::archive::serialize_stripe_mapping(&StripeContentMap::new(), &hmac_key, None)
+                .unwrap();
+        let hmac_key_b64 = STANDARD.encode(hmac_key);
+        store
+            .put_object(
+                "metadata.json",
+                format!(
+                    r#"{{"format_version":1,"stripe_sector_count":16,"encryption_key":null,"hmac_key":"{}"}}"#,
+                    hmac_key_b64
+                )
+                .as_bytes(),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        store
+            .put_object("stripe-mapping", &stripe_mapping, Duration::from_secs(5))
+            .unwrap();
+        // v1 should load successfully (with deprecation warning)
+        let result = ArchiveStripeSource::new(Box::new(store), KeyEncryptionCipher::default());
+        assert!(
+            result.is_ok(),
+            "v1 metadata should load: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_untampered_v2_archive_loads() {
+        let kek = KeyEncryptionCipher::default();
+        let (store, _, kek) = archive_and_get_metadata(kek);
+        // Load from the untampered store — should succeed
+        let result = ArchiveStripeSource::new(
+            Box::new(MemStore::new_with_objects(store.objects.clone())),
+            kek,
+        );
+        assert!(
+            result.is_ok(),
+            "untampered v2 should load: {:?}",
+            result.err()
         );
     }
 }

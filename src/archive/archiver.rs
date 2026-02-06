@@ -296,13 +296,16 @@ impl StripeArchiver {
             None
         };
         let hmac_key = self.kek.encrypt_key_data(&self.hmac_key)?;
-        let archive_metadata = ArchiveMetadata {
+        let mut archive_metadata = ArchiveMetadata {
             format_version: ARCHIVE_FORMAT_VERSION,
             stripe_sector_count: self.metadata.stripe_sector_count(),
             encryption_key,
             compression: self.compression.clone(),
             hmac_key,
+            metadata_hmac: None,
         };
+        let tag = crate::archive::compute_metadata_hmac(&self.hmac_key, &archive_metadata)?;
+        archive_metadata.metadata_hmac = Some(tag);
         Ok(archive_metadata)
     }
 }

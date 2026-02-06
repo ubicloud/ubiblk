@@ -52,7 +52,7 @@ impl StripeSourceBuilder {
                     return Ok(Box::new(stripe_source));
                 }
                 StripeSourceConfig::Remote { config } => {
-                    let client = connect_to_stripe_server(&config)?;
+                    let client = connect_to_stripe_server(&config, false)?;
                     let stripe_source =
                         RemoteStripeSource::new(Box::new(client), self.stripe_sector_count)?;
                     return Ok(Box::new(stripe_source));

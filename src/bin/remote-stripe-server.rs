@@ -22,6 +22,10 @@ struct Args {
     /// Config YAML file containing listening address and PSK details.
     #[arg(long = "listen-config", value_name = "CONFIG_YAML")]
     listen_config_path: std::path::PathBuf,
+
+    /// Allow running without PSK transport encryption (plaintext TCP).
+    #[arg(long = "allow-insecure", default_value_t = false)]
+    allow_insecure: bool,
 }
 
 fn main() {
@@ -39,6 +43,7 @@ fn run(args: Args) -> Result<()> {
     let Args {
         common,
         listen_config_path,
+        allow_insecure,
     } = args;
 
     let (config, kek) = load_config_and_kek(&common)?;
@@ -53,6 +58,10 @@ fn run(args: Args) -> Result<()> {
         .transpose()?;
 
     if psk.is_none() {
+        if !allow_insecure {
+            error!("No PSK credentials configured and --allow-insecure not set. Refusing to start without transport encryption.");
+            std::process::exit(1);
+        }
         warn!("No PSK credentials configured — stripe server running WITHOUT transport encryption. All data will be transmitted in plaintext.");
     }
 

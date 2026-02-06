@@ -13,11 +13,13 @@ responds to requests from remote clients.
 **Usage:**
 ```bash
 remote-stripe-server --config <CONFIG_YAML> --listen-config <LISTEN_CONFIG_YAML> \
-  [--kek <KEK_FILE>] [--unlink-kek]
+  [--kek <KEK_FILE>] [--unlink-kek] [--allow-insecure]
 ```
 
 **Notes:**
 - `--listen-config` supplies the bind address and optional PSK credentials.
+- Without PSK credentials, the server refuses to start unless `--allow-insecure`
+  is passed. This is a safety measure to prevent accidental plaintext deployments.
 
 ### `remote-stripe-shell`
 
@@ -27,7 +29,7 @@ server.
 **Usage:**
 ```bash
 remote-stripe-shell --server-config <SERVER_CONFIG_YAML> \
-  [--kek <KEK_FILE>] [--unlink-kek]
+  [--kek <KEK_FILE>] [--unlink-kek] [--allow-insecure]
 ```
 
 ### Listen/Server config format
@@ -60,10 +62,20 @@ The protocol is a simple request/response exchange over TCP. The server only
 handles one command at a time on a connection. All multi-byte integers are
 little-endian.
 
+### Transport security
+
+By default, both `remote-stripe-server` and `remote-stripe-shell` refuse to
+operate without PSK credentials. This prevents accidental plaintext deployments.
+
+To explicitly run without transport encryption (e.g. for local testing), pass
+`--allow-insecure`. When this flag is set and no PSK is configured, a warning
+is emitted and the connection proceeds over plaintext TCP.
+
 ### Optional TLS-PSK
 
 If PSK credentials are supplied, the connection is wrapped in TLS using the
-`PSK-AES256-GCM-SHA384` cipher suite.
+`PSK-AES256-GCM-SHA384` cipher suite. The `--allow-insecure` flag is ignored
+when PSK is configured.
 
 ### Metadata request
 

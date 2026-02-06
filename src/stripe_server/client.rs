@@ -121,7 +121,10 @@ impl RemoteStripeProvider for StripeServerClient {
     }
 }
 
-pub fn connect_to_stripe_server(conf: &RemoteStripeSourceConfig) -> Result<StripeServerClient> {
+pub fn connect_to_stripe_server(
+    conf: &RemoteStripeSourceConfig,
+    allow_insecure: bool,
+) -> Result<StripeServerClient> {
     let psk = if let (Some(identity), Some(secret)) = (&conf.psk_identity, &conf.psk_secret) {
         Some(PskCredentials::new(identity.clone(), secret.clone())?)
     } else {
@@ -129,6 +132,11 @@ pub fn connect_to_stripe_server(conf: &RemoteStripeSourceConfig) -> Result<Strip
     };
 
     if psk.is_none() {
+        if !allow_insecure {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "No PSK credentials configured and allow_insecure not set. Refusing to connect without transport encryption.".to_string(),
+            }));
+        }
         warn!("No PSK credentials configured — connecting to stripe server WITHOUT transport encryption.");
     }
 
@@ -406,7 +414,22 @@ mod tests {
             psk_identity: None,
             psk_secret: None,
         };
-        let result = connect_to_stripe_server(&conf);
+        let result = connect_to_stripe_server(&conf, true);
         assert!(result.is_err());
+        let err_msg = format!("{}", result.err().unwrap());
+        assert!(err_msg.contains("Connection refused"));
+    }
+
+    #[test]
+    fn test_refuses_without_psk_and_allow_insecure() {
+        let conf = RemoteStripeSourceConfig {
+            address: "127.0.0.1:9999".to_string(),
+            psk_identity: None,
+            psk_secret: None,
+        };
+        let result = connect_to_stripe_server(&conf, false);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.err().unwrap());
+        assert!(err_msg.contains("Refusing to connect without transport encryption"));
     }
 }

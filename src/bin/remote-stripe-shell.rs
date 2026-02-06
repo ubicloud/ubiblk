@@ -27,6 +27,10 @@ struct Args {
     /// Unlink the key encryption key file after use.
     #[arg(short = 'u', long = "unlink-kek", default_value_t = false)]
     unlink_kek: bool,
+
+    /// Allow connecting without PSK transport encryption (plaintext TCP).
+    #[arg(long = "allow-insecure", default_value_t = false)]
+    allow_insecure: bool,
 }
 
 fn main() {
@@ -43,16 +47,21 @@ fn run() -> Result<()> {
         server_config_path,
         kek,
         unlink_kek,
+        allow_insecure,
     } = Args::parse();
 
     let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
     let server_config =
         RemoteStripeSourceConfig::load_from_file_with_kek(&server_config_path, &kek)?;
     if server_config.psk_identity.is_none() || server_config.psk_secret.is_none() {
+        if !allow_insecure {
+            error!("No PSK credentials configured and --allow-insecure not set. Refusing to connect without transport encryption.");
+            std::process::exit(1);
+        }
         warn!("No PSK credentials configured — connecting to stripe server WITHOUT transport encryption.");
     }
 
-    let mut client = connect_to_stripe_server(&server_config)?;
+    let mut client = connect_to_stripe_server(&server_config, allow_insecure)?;
 
     let metadata = client
         .metadata

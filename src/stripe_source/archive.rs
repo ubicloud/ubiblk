@@ -470,7 +470,6 @@ mod tests {
         let kek = KeyEncryptionCipher {
             method: crate::CipherMethod::Aes256Gcm,
             key: Some(vec![0xAB; 32]),
-            init_vector: Some(vec![0xCD; 12]),
             auth_data: Some("ubiblk_test".as_bytes().to_vec()),
         };
         do_test_archive_stripe_source(true, kek, ArchiveCompressionAlgorithm::None);

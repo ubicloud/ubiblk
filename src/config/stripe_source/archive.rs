@@ -129,7 +129,6 @@ impl ArchiveStripeSourceConfig {
         archive_kek: &mut KeyEncryptionCipher,
     ) -> crate::Result<()> {
         Self::decrypt_optional_secret(kek, &mut archive_kek.key)?;
-        Self::decrypt_optional_secret(kek, &mut archive_kek.init_vector)?;
         Self::decrypt_optional_secret(kek, &mut archive_kek.auth_data)?;
         Ok(())
     }
@@ -179,10 +178,15 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    fn encrypt_with_kek(kek_key: &[u8], iv: &[u8], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    fn encrypt_with_kek(
+        kek_key: &[u8],
+        nonce_bytes: &[u8],
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Vec<u8> {
         let cipher = Aes256Gcm::new_from_slice(kek_key).unwrap();
-        let nonce = Nonce::from_slice(iv);
-        cipher
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let ciphertext = cipher
             .encrypt(
                 nonce,
                 Payload {
@@ -190,7 +194,11 @@ mod tests {
                     aad,
                 },
             )
-            .unwrap()
+            .unwrap();
+        let mut output = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+        output.extend_from_slice(nonce_bytes);
+        output.extend_from_slice(&ciphertext);
+        output
     }
 
     #[test]
@@ -254,48 +262,45 @@ mod tests {
     #[test]
     fn test_archive_kek_decryption() {
         let kek_key = [0x11u8; 32];
-        let iv = [0x22u8; 12];
+        let key_nonce_bytes = [0x22u8; 12];
+        let aad_nonce_bytes = [0x23u8; 12];
         let aad = b"test-aad";
         let kek = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
         let archive_key = [0x33u8; 32];
-        let archive_iv = [0x44u8; 12];
         let archive_aad = b"archive-aad";
 
         let cipher = Aes256Gcm::new_from_slice(&kek_key).unwrap();
-        let nonce = Nonce::from_slice(&iv);
+        let key_nonce = Nonce::from_slice(&key_nonce_bytes);
         let enc_key = cipher
             .encrypt(
-                nonce,
+                key_nonce,
                 Payload {
                     msg: &archive_key,
                     aad,
                 },
             )
             .unwrap();
-        let enc_iv = cipher
-            .encrypt(
-                nonce,
-                Payload {
-                    msg: &archive_iv,
-                    aad,
-                },
-            )
-            .unwrap();
+        let aad_nonce = Nonce::from_slice(&aad_nonce_bytes);
         let enc_aad = cipher
             .encrypt(
-                nonce,
+                aad_nonce,
                 Payload {
                     msg: archive_aad,
                     aad,
                 },
             )
             .unwrap();
+        let mut enc_key_with_nonce = Vec::with_capacity(key_nonce_bytes.len() + enc_key.len());
+        enc_key_with_nonce.extend_from_slice(&key_nonce_bytes);
+        enc_key_with_nonce.extend_from_slice(&enc_key);
+        let mut enc_aad_with_nonce = Vec::with_capacity(aad_nonce_bytes.len() + enc_aad.len());
+        enc_aad_with_nonce.extend_from_slice(&aad_nonce_bytes);
+        enc_aad_with_nonce.extend_from_slice(&enc_aad);
 
         let yaml = format!(
             r#"
@@ -304,19 +309,16 @@ mod tests {
         archive_kek:
           method: aes256-gcm
           key: "{}"
-          init_vector: "{}"
           auth_data: "{}"
         "#,
-            STANDARD.encode(enc_key),
-            STANDARD.encode(enc_iv),
-            STANDARD.encode(enc_aad),
+            STANDARD.encode(enc_key_with_nonce),
+            STANDARD.encode(enc_aad_with_nonce),
         );
 
         let config = ArchiveStripeSourceConfig::load_from_str_with_kek(&yaml, &kek).unwrap();
         let archive_kek = config.archive_kek();
         assert_eq!(archive_kek.method, CipherMethod::Aes256Gcm);
         assert_eq!(archive_kek.key, Some(archive_key.to_vec()));
-        assert_eq!(archive_kek.init_vector, Some(archive_iv.to_vec()));
         assert_eq!(archive_kek.auth_data, Some(archive_aad.to_vec()));
     }
 
@@ -332,7 +334,6 @@ mod tests {
         let archive_kek = config.archive_kek_mut();
         archive_kek.method = CipherMethod::Aes256Gcm;
         archive_kek.key = Some(vec![0xAA; 32]);
-        archive_kek.init_vector = Some(vec![0xBB; 12]);
         archive_kek.auth_data = Some(b"kek-aad".to_vec());
 
         assert_eq!(config.archive_kek().method, CipherMethod::Aes256Gcm);
@@ -355,7 +356,6 @@ mod tests {
         let kek = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(vec![0xCC; 32]),
-            init_vector: Some(vec![0xDD; 12]),
             auth_data: Some(b"s3-aad".to_vec()),
         };
         let config = ArchiveStripeSourceConfig::S3 {
@@ -374,19 +374,18 @@ mod tests {
     #[test]
     fn test_load_from_file_with_kek_decrypts_credentials() {
         let kek_key = [0x10u8; 32];
-        let iv = [0x20u8; 12];
+        let nonce = [0x20u8; 12];
         let aad = b"cred-aad";
         let kek = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
         let access_key_plain = b"ACCESSKEY";
         let secret_key_plain = b"SECRETKEY123";
-        let enc_access_key = encrypt_with_kek(&kek_key, &iv, aad, access_key_plain);
-        let enc_secret_key = encrypt_with_kek(&kek_key, &iv, aad, secret_key_plain);
+        let enc_access_key = encrypt_with_kek(&kek_key, &nonce, aad, access_key_plain);
+        let enc_secret_key = encrypt_with_kek(&kek_key, &nonce, aad, secret_key_plain);
 
         let yaml = format!(
             r#"

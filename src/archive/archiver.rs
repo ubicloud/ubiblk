@@ -501,7 +501,6 @@ mod tests {
         let kek = KeyEncryptionCipher {
             method: crate::CipherMethod::Aes256Gcm,
             key: Some(vec![0x11; 32]),
-            init_vector: Some(vec![0x22; 12]),
             auth_data: Some(b"ubiblk_test_hmac".to_vec()),
         };
         let metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, 2, 0);

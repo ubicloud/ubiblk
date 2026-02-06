@@ -203,7 +203,6 @@ stripe_source:
   archive_kek:                       # Optional: KEK for archive encryption keys
     method: "aes256-gcm"
     key: "BASE64-ENCODED-KEY"
-    init_vector: "BASE64-ENCODED-IV"
     auth_data: "BASE64-ENCODED-AAD"
 ```
 
@@ -225,7 +224,6 @@ stripe_source:
   archive_kek:                        # Optional: KEK for archive encryption keys
     method: "aes256-gcm"
     key: "BASE64-ENCODED-KEY"
-    init_vector: "BASE64-ENCODED-IV"
     auth_data: "BASE64-ENCODED-AAD"
 ```
 
@@ -265,9 +263,12 @@ The keys in the configuration file can be encrypted using a KEK file. The KEK fi
 ```yaml
 method: "aes256-gcm"                # Encryption method (aes256-gcm or none)
 key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60=" # Base64 encoded key
-init_vector: "UEt+wI+Ldq1UgQ/P"     # Base64 encoded IV
 auth_data: "dm0zamdlejhfMA=="       # Base64 encoded auth data
 ```
+
+> **Note:** KEK-encrypted values must use the current format:
+> `[12-byte nonce || ciphertext || 16-byte tag]`. Older ciphertexts that omit
+> the nonce prefix are not supported.
 
 ## init-metadata
 

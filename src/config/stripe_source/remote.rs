@@ -261,4 +261,20 @@ mod tests {
             .to_string()
             .contains("PSK credentials must be provided unless allow_insecure is true."));
     }
+
+    #[test]
+    fn test_credential_redaction_in_debug() {
+        let config = RemoteStripeSourceConfig {
+            address: "1.2.3.4:4567".to_string(),
+            psk_identity: Some("client1".to_string()),
+            psk_secret: Some(vec![0xAA; 16]),
+            allow_insecure: false,
+        };
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("address: \"1.2.3.4:4567\""));
+        assert!(debug_str.contains("psk_identity: Some(\"client1\")"));
+        assert!(debug_str.contains("psk_secret: Some(\"[REDACTED]\")"));
+        assert!(debug_str.contains("allow_insecure: false"));
+        assert!(!debug_str.contains("170")); // 0xAA = 170
+    }
 }

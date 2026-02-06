@@ -151,3 +151,27 @@ mod mem_store;
 
 #[cfg(test)]
 pub use mem_store::MemStore;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn test_archive_metadata_debug_redaction() {
+        let metadata = ArchiveMetadata {
+            format_version: 1,
+            stripe_sector_count: 128,
+            encryption_key: Some((vec![123u8; 32], vec![234u8; 32])),
+            compression: ArchiveCompressionAlgorithm::Zstd { level: 3 },
+            hmac_key: vec![178u8; 32],
+        };
+        let debug_str = format!("{:?}", metadata);
+        assert!(debug_str.contains("format_version: 1"));
+        assert!(debug_str.contains("stripe_sector_count: 128"));
+        assert!(debug_str.contains("encryption_key: Some(\"[REDACTED]\")"));
+        assert!(debug_str.contains("compression: Zstd { level: 3 }"));
+        assert!(debug_str.contains("hmac_key: \"[REDACTED]\""));
+        assert!(!debug_str.contains("123"));
+        assert!(!debug_str.contains("234"));
+        assert!(!debug_str.contains("178"));
+    }
+}

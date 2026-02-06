@@ -175,7 +175,10 @@ impl ArchiveStripeSource {
         let mut decrypted_data = fetched_data.to_vec();
         self.maybe_decrypt(&mut decrypted_data, stripe_id)?;
 
-        let decompressed_data = self.compression.decompress(&decrypted_data)?;
+        let max_output_size = self.stripe_sector_count as usize * SECTOR_SIZE;
+        let decompressed_data = self
+            .compression
+            .decompress(&decrypted_data, max_output_size)?;
 
         let mut buf_ref = destination_buffer.borrow_mut();
         let buf = buf_ref.as_mut_slice();

@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use crate::crypt::{decode_optional_key, KeyEncryptionCipher};
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct RemoteStripeSourceConfig {
     pub address: String,
@@ -14,6 +14,20 @@ pub struct RemoteStripeSourceConfig {
     pub psk_secret: Option<Vec<u8>>,
     #[serde(default)]
     pub allow_insecure: bool,
+}
+
+impl std::fmt::Debug for RemoteStripeSourceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteStripeSourceConfig")
+            .field("address", &self.address)
+            .field("psk_identity", &self.psk_identity)
+            .field(
+                "psk_secret",
+                &self.psk_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("allow_insecure", &self.allow_insecure)
+            .finish()
+    }
 }
 
 impl RemoteStripeSourceConfig {

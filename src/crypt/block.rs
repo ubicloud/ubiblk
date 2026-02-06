@@ -4,10 +4,19 @@ use crate::{
 
 use openssl::rand::rand_bytes;
 
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct XtsBlockCipher {
     key1: [u8; 32],
     key2: [u8; 32],
+}
+
+impl std::fmt::Debug for XtsBlockCipher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XtsBlockCipher")
+            .field("key1", &"[REDACTED]")
+            .field("key2", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl XtsBlockCipher {
@@ -163,6 +172,24 @@ mod tests {
 
         assert_eq!(enc_key1, key1.as_slice());
         assert_eq!(enc_key2, key2.as_slice());
+    }
+
+    #[test]
+    fn test_debug_redacts_keys() {
+        let cipher = XtsBlockCipher::new(vec![0xAA; 32], vec![0xBB; 32]).unwrap();
+        let debug_output = format!("{:?}", cipher);
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should contain [REDACTED]"
+        );
+        assert!(
+            !debug_output.contains("170"),
+            "key1 byte value leaked in Debug"
+        );
+        assert!(
+            !debug_output.contains("187"),
+            "key2 byte value leaked in Debug"
+        );
     }
 
     #[test]

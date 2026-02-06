@@ -81,7 +81,7 @@ pub enum ArchiveCompressionAlgorithm {
 }
 
 /// Representation of `metadata.json` stored alongside archived stripes.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ArchiveMetadata {
     /// Archive format version.
     pub format_version: u32,
@@ -102,6 +102,21 @@ pub struct ArchiveMetadata {
         serialize_with = "encode_key"
     )]
     pub hmac_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for ArchiveMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ArchiveMetadata")
+            .field("format_version", &self.format_version)
+            .field("stripe_sector_count", &self.stripe_sector_count)
+            .field(
+                "encryption_key",
+                &self.encryption_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("compression", &self.compression)
+            .field("hmac_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 pub fn validate_format_version(version: u32) -> Result<()> {

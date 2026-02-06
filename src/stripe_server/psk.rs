@@ -132,8 +132,15 @@ fn build_psk_context() -> Result<SslContextBuilder> {
     let mut builder = SslContext::builder(SslMethod::tls())?;
 
     // TODO: Support TLS 1.3 PSK
-    builder.set_options(SslOptions::NO_TLSV1_3);
-    builder.set_options(SslOptions::NO_TICKET);
+    // Enforce TLS 1.2 only: disable TLS 1.0, 1.1 (insecure), and 1.3 (PSK not yet supported)
+    builder.set_options(
+        SslOptions::NO_SSLV2
+            | SslOptions::NO_SSLV3
+            | SslOptions::NO_TLSV1
+            | SslOptions::NO_TLSV1_1
+            | SslOptions::NO_TLSV1_3
+            | SslOptions::NO_TICKET,
+    );
     builder.set_cipher_list(PSK_CIPHER_SUITE)?;
     builder.set_verify(SslVerifyMode::NONE);
 

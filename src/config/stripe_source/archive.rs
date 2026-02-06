@@ -144,8 +144,21 @@ impl ArchiveStripeSourceConfig {
     }
 
     fn validate(&self) -> crate::Result<()> {
-        if let ArchiveStripeSourceConfig::S3 { prefix, .. } = self {
+        if let ArchiveStripeSourceConfig::S3 {
+            prefix,
+            connections,
+            ..
+        } = self
+        {
             Self::validate_prefix(prefix)?;
+            if *connections == 0 || *connections > 256 {
+                return Err(crate::ubiblk_error!(InvalidParameter {
+                    description: format!(
+                        "S3 connections {} is out of range (must be 1..=256)",
+                        connections
+                    ),
+                }));
+            }
         }
         Ok(())
     }
@@ -485,6 +498,57 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Invalid S3 prefix (contains . or .. components)"));
+    }
+
+    #[test]
+    fn test_s3_connections_zero_rejected() {
+        let yaml = r#"
+        type: s3
+        bucket: backups
+        connections: 0
+        "#;
+        let result = ArchiveStripeSourceConfig::load_from_str_with_kek(
+            yaml,
+            &KeyEncryptionCipher::default(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("S3 connections 0 is out of range"));
+    }
+
+    #[test]
+    fn test_s3_connections_too_large_rejected() {
+        let yaml = r#"
+        type: s3
+        bucket: backups
+        connections: 999
+        "#;
+        let result = ArchiveStripeSourceConfig::load_from_str_with_kek(
+            yaml,
+            &KeyEncryptionCipher::default(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("S3 connections 999 is out of range"));
+    }
+
+    #[test]
+    fn test_s3_connections_max_accepted() {
+        let yaml = r#"
+        type: s3
+        bucket: backups
+        connections: 256
+        "#;
+        let config = ArchiveStripeSourceConfig::load_from_str_with_kek(
+            yaml,
+            &KeyEncryptionCipher::default(),
+        )
+        .unwrap();
+        assert_eq!(config.connections(), 256);
     }
 
     #[test]

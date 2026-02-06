@@ -480,4 +480,17 @@ mod tests {
             .to_string()
             .contains("Invalid S3 prefix (contains . or .. components)"));
     }
+
+    #[test]
+    fn test_aws_credentials_debug_redacts_keys() {
+        let creds = AwsCredentials {
+            access_key_id: vec![65; 16],
+            secret_access_key: vec![78; 16],
+        };
+        let debug_output = format!("{:?}", creds);
+        assert!(debug_output.contains("access_key_id: \"[REDACTED]\""));
+        assert!(debug_output.contains("secret_access_key: \"[REDACTED]\""));
+        assert!(!debug_output.contains("65"));
+        assert!(!debug_output.contains("78"));
+    }
 }

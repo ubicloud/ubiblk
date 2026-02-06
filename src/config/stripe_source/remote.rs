@@ -93,10 +93,15 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    fn encrypt_with_kek(kek_key: &[u8], iv: &[u8], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    fn encrypt_with_kek(
+        kek_key: &[u8],
+        nonce_bytes: &[u8],
+        aad: &[u8],
+        plaintext: &[u8],
+    ) -> Vec<u8> {
         let cipher = aes_gcm::Aes256Gcm::new_from_slice(kek_key).unwrap();
-        let nonce = aes_gcm::Nonce::from_slice(iv);
-        cipher
+        let nonce = aes_gcm::Nonce::from_slice(nonce_bytes);
+        let ciphertext = cipher
             .encrypt(
                 nonce,
                 Payload {
@@ -104,7 +109,11 @@ mod tests {
                     aad,
                 },
             )
-            .unwrap()
+            .unwrap();
+        let mut output = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+        output.extend_from_slice(nonce_bytes);
+        output.extend_from_slice(&ciphertext);
+        output
     }
 
     #[test]
@@ -180,17 +189,16 @@ mod tests {
     #[test]
     fn test_load_from_file_with_kek_decrypts_secret() {
         let kek_key = [0x42u8; 32];
-        let iv = [0x99u8; 12];
+        let nonce = [0x99u8; 12];
         let aad = b"remote-aad";
         let kek = KeyEncryptionCipher {
             method: crate::crypt::CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
         let secret_plain = b"super-secret";
-        let encrypted_secret = encrypt_with_kek(&kek_key, &iv, aad, secret_plain);
+        let encrypted_secret = encrypt_with_kek(&kek_key, &nonce, aad, secret_plain);
         let encoded_secret = STANDARD.encode(encrypted_secret);
 
         let yaml = format!(

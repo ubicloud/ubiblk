@@ -2,7 +2,7 @@ use std::{fs::File, path::PathBuf};
 
 use crate::{Result, UbiblkError};
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, Payload},
+    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
     Aes256Gcm, Nonce,
 };
 use log::error;
@@ -26,9 +26,6 @@ pub struct KeyEncryptionCipher {
     pub key: Option<Vec<u8>>,
 
     #[serde_as(as = "Option<Base64>")]
-    pub init_vector: Option<Vec<u8>>,
-
-    #[serde_as(as = "Option<Base64>")]
     pub auth_data: Option<Vec<u8>>,
 }
 
@@ -37,10 +34,6 @@ impl std::fmt::Debug for KeyEncryptionCipher {
         f.debug_struct("KeyEncryptionCipher")
             .field("method", &self.method)
             .field("key", &self.key.as_ref().map(|_| "[REDACTED]"))
-            .field(
-                "init_vector",
-                &self.init_vector.as_ref().map(|_| "[REDACTED]"),
-            )
             .field("auth_data", &self.auth_data.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
@@ -48,17 +41,18 @@ impl std::fmt::Debug for KeyEncryptionCipher {
 
 type KekNonce = Nonce<<Aes256Gcm as AeadCore>::NonceSize>;
 
+/// GCM tag size in bytes.
+const GCM_TAG_SIZE: usize = 16;
+/// GCM nonce size in bytes.
+const GCM_NONCE_SIZE: usize = 12;
+
 impl KeyEncryptionCipher {
-    fn init_cipher_context(&self) -> Result<(Aes256Gcm, KekNonce, &[u8])> {
+    /// Initialize cipher and auth data for encryption or decryption.
+    fn init_context(&self) -> Result<(Aes256Gcm, &[u8])> {
         let key = self
             .key
             .as_ref()
             .ok_or_else(|| param_err("Key is required"))?;
-
-        let iv = self
-            .init_vector
-            .as_ref()
-            .ok_or_else(|| param_err("Initialization vector is required"))?;
 
         let auth_data = self
             .auth_data
@@ -70,15 +64,7 @@ impl KeyEncryptionCipher {
             error!("{}", msg);
             param_err(msg)
         })?;
-
-        if iv.len() != 12 {
-            let msg = "Initialization vector must be exactly 12 bytes";
-            error!("{}", msg);
-            return Err(param_err(msg));
-        }
-        let nonce = KekNonce::from_slice(iv);
-
-        Ok((cipher, *nonce, auth_data))
+        Ok((cipher, auth_data))
     }
 
     pub fn load(path: Option<&PathBuf>, unlink: bool) -> Result<Self> {
@@ -104,10 +90,10 @@ impl KeyEncryptionCipher {
         match self.method {
             CipherMethod::None => Ok((key1.to_vec(), key2.to_vec())),
             CipherMethod::Aes256Gcm => {
-                let (cipher, nonce, auth) = self.init_cipher_context()?;
+                let (cipher, auth) = self.init_context()?;
 
-                let k1 = encrypt_bytes(&cipher, &nonce, auth, key1)?;
-                let k2 = encrypt_bytes(&cipher, &nonce, auth, key2)?;
+                let k1 = encrypt_bytes(&cipher, auth, key1)?;
+                let k2 = encrypt_bytes(&cipher, auth, key2)?;
 
                 Ok((k1, k2))
             }
@@ -121,10 +107,10 @@ impl KeyEncryptionCipher {
                 Ok((ensure_32_bytes(key1)?, ensure_32_bytes(key2)?))
             }
             CipherMethod::Aes256Gcm => {
-                let (cipher, nonce, auth) = self.init_cipher_context()?;
+                let (cipher, auth) = self.init_context()?;
 
-                let k1 = decrypt_bytes(&cipher, &nonce, auth, &key1)?;
-                let k2 = decrypt_bytes(&cipher, &nonce, auth, &key2)?;
+                let k1 = decrypt_bytes(&cipher, auth, &key1)?;
+                let k2 = decrypt_bytes(&cipher, auth, &key2)?;
 
                 Ok((ensure_32_bytes(k1)?, ensure_32_bytes(k2)?))
             }
@@ -135,8 +121,8 @@ impl KeyEncryptionCipher {
         match self.method {
             CipherMethod::None => Ok(secret),
             CipherMethod::Aes256Gcm => {
-                let (cipher, nonce, auth) = self.init_cipher_context()?;
-                decrypt_bytes(&cipher, &nonce, auth, &secret)
+                let (cipher, auth) = self.init_context()?;
+                decrypt_bytes(&cipher, auth, &secret)
             }
         }
     }
@@ -145,8 +131,8 @@ impl KeyEncryptionCipher {
         let decrypted_bytes = match self.method {
             CipherMethod::None => cred,
             CipherMethod::Aes256Gcm => {
-                let (cipher, nonce, auth) = self.init_cipher_context()?;
-                decrypt_bytes(&cipher, &nonce, auth, &cred)?
+                let (cipher, auth) = self.init_context()?;
+                decrypt_bytes(&cipher, auth, &cred)?
             }
         };
 
@@ -161,8 +147,8 @@ impl KeyEncryptionCipher {
         match self.method {
             CipherMethod::None => Ok(plaintext.to_vec()),
             CipherMethod::Aes256Gcm => {
-                let (cipher, nonce, auth) = self.init_cipher_context()?;
-                encrypt_bytes(&cipher, &nonce, auth, plaintext)
+                let (cipher, auth) = self.init_context()?;
+                encrypt_bytes(&cipher, auth, plaintext)
             }
         }
     }
@@ -171,24 +157,29 @@ impl KeyEncryptionCipher {
         match self.method {
             CipherMethod::None => Ok(ciphertext.to_vec()),
             CipherMethod::Aes256Gcm => {
-                let (cipher, nonce, auth) = self.init_cipher_context()?;
-                decrypt_bytes(&cipher, &nonce, auth, ciphertext)
+                let (cipher, auth) = self.init_context()?;
+                decrypt_bytes(&cipher, auth, ciphertext)
             }
         }
     }
 }
 
-fn decrypt_bytes(
-    cipher: &Aes256Gcm,
-    nonce: &KekNonce,
-    aad: &[u8],
-    ciphertext: &[u8],
-) -> Result<Vec<u8>> {
-    cipher
+/// Decrypt data in the format [12-byte nonce || ciphertext || 16-byte tag].
+fn decrypt_bytes(cipher: &Aes256Gcm, aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+    // Minimum new-format length: nonce (12) + tag (16) + at least 0 bytes of ciphertext = 28
+    if ciphertext.len() < GCM_NONCE_SIZE + GCM_TAG_SIZE {
+        let msg = "Failed to decrypt data: ciphertext is too short to include nonce and tag";
+        error!("{}", msg);
+        return Err(param_err(msg));
+    }
+
+    let nonce = KekNonce::from_slice(&ciphertext[..GCM_NONCE_SIZE]);
+    let encrypted_data = &ciphertext[GCM_NONCE_SIZE..];
+    let plaintext = cipher
         .decrypt(
             nonce,
             Payload {
-                msg: ciphertext,
+                msg: encrypted_data,
                 aad,
             },
         )
@@ -196,18 +187,18 @@ fn decrypt_bytes(
             let msg = format!("Failed to decrypt data: {e}");
             error!("{}", msg);
             param_err(msg)
-        })
+        })?;
+
+    Ok(plaintext)
 }
 
-fn encrypt_bytes(
-    cipher: &Aes256Gcm,
-    nonce: &KekNonce,
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Result<Vec<u8>> {
-    cipher
+/// Encrypt data with a per-call random nonce. Output format:
+/// [12-byte random nonce || ciphertext || 16-byte GCM tag]
+fn encrypt_bytes(cipher: &Aes256Gcm, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
         .encrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: plaintext,
                 aad,
@@ -217,7 +208,13 @@ fn encrypt_bytes(
             let msg = format!("Failed to encrypt data: {e}");
             error!("{}", msg);
             param_err(msg)
-        })
+        })?;
+
+    // Prepend nonce to ciphertext
+    let mut output = Vec::with_capacity(GCM_NONCE_SIZE + ciphertext.len());
+    output.extend_from_slice(&nonce);
+    output.extend_from_slice(&ciphertext);
+    Ok(output)
 }
 
 fn ensure_32_bytes(data: Vec<u8>) -> Result<[u8; 32]> {
@@ -242,10 +239,10 @@ mod tests {
     use super::*;
     use aes_gcm::KeyInit;
 
-    fn encrypt_helper(kek_key: &[u8], iv: &[u8], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    fn encrypt_helper(kek_key: &[u8], nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
         let cipher = Aes256Gcm::new_from_slice(kek_key).unwrap();
-        let nonce = KekNonce::from_slice(iv);
-        cipher
+        let nonce = KekNonce::from_slice(nonce);
+        let ciphertext = cipher
             .encrypt(
                 nonce,
                 Payload {
@@ -253,7 +250,11 @@ mod tests {
                     aad,
                 },
             )
-            .unwrap()
+            .unwrap();
+        let mut output = Vec::with_capacity(GCM_NONCE_SIZE + ciphertext.len());
+        output.extend_from_slice(nonce);
+        output.extend_from_slice(&ciphertext);
+        output
     }
 
     #[test]
@@ -261,7 +262,6 @@ mod tests {
         let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(vec![0xAA; 32]),
-            init_vector: Some(vec![0xBB; 12]),
             auth_data: Some(vec![0xCC; 8]),
         };
         let debug_output = format!("{:?}", cipher);
@@ -274,7 +274,6 @@ mod tests {
             "should contain [REDACTED]"
         );
         assert!(!debug_output.contains("170"), "key bytes leaked in Debug");
-        assert!(!debug_output.contains("187"), "iv bytes leaked in Debug");
         assert!(
             !debug_output.contains("204"),
             "auth_data bytes leaked in Debug"
@@ -284,20 +283,19 @@ mod tests {
     #[test]
     fn test_decrypt_keys_aes_gcm_success() {
         let kek_key = [0x11u8; 32];
-        let iv = [0x22u8; 12];
+        let nonce = [0x22u8; 12];
         let aad = b"test-aad";
 
         // The actual secret keys we want to protect
         let target_key1 = [0xAAu8; 32];
         let target_key2 = [0xBBu8; 32];
 
-        let enc1 = encrypt_helper(&kek_key, &iv, aad, &target_key1);
-        let enc2 = encrypt_helper(&kek_key, &iv, aad, &target_key2);
+        let enc1 = encrypt_helper(&kek_key, &nonce, aad, &target_key1);
+        let enc2 = encrypt_helper(&kek_key, &nonce, aad, &target_key2);
 
         let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
@@ -311,16 +309,15 @@ mod tests {
     #[test]
     fn test_decrypt_psk_secret_aes_gcm_success() {
         let kek_key = [0x33u8; 32];
-        let iv = [0x44u8; 12];
+        let nonce = [0x44u8; 12];
         let aad = b"psk-aad";
         let secret_msg = b"super secret psk string";
 
-        let enc_secret = encrypt_helper(&kek_key, &iv, aad, secret_msg);
+        let enc_secret = encrypt_helper(&kek_key, &nonce, aad, secret_msg);
 
         let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
@@ -350,11 +347,11 @@ mod tests {
     #[test]
     fn test_aes_gcm_decrypt_failure_tampered_ciphertext() {
         let kek_key = [0x11u8; 32];
-        let iv = [0x22u8; 12];
+        let nonce = [0x22u8; 12];
         let aad = b"aad";
         let target = [0xAAu8; 32];
 
-        let mut enc = encrypt_helper(&kek_key, &iv, aad, &target);
+        let mut enc = encrypt_helper(&kek_key, &nonce, aad, &target);
         // Tamper with the last byte (part of the authentication tag)
         let last_idx = enc.len() - 1;
         enc[last_idx] ^= 0xFF;
@@ -362,7 +359,6 @@ mod tests {
         let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
@@ -371,11 +367,25 @@ mod tests {
     }
 
     #[test]
+    fn test_decrypt_rejects_short_ciphertext() {
+        let cipher = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(vec![0x11u8; 32]),
+            auth_data: Some(b"short-aad".to_vec()),
+        };
+
+        let short_ciphertext = vec![0x00u8; 10];
+        let res = cipher.decrypt_key_data(&short_ciphertext);
+        assert!(
+            matches!(res, Err(UbiblkError::InvalidParameter { ref description, .. }) if description.contains("too short"))
+        );
+    }
+
+    #[test]
     fn test_aes_gcm_missing_parameters() {
         let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: None, // Missing key
-            init_vector: Some(vec![0u8; 12]),
             auth_data: Some(vec![]),
         };
         let res = cipher.decrypt_psk_secret(vec![]);
@@ -385,33 +395,18 @@ mod tests {
     }
 
     #[test]
-    fn test_aes_gcm_invalid_iv_length() {
-        let cipher = KeyEncryptionCipher {
-            method: CipherMethod::Aes256Gcm,
-            key: Some(vec![0u8; 32]),
-            init_vector: Some(vec![0u8; 11]), // 11 bytes (too short)
-            auth_data: Some(vec![]),
-        };
-        let res = cipher.decrypt_psk_secret(vec![]);
-        assert!(
-            matches!(res, Err(UbiblkError::InvalidParameter { ref description, .. }) if description.contains("12 bytes"))
-        );
-    }
-
-    #[test]
     fn test_decrypt_keys_invalid_output_length() {
         let kek_key = [0x11u8; 32];
-        let iv = [0x22u8; 12];
+        let nonce = [0x22u8; 12];
         let aad = b"aad";
 
         // Encrypting 31 bytes instead of 32
         let short_key = [0xAAu8; 31];
-        let enc = encrypt_helper(&kek_key, &iv, aad, &short_key);
+        let enc = encrypt_helper(&kek_key, &nonce, aad, &short_key);
 
         let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
@@ -456,7 +451,6 @@ mod tests {
         let kek = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(vec![0x11u8; 32]),
-            init_vector: Some(vec![0x22u8; 12]),
             auth_data: Some(b"test-aad".to_vec()),
         };
 
@@ -492,7 +486,6 @@ mod tests {
     #[test]
     fn test_encrypt_xts_keys_aes_gcm_success() {
         let kek_key = [0x11u8; 32];
-        let iv = [0x22u8; 12];
         let aad = b"test-aad";
 
         let key1 = [0xAAu8; 32];
@@ -501,7 +494,6 @@ mod tests {
         let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
 
@@ -518,15 +510,14 @@ mod tests {
     #[test]
     fn test_decrypt_aws_credential_aes_gcm_success() {
         let kek_key = [0x33u8; 32];
-        let iv = [0x44u8; 12];
+        let nonce = [0x44u8; 12];
         let aad = b"aws-cred-aad";
         let credential_str = "AKIAEXAMPLEACCESSKEY";
         let credential_bytes = credential_str.as_bytes();
-        let enc_cred = encrypt_helper(&kek_key, &iv, aad, credential_bytes);
+        let enc_cred = encrypt_helper(&kek_key, &nonce, aad, credential_bytes);
         let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
         let dec_cred = cipher
@@ -552,19 +543,69 @@ mod tests {
     #[test]
     fn test_decrypt_aws_credential_invalid_utf8() {
         let kek_key = [0x33u8; 32];
-        let iv = [0x44u8; 12];
+        let nonce = [0x44u8; 12];
         let aad = b"aws-cred-aad";
         let invalid_utf8 = vec![0xFF, 0xFE, 0xFD]; // Invalid UTF-8 bytes
-        let enc_cred = encrypt_helper(&kek_key, &iv, aad, &invalid_utf8);
+        let enc_cred = encrypt_helper(&kek_key, &nonce, aad, &invalid_utf8);
         let cipher = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
         let res = cipher.decrypt_aws_credential(enc_cred);
         assert!(
             matches!(res, Err(UbiblkError::InvalidParameter { ref description, .. }) if description.contains("valid UTF-8"))
         );
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_roundtrip_random_nonce() {
+        let kek_key = [0x55u8; 32];
+        let aad = b"roundtrip-aad";
+        let plaintext = b"the quick brown fox jumps over the lazy dog";
+
+        let cipher = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(kek_key.to_vec()),
+            auth_data: Some(aad.to_vec()),
+        };
+
+        let encrypted = cipher.encrypt_key_data(plaintext).unwrap();
+        // New format: 12 nonce + plaintext_len + 16 tag
+        assert_eq!(
+            encrypted.len(),
+            GCM_NONCE_SIZE + plaintext.len() + GCM_TAG_SIZE
+        );
+
+        let decrypted = cipher.decrypt_key_data(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_produces_different_ciphertexts() {
+        let kek_key = [0x66u8; 32];
+        let aad = b"nonce-test-aad";
+        let plaintext = [0xCCu8; 32];
+
+        let cipher = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(kek_key.to_vec()),
+            auth_data: Some(aad.to_vec()),
+        };
+
+        let enc1 = cipher.encrypt_key_data(&plaintext).unwrap();
+        let enc2 = cipher.encrypt_key_data(&plaintext).unwrap();
+
+        // The two encryptions of the same plaintext must differ (random nonces)
+        assert_ne!(
+            enc1, enc2,
+            "Two encryptions of identical plaintext must produce different ciphertexts"
+        );
+
+        // Both must decrypt to the same plaintext
+        let dec1 = cipher.decrypt_key_data(&enc1).unwrap();
+        let dec2 = cipher.decrypt_key_data(&enc2).unwrap();
+        assert_eq!(dec1, plaintext);
+        assert_eq!(dec2, plaintext);
     }
 }

@@ -260,7 +260,6 @@ mod tests {
         let yaml = r#"
         method: aes256-gcm
         key: "uCvGiJ+tlAL0635kGhUaOhmgseSkoCK1HDhxJGgujSI="
-        init_vector: "UEt+wI+Ldq1UgQ/P"
         auth_data: "dm0zamdlejhfMA=="
         "#;
 
@@ -275,12 +274,6 @@ mod tests {
             ])
         );
         assert_eq!(
-            cipher.init_vector,
-            Some(vec![
-                0x50, 0x4b, 0x7e, 0xc0, 0x8f, 0x8b, 0x76, 0xad, 0x54, 0x81, 0x0f, 0xcf,
-            ])
-        );
-        assert_eq!(
             cipher.auth_data,
             Some(vec![
                 0x76, 0x6d, 0x33, 0x6a, 0x67, 0x65, 0x7a, 56, 0x5f, 0x30
@@ -291,12 +284,10 @@ mod tests {
     #[test]
     fn test_decode_encryption_keys() {
         let kek_key = [0x11u8; 32];
-        let iv = [0x22u8; 12];
         let aad = b"test-aad";
         let kek = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
         let key1 = vec![0xAAu8; 32];

@@ -195,26 +195,27 @@ mod tests {
     #[test]
     fn test_keys_with_key_encryption() {
         let kek_key = [0x11u8; 32];
-        let iv = [0x22u8; 12];
         let aad = b"test-aad";
 
         let kek = KeyEncryptionCipher {
             method: CipherMethod::Aes256Gcm,
             key: Some(kek_key.to_vec()),
-            init_vector: Some(iv.to_vec()),
             auth_data: Some(aad.to_vec()),
         };
         let key1 = vec![5u8; 32];
         let key2 = vec![6u8; 32];
 
         let (enc1, enc2) = kek.encrypt_xts_keys(&key1, &key2).unwrap();
-        assert_ne!(enc1, key1);
-        assert_ne!(enc2, key2);
+        assert_ne!(enc1, key1.as_slice());
+        assert_ne!(enc2, key2.as_slice());
 
-        let xts_cipher = XtsBlockCipher::from_encrypted(enc1.clone(), enc2.clone(), &kek).unwrap();
+        // Decrypt and verify plaintext keys are recovered
+        let xts_cipher = XtsBlockCipher::from_encrypted(enc1, enc2, &kek).unwrap();
+
+        // Re-encrypt produces different ciphertext (random nonce), but
+        // decrypting it must yield the same plaintext keys
         let (enc3, enc4) = xts_cipher.encrypted_keys(&kek).unwrap();
-
-        assert_eq!(enc1, enc3);
-        assert_eq!(enc2, enc4);
+        let xts_cipher2 = XtsBlockCipher::from_encrypted(enc3, enc4, &kek).unwrap();
+        assert_eq!(xts_cipher, xts_cipher2);
     }
 }

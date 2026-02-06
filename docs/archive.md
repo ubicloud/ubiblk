@@ -26,7 +26,6 @@ path: "/var/ubiblk/archive"
 archive_kek:
   method: "aes256-gcm"
   key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60="
-  init_vector: "UEt+wI+Ldq1UgQ/P"
   auth_data: "dm0zamdlejhfMA=="
 ```
 
@@ -44,9 +43,12 @@ connections: 16                        # Optional: number of connections
 archive_kek:
   method: "aes256-gcm"
   key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60="
-  init_vector: "UEt+wI+Ldq1UgQ/P"
   auth_data: "dm0zamdlejhfMA=="
 ```
+
+> **Note:** KEK-encrypted values must use the current format:
+> `[12-byte nonce || ciphertext || 16-byte tag]`. Older ciphertexts that omit
+> the nonce prefix are not supported.
 
 **Examples:**
 ```bash

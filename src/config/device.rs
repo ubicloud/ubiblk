@@ -439,6 +439,7 @@ mod tests {
         stripe_source:
           source: remote
           address: "1.2.3.4:4567"
+          allow_insecure: true
         copy_on_read: true
         "#;
         let result = DeviceConfig::load_from_str(yaml);

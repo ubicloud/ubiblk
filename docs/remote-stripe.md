@@ -40,9 +40,14 @@ are encrypted using the KEK if provided.
 address: "127.0.0.1:4555"
 psk_identity: "client1"
 psk_secret: "<base64-encoded-secret>" # Optional: KEK-encrypted PSK secret
+allow_insecure: false                 # Required to be true for unencrypted connections (default: false)
 ```
 
-`psk_identity` and `psk_secret` must be set together to enable TLS-PSK.
+`psk_identity` and `psk_secret` must be set together to enable TLS-PSK. If
+allow_insecure is false (the default), then `psk_identity` and `psk_secret` must
+be provided.
+
+This is a deliberate design choice to avoid accidental unencrypted connections.
 
 **Commands:**
 - `help` – show command list.

@@ -39,6 +39,10 @@ struct Args {
     #[arg(short = 'k', long = "kek")]
     kek: Option<String>,
 
+    /// Allow reading the key encryption key from a regular file.
+    #[arg(long = "allow-regular-file-as-kek", default_value_t = false)]
+    allow_regular_file_as_kek: bool,
+
     /// Starting sector offset
     #[arg(long = "start")]
     start_sector: Option<u64>,
@@ -222,7 +226,7 @@ fn main() {
 fn run() -> Result<()> {
     let args = Args::parse();
     let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), false)?;
+    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), args.allow_regular_file_as_kek)?;
     let config = DeviceConfig::load_from_file_with_kek(&PathBuf::from(&args.config), &kek)?;
 
     let (key1, key2) = config.encryption_key.clone().ok_or_else(|| {

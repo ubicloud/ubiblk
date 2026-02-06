@@ -15,14 +15,13 @@ pub struct CommonArgs {
     #[arg(short = 'k', long = "kek")]
     pub kek: Option<PathBuf>,
 
-    /// Unlink the key encryption key file after use.
+    /// Allow reading the key encryption key from a regular file.
     #[arg(
-        short = 'u',
-        long = "unlink-kek",
+        long = "allow-regular-file-as-kek",
         default_value_t = false,
         requires = "kek"
     )]
-    pub unlink_kek: bool,
+    pub allow_regular_file_as_kek: bool,
 }
 
 pub fn load_config(common: &CommonArgs) -> Result<DeviceConfig> {
@@ -31,7 +30,7 @@ pub fn load_config(common: &CommonArgs) -> Result<DeviceConfig> {
 }
 
 pub fn load_config_and_kek(common: &CommonArgs) -> Result<(DeviceConfig, KeyEncryptionCipher)> {
-    let kek = KeyEncryptionCipher::load(common.kek.as_ref(), common.unlink_kek)?;
+    let kek = KeyEncryptionCipher::load(common.kek.as_ref(), common.allow_regular_file_as_kek)?;
     let config = DeviceConfig::load_from_file_with_kek(&common.config, &kek)?;
     Ok((config, kek))
 }
@@ -63,7 +62,7 @@ socket: /tmp/ubiblk.sock
         let args = CommonArgs {
             config: config_file.path().to_path_buf(),
             kek: None,
-            unlink_kek: false,
+            allow_regular_file_as_kek: false,
         };
 
         let config = load_config(&args).expect("load config");
@@ -73,7 +72,7 @@ socket: /tmp/ubiblk.sock
     }
 
     #[test]
-    fn load_config_and_kek_unlinks_kek() {
+    fn load_config_and_kek_allows_regular_file_kek() {
         let config_file = write_temp_file(
             r#"
 path: /dev/null
@@ -85,20 +84,14 @@ socket: /tmp/ubiblk.sock
 method: none
 "#,
         );
-        let kek_path = kek_file.path().to_path_buf();
-
         let args = CommonArgs {
             config: config_file.path().to_path_buf(),
-            kek: Some(kek_path.clone()),
-            unlink_kek: true,
+            kek: Some(kek_file.path().to_path_buf()),
+            allow_regular_file_as_kek: true,
         };
 
         let (_config, kek) = load_config_and_kek(&args).expect("load config and kek");
 
         assert_eq!(kek.method, CipherMethod::None);
-        assert!(
-            !kek_path.exists(),
-            "expected KEK file to be deleted after load"
-        );
     }
 }

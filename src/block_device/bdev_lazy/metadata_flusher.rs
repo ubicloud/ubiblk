@@ -145,12 +145,20 @@ impl MetadataFlusher {
                 }
                 (Some(status), true) => match status.stage {
                     RequestStage::Writing => {
+                        #[cfg(feature = "tla-trace")]
+                        crate::tla_trace::log_action("MetadataWriteComplete", serde_json::json!({
+                            "stripe": status.stripe_id,
+                        }));
                         self.buffer_pool.return_buffer(&status.buffer);
                         self.channel.add_flush(stripe_id);
                         status.stage = RequestStage::Flushing;
                         newly_flushing.push(stripe_id);
                     }
                     RequestStage::Flushing => {
+                        #[cfg(feature = "tla-trace")]
+                        crate::tla_trace::log_action("MetadataFlushComplete", serde_json::json!({
+                            "stripe": status.stripe_id,
+                        }));
                         self.sectors_being_updated.remove(&(status.sector));
                         finished_stripes.push((status.stripe_id, status.header));
                     }
@@ -161,6 +169,11 @@ impl MetadataFlusher {
         for (stripe, header) in finished_stripes {
             debug!("Stripe {stripe} metadata updated with header {header}");
             self.header_updates.remove(&stripe);
+            #[cfg(feature = "tla-trace")]
+            crate::tla_trace::log_action("AtomicPublish", serde_json::json!({
+                "stripe": stripe,
+                "header": header,
+            }));
             self.shared_state.set_stripe_header(stripe, header);
         }
 

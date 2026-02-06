@@ -69,6 +69,7 @@ aws-sdk-s3 = { version = "1.120.0", features = ["test-util"] }
 
 [features]
 default = []
+tla-trace = []
 
 [workspace]
 members = [".", "crates/ubiblk-macros"]

@@ -100,6 +100,10 @@ impl BgWorker {
         self.stripe_fetcher.update();
         for (stripe_id, success) in self.stripe_fetcher.take_finished_fetches() {
             if success {
+                #[cfg(feature = "tla-trace")]
+                crate::tla_trace::log_action("Handoff", serde_json::json!({
+                    "stripe": stripe_id,
+                }));
                 self.metadata_flusher.set_stripe_fetched(stripe_id);
             } else {
                 error!("Stripe {stripe_id} fetch failed");
@@ -210,6 +214,109 @@ mod tests {
             rx,
         )
         .expect("BgWorker should support null source device");
+    }
+
+    #[test]
+    #[cfg(feature = "tla-trace")]
+    fn test_tla_trace_full_pipeline() {
+        let trace_path = std::env::temp_dir().join("tla_trace_test.ndjson");
+        crate::tla_trace::init(trace_path.to_str().unwrap());
+
+        let (mut bg_worker, sender) = build_bg_worker();
+        sender
+            .send(BgWorkerRequest::Fetch { stripe_id: 0 })
+            .unwrap();
+        bg_worker.receive_requests(false);
+
+        for _ in 0..100 {
+            bg_worker.update();
+        }
+
+        assert!(bg_worker.shared_state().stripe_fetched(0));
+
+        // Read and verify the trace
+        let trace_content = std::fs::read_to_string(&trace_path).unwrap();
+        let actions: Vec<serde_json::Value> = trace_content
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let action_names: Vec<&str> = actions
+            .iter()
+            .map(|a| a["action"].as_str().unwrap())
+            .collect();
+
+        // Verify the full pipeline sequence for stripe 0
+        assert_eq!(
+            action_names,
+            vec![
+                "SourceReadComplete",
+                "TargetWriteComplete",
+                "TargetFlushComplete",
+                "Handoff",
+                "MetadataWriteComplete",
+                "MetadataFlushComplete",
+                "AtomicPublish",
+            ],
+            "Expected full pipeline trace, got: {:?}",
+            action_names
+        );
+
+        // Verify all actions reference stripe 0
+        for action in &actions {
+            assert_eq!(action["stripe"].as_u64().unwrap(), 0);
+        }
+
+        std::fs::remove_file(&trace_path).ok();
+    }
+
+    #[test]
+    #[cfg(feature = "tla-trace")]
+    fn test_tla_trace_failed_stripe() {
+        let trace_path = std::env::temp_dir().join("tla_trace_failed_test.ndjson");
+        crate::tla_trace::init(trace_path.to_str().unwrap());
+
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+        let source_dev = TestBlockDevice::new(1024 * 1024);
+        let base_source =
+            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
+                .unwrap();
+        let flaky_source =
+            stripe_source::FlakyStripeSource::new(Box::new(base_source), vec![(0, 4)]);
+
+        let (mut bg_worker, sender) = build_bg_worker_with_source(Box::new(flaky_source));
+        sender
+            .send(BgWorkerRequest::Fetch { stripe_id: 0 })
+            .unwrap();
+        bg_worker.receive_requests(false);
+
+        for _ in 0..100 {
+            bg_worker.update();
+        }
+
+        assert!(bg_worker.shared_state().is_stripe_failed(0));
+
+        let trace_content = std::fs::read_to_string(&trace_path).unwrap();
+        let actions: Vec<serde_json::Value> = trace_content
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let action_names: Vec<&str> = actions
+            .iter()
+            .map(|a| a["action"].as_str().unwrap())
+            .collect();
+
+        // Should end with SetFailed
+        assert_eq!(
+            *action_names.last().unwrap(),
+            "SetFailed",
+            "Expected SetFailed as last action, got: {:?}",
+            action_names
+        );
+
+        std::fs::remove_file(&trace_path).ok();
     }
 
     #[test]

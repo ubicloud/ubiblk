@@ -204,6 +204,13 @@ impl StripeFetcher {
                 }
             };
 
+            #[cfg(feature = "tla-trace")]
+            if success {
+                crate::tla_trace::log_action("SourceReadComplete", serde_json::json!({
+                    "stripe": stripe_id,
+                }));
+            }
+
             if !success || !self.start_write(buf, stripe_id) {
                 self.fetch_completed(stripe_id, false);
             }
@@ -220,6 +227,10 @@ impl StripeFetcher {
             match self.stripe_states.get(&stripe_id) {
                 Some(FetchState::Fetching) => {
                     debug!("Stripe {stripe_id} write completed, flushing...");
+                    #[cfg(feature = "tla-trace")]
+                    crate::tla_trace::log_action("TargetWriteComplete", serde_json::json!({
+                        "stripe": stripe_id,
+                    }));
                     if self.start_flush(stripe_id) {
                         self.stripe_states.insert(stripe_id, FetchState::Flushing);
                     } else {
@@ -228,6 +239,12 @@ impl StripeFetcher {
                     }
                 }
                 Some(FetchState::Flushing) => {
+                    #[cfg(feature = "tla-trace")]
+                    if success {
+                        crate::tla_trace::log_action("TargetFlushComplete", serde_json::json!({
+                            "stripe": stripe_id,
+                        }));
+                    }
                     self.fetch_completed(stripe_id, success);
                 }
                 _ => {
@@ -293,6 +310,10 @@ impl StripeFetcher {
             self.stripe_states.insert(stripe_id, FetchState::Queued);
         } else {
             error!("Stripe {stripe_id} failed after {MAX_FETCH_RETRIES} retries");
+            #[cfg(feature = "tla-trace")]
+            crate::tla_trace::log_action("SetFailed", serde_json::json!({
+                "stripe": stripe_id,
+            }));
             self.shared_metadata_state.set_stripe_failed(stripe_id);
             self.stripe_states.remove(&stripe_id);
             self.stripe_fetch_retries.remove(&stripe_id);

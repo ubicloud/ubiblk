@@ -7,6 +7,7 @@ use ubiblk::{
     cli::{load_config_and_kek, CommonArgs},
     config::RemoteStripeSourceConfig,
     stripe_server::{prepare_stripe_server, wrap_psk_server_stream, DynStream, PskCredentials},
+    utils::security::disable_core_dumps,
     Result,
 };
 
@@ -26,6 +27,7 @@ struct Args {
 
 fn main() {
     env_logger::builder().format_timestamp(None).init();
+    disable_core_dumps();
 
     let args = Args::parse();
 

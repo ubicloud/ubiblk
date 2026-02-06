@@ -2,6 +2,7 @@ use clap::Parser;
 use log::error;
 use ubiblk::backends::vhost::block_backend_loop;
 use ubiblk::cli::{load_config, CommonArgs};
+use ubiblk::utils::security::disable_core_dumps;
 use ubiblk::Result;
 
 #[derive(Parser)]
@@ -18,6 +19,7 @@ struct Args {
 
 fn main() {
     env_logger::builder().format_timestamp(None).init();
+    disable_core_dumps();
 
     if let Err(err) = run() {
         error!("{err}");

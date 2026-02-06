@@ -18,7 +18,7 @@ pub enum CipherMethod {
 }
 
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct KeyEncryptionCipher {
     pub method: CipherMethod,
 
@@ -30,6 +30,20 @@ pub struct KeyEncryptionCipher {
 
     #[serde_as(as = "Option<Base64>")]
     pub auth_data: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for KeyEncryptionCipher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyEncryptionCipher")
+            .field("method", &self.method)
+            .field("key", &self.key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "init_vector",
+                &self.init_vector.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("auth_data", &self.auth_data.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 type KekNonce = Nonce<<Aes256Gcm as AeadCore>::NonceSize>;
@@ -240,6 +254,31 @@ mod tests {
                 },
             )
             .unwrap()
+    }
+
+    #[test]
+    fn test_debug_redacts_sensitive_fields() {
+        let cipher = KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(vec![0xAA; 32]),
+            init_vector: Some(vec![0xBB; 12]),
+            auth_data: Some(vec![0xCC; 8]),
+        };
+        let debug_output = format!("{:?}", cipher);
+        assert!(
+            debug_output.contains("Aes256Gcm"),
+            "method should be visible"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "should contain [REDACTED]"
+        );
+        assert!(!debug_output.contains("170"), "key bytes leaked in Debug");
+        assert!(!debug_output.contains("187"), "iv bytes leaked in Debug");
+        assert!(
+            !debug_output.contains("204"),
+            "auth_data bytes leaked in Debug"
+        );
     }
 
     #[test]

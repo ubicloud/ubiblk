@@ -10,10 +10,19 @@ use super::DynStream;
 
 const PSK_CIPHER_SUITE: &str = "PSK-AES256-GCM-SHA384";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PskCredentials {
     identity: String,
     secret: Vec<u8>,
+}
+
+impl std::fmt::Debug for PskCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PskCredentials")
+            .field("identity", &self.identity)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl PskCredentials {
@@ -152,6 +161,24 @@ mod tests {
     use crate::UbiblkError;
 
     use super::*;
+
+    #[test]
+    fn test_debug_redacts_secret() {
+        let creds = PskCredentials::new("my-identity".to_string(), vec![0xAA; 32]).unwrap();
+        let debug_output = format!("{:?}", creds);
+        assert!(
+            debug_output.contains("my-identity"),
+            "identity should be visible"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "should contain [REDACTED]"
+        );
+        assert!(
+            !debug_output.contains("170"),
+            "secret bytes leaked in Debug"
+        );
+    }
 
     #[test]
     fn test_parse_psk_credentials_success() {

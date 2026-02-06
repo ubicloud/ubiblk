@@ -8,13 +8,22 @@ fn default_archive_connections() -> usize {
     16
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub struct AwsCredentials {
     #[serde(deserialize_with = "decode_key")]
     pub access_key_id: Vec<u8>,
     #[serde(deserialize_with = "decode_key")]
     pub secret_access_key: Vec<u8>,
+}
+
+impl std::fmt::Debug for AwsCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsCredentials")
+            .field("access_key_id", &"[REDACTED]")
+            .field("secret_access_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

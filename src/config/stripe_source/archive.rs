@@ -2,7 +2,7 @@ use std::path::{Component, Path};
 
 use serde::Deserialize;
 
-use crate::crypt::{decode_key, KeyEncryptionCipher};
+use crate::crypt::{decode_key, CipherMethod, KeyEncryptionCipher};
 
 fn default_archive_connections() -> usize {
     16
@@ -101,10 +101,17 @@ impl ArchiveStripeSourceConfig {
     }
 
     pub fn decrypt_with_kek(&mut self, kek: &KeyEncryptionCipher) -> crate::Result<()> {
+        if kek.method == CipherMethod::None && self.archive_kek().key.is_some() {
+            log::warn!("Archive KEK is stored in plaintext (no KEK configured). Use --kek to encrypt keys at rest.");
+        }
+
         Self::decrypt_archive_kek(kek, self.archive_kek_mut())?;
 
         if let ArchiveStripeSourceConfig::S3 { credentials, .. } = self {
             if let Some(creds) = credentials.as_mut() {
+                if kek.method == CipherMethod::None {
+                    log::warn!("AWS credentials are stored in plaintext (no KEK configured). Use --kek to encrypt keys at rest.");
+                }
                 let access_key_id =
                     kek.decrypt_aws_credential(std::mem::take(&mut creds.access_key_id))?;
                 let secret_access_key =

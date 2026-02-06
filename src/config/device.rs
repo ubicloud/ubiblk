@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 
 use crate::config::stripe_source::{RawStripeSourceConfig, StripeSourceConfig};
-use crate::crypt::{decode_optional_key_pair, KeyEncryptionCipher};
+use crate::crypt::{decode_optional_key_pair, CipherMethod, KeyEncryptionCipher};
 
 fn default_poll_queue_timeout_us() -> u128 {
     1000
@@ -218,6 +218,9 @@ impl DeviceConfig {
 
     fn decrypt_with_kek(&mut self, kek: &KeyEncryptionCipher) -> crate::Result<()> {
         if let Some((key1, key2)) = self.encryption_key.take() {
+            if kek.method == CipherMethod::None {
+                log::warn!("XTS encryption keys are stored in plaintext (no KEK configured). Use --kek to encrypt keys at rest.");
+            }
             let (key1, key2) = kek.decrypt_xts_keys(key1, key2)?;
             self.encryption_key = Some((key1.to_vec(), key2.to_vec()));
         }

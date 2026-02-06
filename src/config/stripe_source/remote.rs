@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::crypt::{decode_optional_key, KeyEncryptionCipher};
+use crate::crypt::{decode_optional_key, CipherMethod, KeyEncryptionCipher};
 
 #[derive(Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +57,9 @@ impl RemoteStripeSourceConfig {
 
     pub(crate) fn decrypt_with_kek(&mut self, kek: &KeyEncryptionCipher) -> crate::Result<()> {
         if let Some(secret) = self.psk_secret.take() {
+            if kek.method == CipherMethod::None {
+                log::warn!("PSK secret is stored in plaintext (no KEK configured). Use --kek to encrypt keys at rest.");
+            }
             self.psk_secret = Some(kek.decrypt_psk_secret(secret)?);
         }
         Ok(())

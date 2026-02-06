@@ -7,14 +7,22 @@ on:
       - 'tla/*.tla'
       - 'tla/*.cfg'
       - 'src/block_device/bdev_lazy/**/*.rs'
+      - 'src/tla_trace.rs'
       - 'scripts/run-tla-checks.sh'
+      - 'scripts/run-trace-validation.sh'
+      - 'scripts/validate-trace.sh'
+      - 'scripts/trace2tla.py'
       - '.github/workflows/tla-model-check.yaml'
   pull_request:
     paths:
       - 'tla/*.tla'
       - 'tla/*.cfg'
       - 'src/block_device/bdev_lazy/**/*.rs'
+      - 'src/tla_trace.rs'
       - 'scripts/run-tla-checks.sh'
+      - 'scripts/run-trace-validation.sh'
+      - 'scripts/validate-trace.sh'
+      - 'scripts/trace2tla.py'
       - '.github/workflows/tla-model-check.yaml'
   workflow_dispatch:
   schedule:
@@ -67,3 +75,57 @@ jobs:
         run: python3 scripts/check-tla-drift.py --repo . --values-only
         env:
           TLA_DIR: tla
+
+  tla-trace-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-tla-trace-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-tla-trace-
+
+      - name: Cache TLA+ tools
+        uses: actions/cache@v4
+        with:
+          path: tla2tools.jar
+          key: tla2tools-v1.8.0
+
+      - name: Download TLA+ tools
+        run: |
+          if [ ! -f tla2tools.jar ]; then
+            wget -q https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+          fi
+
+      - name: Run trace validation
+        run: ./scripts/run-trace-validation.sh
+        env:
+          TLA2TOOLS_JAR: tla2tools.jar
+          TLA_DIR: tla
+
+      - name: Upload trace artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tla-traces
+          path: tla-traces/
+          retention-days: 7

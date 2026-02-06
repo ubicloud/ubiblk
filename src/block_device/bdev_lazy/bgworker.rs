@@ -216,10 +216,21 @@ mod tests {
         .expect("BgWorker should support null source device");
     }
 
+    #[cfg(feature = "tla-trace")]
+    fn tla_trace_path(name: &str) -> std::path::PathBuf {
+        match std::env::var("TLA_TRACE_DIR") {
+            Ok(dir) => {
+                std::fs::create_dir_all(&dir).ok();
+                std::path::PathBuf::from(dir).join(format!("{name}.ndjson"))
+            }
+            Err(_) => std::env::temp_dir().join(format!("{name}.ndjson")),
+        }
+    }
+
     #[test]
     #[cfg(feature = "tla-trace")]
     fn test_tla_trace_full_pipeline() {
-        let trace_path = std::env::temp_dir().join("tla_trace_test.ndjson");
+        let trace_path = tla_trace_path("tla_trace_full_pipeline");
         crate::tla_trace::init(trace_path.to_str().unwrap());
 
         let (mut bg_worker, sender) = build_bg_worker();
@@ -267,13 +278,15 @@ mod tests {
             assert_eq!(action["stripe"].as_u64().unwrap(), 0);
         }
 
-        std::fs::remove_file(&trace_path).ok();
+        if std::env::var("TLA_TRACE_DIR").is_err() {
+            std::fs::remove_file(&trace_path).ok();
+        }
     }
 
     #[test]
     #[cfg(feature = "tla-trace")]
     fn test_tla_trace_failed_stripe() {
-        let trace_path = std::env::temp_dir().join("tla_trace_failed_test.ndjson");
+        let trace_path = tla_trace_path("tla_trace_failed_stripe");
         crate::tla_trace::init(trace_path.to_str().unwrap());
 
         let stripe_sector_count_shift = 11;
@@ -316,7 +329,9 @@ mod tests {
             action_names
         );
 
-        std::fs::remove_file(&trace_path).ok();
+        if std::env::var("TLA_TRACE_DIR").is_err() {
+            std::fs::remove_file(&trace_path).ok();
+        }
     }
 
     #[test]

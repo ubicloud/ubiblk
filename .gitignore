@@ -34,3 +34,8 @@ target/
 
 .vscode/*
 isa-l_crypto/
+
+# Generated TLA+ trace validation artifacts
+tla-traces/
+tla/TraceValidation.tla
+tla/TraceValidation.cfg

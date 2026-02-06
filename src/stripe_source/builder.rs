@@ -156,6 +156,7 @@ mod tests {
                     address: remote,
                     psk_identity: None,
                     psk_secret: None,
+                    allow_insecure: true,
                 },
             })
         };

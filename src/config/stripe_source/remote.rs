@@ -12,6 +12,8 @@ pub struct RemoteStripeSourceConfig {
     pub psk_identity: Option<String>,
     #[serde(default, deserialize_with = "decode_optional_key")]
     pub psk_secret: Option<Vec<u8>>,
+    #[serde(default)]
+    pub allow_insecure: bool,
 }
 
 impl RemoteStripeSourceConfig {
@@ -50,6 +52,12 @@ impl RemoteStripeSourceConfig {
         if self.psk_identity.is_some() ^ self.psk_secret.is_some() {
             return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "Both psk_identity and psk_secret must be specified together."
+                    .to_string(),
+            }));
+        }
+        if !self.allow_insecure && (self.psk_identity.is_none() || self.psk_secret.is_none()) {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "PSK credentials must be provided unless allow_insecure is true."
                     .to_string(),
             }));
         }
@@ -100,6 +108,7 @@ mod tests {
                     address: "1.2.3.4:4567".to_string(),
                     psk_identity: Some("client1".to_string()),
                     psk_secret: Some(b"0123456789ABCDEF".to_vec()),
+                    allow_insecure: false,
                 },
             }
         );
@@ -140,6 +149,7 @@ mod tests {
     fn test_remote_without_psk_pair_is_valid() {
         let yaml = r#"
         address: "1.2.3.4:4567"
+        allow_insecure: true
         "#;
         let config =
             RemoteStripeSourceConfig::load_from_str_with_kek(yaml, &KeyEncryptionCipher::default())
@@ -207,5 +217,34 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("Failed to parse remote config YAML"));
+    }
+
+    #[test]
+    fn test_default_allow_insecure() {
+        let yaml = r#"
+        address: "1.2.3.4:4567"
+        psk_identity: client1
+        psk_secret: "MDEyMzQ1Njc4OUFCQ0RFRg=="
+        "#;
+        let config =
+            RemoteStripeSourceConfig::load_from_str_with_kek(yaml, &KeyEncryptionCipher::default())
+                .unwrap();
+        assert_eq!(config.address, "1.2.3.4:4567");
+        assert!(!config.allow_insecure);
+    }
+
+    #[test]
+    fn test_validation_fails_with_missing_psk_pair() {
+        let yaml = r#"
+        address: "1.2.3.4:4567"
+        allow_insecure: false
+        "#;
+        let result =
+            RemoteStripeSourceConfig::load_from_str_with_kek(yaml, &KeyEncryptionCipher::default());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("PSK credentials must be provided unless allow_insecure is true."));
     }
 }

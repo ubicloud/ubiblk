@@ -190,6 +190,7 @@ stripe_source:
   address: "1.2.3.4:4555"
   psk_identity: "client1"               # Optional: must be set together with psk_secret
   psk_secret: "BASE64-ENCODED-SECRET"   # Optional: KEK-encrypted PSK secret
+  allow_insecure: false                 # Required to be true for unencrypted connections (default: false)
 ```
 
 To use an archive stripe source from the local filesystem:

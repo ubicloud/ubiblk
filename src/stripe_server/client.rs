@@ -405,6 +405,7 @@ mod tests {
             address: "127.0.0.1:9999".to_string(),
             psk_identity: None,
             psk_secret: None,
+            allow_insecure: true,
         };
         let result = connect_to_stripe_server(&conf);
         assert!(result.is_err());

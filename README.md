@@ -35,6 +35,13 @@ cargo test
 - [Remote stripe server, shell, and protocol](docs/remote-stripe.md)
 - [Archive binary and archive format](docs/archive.md)
 
+## Security Notes
+
+In all tools, it is recommended to provide `<KEK_PATH>` via a named pipe or
+`/dev/stdin`. Regular files are disallowed by default to prevent accidental
+exposure of KEK material. Use `--allow-regular-file-as-kek` to explicitly permit
+reading the KEK from a regular file.
+
 ## vhost-backend
 
 The `vhost-backend` binary launches a vhost-user-blk backend based on a YAML
@@ -42,13 +49,13 @@ configuration file.
 
 **Usage:**
 ```bash
-vhost-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek]
+vhost-backend --config <CONFIG_YAML> [--kek <KEK_PATH>] [--allow-regular-file-as-kek]
 ```
 
 **Arguments:**
 - `-f, --config <CONFIG_YAML>`  Path to the backend YAML configuration file.
-- `-k, --kek <KEK_FILE>`   (Optional) Path to the key encryption file for encrypted block device support.
-- `-u, --unlink-kek`       (Optional) Unlink (delete) the KEK file after use.
+- `-k, --kek <KEK_PATH>`   (Optional) Path to the key encryption file for encrypted block device support.
+- `--allow-regular-file-as-kek`  (Optional) Allow reading the KEK from a regular file.
 
 **Configuration:**
 The configuration YAML must define:
@@ -84,7 +91,7 @@ extensively as `vhost-backend`.
 
 **Usage:**
 ```bash
-ublk-backend --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] [--device-symlink <PATH>]
+ublk-backend --config <CONFIG_YAML> [--kek <KEK_PATH>] [--allow-regular-file-as-kek] [--device-symlink <PATH>]
 ```
 
 **Notes:**
@@ -279,13 +286,13 @@ byte per stripe containing fetched, written, and has-source flags. This file
 is loaded by the backend on startup.
 
 ```bash
-init-metadata --config <CONFIG_YAML> [--kek <KEK_FILE>] [--unlink-kek] \
+init-metadata --config <CONFIG_YAML> [--kek <KEK_PATH>] [--allow-regular-file-as-kek] \
              [--stripe-sector-count-shift <SHIFT>]
 ```
 
 - `-f, --config <CONFIG_YAML>`: Path to the backend configuration file.
-- `-k, --kek <KEK_FILE>`: (Optional) KEK file for encrypted keys.
-- `-u, --unlink-kek`: (Optional) Delete the KEK file after use.
+- `-k, --kek <KEK_PATH>`: (Optional) Path to the key encryption key file.
+- `--allow-regular-file-as-kek`: (Optional) Allow reading the KEK from a regular file.
 - `-s, --stripe-sector-count-shift`: (Optional) Stripe size as a power of two
   sectors (default: `11`).
 
@@ -300,7 +307,7 @@ same configuration file that the backend uses, plus an optional KEK file when
 working with encrypted metadata.
 
 ```bash
-dump-metadata --config config.yaml [--kek kek.yaml]
+dump-metadata --config config.yaml [--kek kek.yaml] [--allow-regular-file-as-kek]
 ```
 
 #### xts
@@ -311,8 +318,8 @@ file (and optional KEK file) and processes sectors from an input file into an
 output file.
 
 ```bash
-xts --config config.yaml [--kek kek.yaml] [--start <SECTOR>] [--len <SECTORS>] \
-    [--action encode|decode] <INPUT> <OUTPUT>
+xts --config config.yaml [--kek kek.yaml] [--allow-regular-file-as-kek] \
+    [--start <SECTOR>] [--len <SECTORS>] [--action encode|decode] <INPUT> <OUTPUT>
 ```
 
 ## License

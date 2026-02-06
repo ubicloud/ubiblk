@@ -13,8 +13,10 @@ archive --config <CONFIG_YAML> --target-config <TARGET_CONFIG_YAML> [options]
 - `--target-config`: Archive target configuration YAML (filesystem or S3).
 
 **Options:**
-- `--kek` (`-k`): Path to the key encryption key file.
-- `--unlink-kek` (`-u`): Delete the KEK file after use.
+- `--kek` (`-k`): Path to the key encryption key file. It's recommended to use a
+  named pipe or `/dev/stdin` for this. Regular files are disallowed by default
+  to prevent accidental exposure of KEK material.
+- `--allow-regular-file-as-kek`: Allow reading the KEK from a regular file.
 - `--encrypt` (`-e`): Encrypt archived stripes with a random AES-XTS key.
 - `--compression`: Compression algorithm (`none`, `snappy`, or `zstd`). Defaults to `none`.
 - `--zstd-level`: Zstd compression level. Defaults to `3`.

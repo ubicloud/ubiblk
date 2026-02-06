@@ -67,21 +67,27 @@ impl KeyEncryptionCipher {
         Ok((cipher, auth_data))
     }
 
-    pub fn load(path: Option<&PathBuf>, unlink: bool) -> Result<Self> {
+    pub fn load(path: Option<&PathBuf>, allow_regular_file: bool) -> Result<Self> {
         let Some(path) = path else {
             return Ok(KeyEncryptionCipher::default());
         };
 
+        // Open the file first before checking, to avoid TOCTOU issues.
         let file = File::open(path)?;
+
+        if !allow_regular_file && file.metadata()?.is_file() {
+            return Err(param_err(concat!(
+                "Refusing to read KEK from a regular file.\n",
+                "KEK material is sensitive and should be provided via a pipe or stdin.\n",
+                "If this is intentional, re-run with --allow-regular-file-as-kek.",
+            )));
+        }
+
         let kek: KeyEncryptionCipher = serde_yaml::from_reader(file).map_err(|e| {
             crate::ubiblk_error!(InvalidParameter {
                 description: format!("Error parsing KEK file {}: {e}", path.display()),
             })
         })?;
-
-        if unlink {
-            std::fs::remove_file(path)?;
-        }
 
         Ok(kek)
     }
@@ -236,6 +242,8 @@ fn param_err(description: impl Into<String>) -> UbiblkError {
 
 #[cfg(test)]
 mod tests {
+    use crate::utils::umask_guard::UMASK_LOCK;
+
     use super::*;
     use aes_gcm::KeyInit;
 
@@ -439,7 +447,7 @@ mod tests {
         write!(temp_file, "invalid: [this is not valid yaml").unwrap();
         temp_file.flush().unwrap();
 
-        let res = KeyEncryptionCipher::load(Some(&temp_file.path().to_path_buf()), false);
+        let res = KeyEncryptionCipher::load(Some(&temp_file.path().to_path_buf()), true);
         assert!(res.is_err());
     }
 
@@ -462,10 +470,6 @@ mod tests {
         let loaded_kek =
             KeyEncryptionCipher::load(Some(&temp_file.path().to_path_buf()), true).unwrap();
         assert_eq!(loaded_kek, kek);
-        assert!(
-            !temp_file.path().exists(),
-            "Temporary KEK file should be unlinked"
-        );
     }
 
     #[test]
@@ -607,5 +611,59 @@ mod tests {
         let dec2 = cipher.decrypt_key_data(&enc2).unwrap();
         assert_eq!(dec1, plaintext);
         assert_eq!(dec2, plaintext);
+    }
+
+    #[test]
+    fn test_load_rejects_regular_file_without_allow_flag() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        write!(temp_file, "method: none").unwrap();
+        temp_file.flush().unwrap();
+
+        let res = KeyEncryptionCipher::load(Some(&temp_file.path().to_path_buf()), false);
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .to_string()
+            .contains("Refusing to read KEK from a regular file."));
+    }
+
+    #[test]
+    fn test_load_allows_named_pipe() {
+        use std::io::Write;
+
+        // serialize with umask changing tests to avoid permission issues.
+        let _m = UMASK_LOCK.lock();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fifo_path = tmp_dir.path().join("test_kek_fifo");
+
+        // create a named pipe (FIFO)
+        let _ = std::fs::remove_file(&fifo_path); // Clean up if it already exists
+        nix::unistd::mkfifo(
+            &fifo_path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+
+        let fifo_path_for_load = fifo_path.clone();
+
+        // Write valid KEK data to the FIFO in a separate thread
+        std::thread::spawn(move || {
+            let kek = KeyEncryptionCipher {
+                method: CipherMethod::Aes256Gcm,
+                key: Some(vec![0x11u8; 32]),
+                auth_data: Some(b"test-aad".to_vec()),
+            };
+            let yaml_data = serde_yaml::to_string(&kek).unwrap();
+            let mut fifo_file = File::create(&fifo_path).unwrap();
+            fifo_file.write_all(yaml_data.as_bytes()).unwrap();
+        });
+
+        // Attempt to load the KEK from the named pipe
+        let res = KeyEncryptionCipher::load(Some(&fifo_path_for_load), false);
+        assert!(res.is_ok());
     }
 }

@@ -24,9 +24,9 @@ struct Args {
     #[arg(short = 'k', long = "kek")]
     kek: Option<PathBuf>,
 
-    /// Unlink the key encryption key file after use.
-    #[arg(short = 'u', long = "unlink-kek", default_value_t = false)]
-    unlink_kek: bool,
+    /// Allow reading the key encryption key from a regular file.
+    #[arg(long = "allow-regular-file-as-kek", default_value_t = false)]
+    allow_regular_file_as_kek: bool,
 }
 
 fn main() {
@@ -42,10 +42,10 @@ fn run() -> Result<()> {
     let Args {
         server_config_path,
         kek,
-        unlink_kek,
+        allow_regular_file_as_kek,
     } = Args::parse();
 
-    let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
+    let kek = KeyEncryptionCipher::load(kek.as_ref(), allow_regular_file_as_kek)?;
     let server_config =
         RemoteStripeSourceConfig::load_from_file_with_kek(&server_config_path, &kek)?;
     if server_config.psk_identity.is_none() || server_config.psk_secret.is_none() {

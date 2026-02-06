@@ -13,7 +13,7 @@ responds to requests from remote clients.
 **Usage:**
 ```bash
 remote-stripe-server --config <CONFIG_YAML> --listen-config <LISTEN_CONFIG_YAML> \
-  [--kek <KEK_FILE>] [--unlink-kek]
+  [--kek <KEK_PATH>] [--allow-regular-file-as-kek]
 ```
 
 **Notes:**
@@ -27,8 +27,11 @@ server.
 **Usage:**
 ```bash
 remote-stripe-shell --server-config <SERVER_CONFIG_YAML> \
-  [--kek <KEK_FILE>] [--unlink-kek]
+  [--kek <KEK_PATH>] [--allow-regular-file-as-kek]
 ```
+
+It's recommended to use a named pipe or `/dev/stdin` for KEK path. Regular files
+are disallowed by default to prevent accidental exposure of KEK material.
 
 ### Listen/Server config format
 

@@ -1,7 +1,7 @@
 use std::{net::TcpListener, sync::Arc, thread};
 
 use clap::Parser;
-use log::{error, info};
+use log::{error, info, warn};
 
 use ubiblk::{
     cli::{load_config_and_kek, CommonArgs},
@@ -51,6 +51,10 @@ fn run(args: Args) -> Result<()> {
         .zip(listen_config.psk_secret)
         .map(|(identity, secret)| PskCredentials::new(identity, secret))
         .transpose()?;
+
+    if psk.is_none() {
+        warn!("No PSK credentials configured — stripe server running WITHOUT transport encryption. All data will be transmitted in plaintext.");
+    }
 
     let listener = TcpListener::bind(&listen_config.address)?;
     info!("listening on {}", listener.local_addr()?);

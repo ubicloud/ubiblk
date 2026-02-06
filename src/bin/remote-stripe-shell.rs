@@ -1,5 +1,5 @@
 use clap::Parser;
-use log::error;
+use log::{error, warn};
 use rustyline::{error::ReadlineError, DefaultEditor};
 use std::{collections::HashMap, io, path::PathBuf};
 
@@ -48,6 +48,10 @@ fn run() -> Result<()> {
     let kek = KeyEncryptionCipher::load(kek.as_ref(), unlink_kek)?;
     let server_config =
         RemoteStripeSourceConfig::load_from_file_with_kek(&server_config_path, &kek)?;
+    if server_config.psk_identity.is_none() || server_config.psk_secret.is_none() {
+        warn!("No PSK credentials configured — connecting to stripe server WITHOUT transport encryption.");
+    }
+
     let mut client = connect_to_stripe_server(&server_config)?;
 
     let metadata = client

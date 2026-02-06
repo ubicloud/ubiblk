@@ -1,6 +1,6 @@
 use std::net::{SocketAddr, TcpStream};
 
-use log::info;
+use log::{info, warn};
 
 use crate::config::RemoteStripeSourceConfig;
 
@@ -127,6 +127,11 @@ pub fn connect_to_stripe_server(conf: &RemoteStripeSourceConfig) -> Result<Strip
     } else {
         None
     };
+
+    if psk.is_none() {
+        warn!("No PSK credentials configured — connecting to stripe server WITHOUT transport encryption.");
+    }
+
     let server_addr: SocketAddr = conf.address.parse().map_err(|err| {
         crate::ubiblk_error!(InvalidParameter {
             description: format!("invalid server address {}: {}", conf.address, err),

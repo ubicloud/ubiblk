@@ -125,11 +125,6 @@ ubiblk_error_variants! {
         source: std::io::Error,
         meta: ErrorMeta,
     } => "{meta}Thread creation error: {source} {meta:#}",
-    IoChannelCreation {
-        #[source]
-        source: std::io::Error,
-        meta: ErrorMeta,
-    } => "{meta}I/O channel creation error: {source} {meta:#}",
     GuestMemoryAccess {
         #[source]
         source: vm_memory::GuestMemoryError,
@@ -186,10 +181,6 @@ ubiblk_error_variants! {
         source: TlsErrorSource,
         meta: ErrorMeta,
     } => "{meta}TLS setup failed: {source} {meta:#}",
-    BackgroundWorkerError {
-        description: String,
-        meta: ErrorMeta,
-    } => "{meta}Background worker error: {description} {meta:#}",
     RpcError {
         description: String,
         meta: ErrorMeta,
@@ -393,15 +384,6 @@ mod tests {
         });
         let rendered = format!("{error}");
         assert_starts_with(&rendered, "Thread creation error: spawn error (at ");
-        assert_contains(&rendered, "src/error.rs:");
-    }
-
-    #[test]
-    fn test_io_channel_creation_format() {
-        let io_error = std::io::Error::other("Test IO error");
-        let error = crate::ubiblk_error!(IoChannelCreation { source: io_error });
-        let rendered = format!("{error}");
-        assert_starts_with(&rendered, "I/O channel creation error: Test IO error (at ");
         assert_contains(&rendered, "src/error.rs:");
     }
 

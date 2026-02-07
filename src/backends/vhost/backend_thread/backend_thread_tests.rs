@@ -590,6 +590,171 @@ mod tests {
     }
 
     #[test]
+    fn process_queue_fails_pending_on_submit_error() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+
+        // Queue a read request.
+        let addrs = setup_queue_request(
+            &mem,
+            &queue,
+            0x1000,
+            VIRTIO_BLK_T_IN,
+            0,
+            SECTOR_SIZE as u32,
+            VRING_DESC_F_WRITE as u16,
+        );
+
+        // Arm the submit failure before processing.
+        device
+            .fail_submit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut vring_guard = vring.get_mut();
+        let busy = thread.process_queue(&mut vring_guard);
+
+        // After a failed submit, all pending requests should be completed with IOERR.
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_IOERR as u8);
+
+        // The descriptor chain should have been returned to the used ring.
+        let used_idx = read_used_idx(&mem, queue.used_addr());
+        assert_eq!(used_idx, 1);
+
+        // All request slots should be freed.
+        assert!(
+            thread.request_slots.iter().all(|s| !s.used),
+            "all request slots should be freed after submit failure"
+        );
+
+        // io_channel should not report busy (no stuck requests).
+        assert!(!thread.io_channel.busy());
+
+        // The queue was not idle (a request was popped), so busy should be true.
+        assert!(busy);
+    }
+
+    #[test]
+    fn process_queue_fails_multiple_pending_on_submit_error() {
+        // Use a config with a larger queue to allow multiple in-flight requests.
+        let (gm, mem) = setup_mem();
+        let config = DeviceConfig {
+            path: "img".to_string(),
+            socket: Some("sock".to_string()),
+            num_queues: 1,
+            queue_size: 16,
+            seg_size_max: SECTOR_SIZE as u32,
+            seg_count_max: 1,
+            write_through: true,
+            device_id: "ubiblk".to_string(),
+            io_engine: crate::config::IoEngine::IoUring,
+            ..Default::default()
+        };
+        let device = TestBlockDevice::new(SECTOR_SIZE as u64 * 8);
+        let io_channel = device.create_channel().unwrap();
+        let mut thread = UbiBlkBackendThread::new(
+            gm,
+            io_channel,
+            &config,
+            BUFFER_ALIGNMENT,
+            IoTracker::new(64),
+        )
+        .unwrap();
+
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+
+        // Set up two descriptor chains in a single add_desc_chains call.
+        // Chain 1 (read): descriptors 0->1->2, chain 2 (write): descriptors 3->4->5.
+        let read_hdr = GuestAddress(0x1000);
+        let read_data = GuestAddress(0x1000 + 0x1000);
+        let read_status = GuestAddress(0x1000 + 0x2000);
+        let write_hdr = GuestAddress(0x4000);
+        let write_data = GuestAddress(0x4000 + 0x1000);
+        let write_status = GuestAddress(0x4000 + 0x2000);
+
+        // Write request headers into guest memory.
+        mem.write_obj::<u32>(VIRTIO_BLK_T_IN, read_hdr).unwrap();
+        mem.write_obj::<u32>(0, read_hdr.unchecked_add(4)).unwrap();
+        mem.write_obj::<u64>(0, read_hdr.unchecked_add(8)).unwrap();
+        mem.write_obj::<u32>(VIRTIO_BLK_T_OUT, write_hdr).unwrap();
+        mem.write_obj::<u32>(0, write_hdr.unchecked_add(4)).unwrap();
+        mem.write_obj::<u64>(1, write_hdr.unchecked_add(8)).unwrap();
+
+        // Write data for the write request.
+        let pattern = vec![0xab; SECTOR_SIZE];
+        mem.write(&pattern, write_data).unwrap();
+
+        let descs = [
+            // Chain 1: read request
+            RawDescriptor::from(SplitDescriptor::new(
+                read_hdr.0,
+                16,
+                VRING_DESC_F_NEXT as u16,
+                1,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                read_data.0,
+                SECTOR_SIZE as u32,
+                (VRING_DESC_F_WRITE | VRING_DESC_F_NEXT) as u16,
+                2,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                read_status.0,
+                1,
+                VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+            // Chain 2: write request
+            RawDescriptor::from(SplitDescriptor::new(
+                write_hdr.0,
+                16,
+                VRING_DESC_F_NEXT as u16,
+                4,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                write_data.0,
+                SECTOR_SIZE as u32,
+                VRING_DESC_F_NEXT as u16,
+                5,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                write_status.0,
+                1,
+                VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+        ];
+        // Two chains: desc 0->1->2 and desc 3->4->5. The chain boundary is detected
+        // automatically by the lack of VRING_DESC_F_NEXT on descriptors 2 and 5.
+        queue.add_desc_chains(&descs, 0).unwrap();
+
+        // Arm the submit failure.
+        device
+            .fail_submit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let mut vring_guard = vring.get_mut();
+        thread.process_queue(&mut vring_guard);
+
+        // Both requests should be completed with IOERR.
+        let read_status_val = mem.read_obj::<u8>(read_status).unwrap();
+        assert_eq!(read_status_val, VIRTIO_BLK_S_IOERR as u8);
+        let write_status_val = mem.read_obj::<u8>(write_status).unwrap();
+        assert_eq!(write_status_val, VIRTIO_BLK_S_IOERR as u8);
+
+        // All request slots should be freed.
+        assert!(
+            thread.request_slots.iter().all(|s| !s.used),
+            "all request slots should be freed after submit failure"
+        );
+
+        // io_channel should not report busy.
+        assert!(!thread.io_channel.busy());
+    }
+
+    #[test]
     fn pin_cpu_returns_early_if_pin_attempted() {
         let (mut thread, _mem) = create_thread();
         thread.pin_attempted = true;

@@ -220,6 +220,25 @@ impl UbiBlkBackendThread {
         Ok(())
     }
 
+    /// Fail all pending request slots with VIRTIO_BLK_S_IOERR.
+    ///
+    /// Called when io_channel.submit() fails to ensure no request slots remain
+    /// permanently stuck. Each pending slot gets an error status written to guest
+    /// memory, its descriptor chain returned to the used ring, and the slot freed.
+    fn fail_pending_requests(&mut self, vring: &mut Vring<'_>) {
+        for i in 0..self.request_slots.len() {
+            if !self.request_slots[i].used {
+                continue;
+            }
+            let Some(desc_chain) = self.request_slots[i].desc_chain.clone() else {
+                continue;
+            };
+            let status_addr = self.request_slots[i].status_addr;
+            self.complete_io(vring, &desc_chain, status_addr, VIRTIO_BLK_S_IOERR as u8);
+            self.put_request_slot(i);
+        }
+    }
+
     /// Drain completed I/O, update guest buffers, and signal used descriptors.
     fn poll_io(&mut self, vring: &mut Vring<'_>) {
         let mut finished_reads = vec![];
@@ -413,9 +432,10 @@ impl UbiBlkBackendThread {
             }
             busy = true;
         }
-        self.io_channel.submit().unwrap_or_else(|e| {
+        if let Err(e) = self.io_channel.submit() {
             error!("failed to submit io channel: {e:?}");
-        });
+            self.fail_pending_requests(vring);
+        }
         self.poll_io(vring);
         busy = busy || self.io_channel.busy();
 

@@ -1,6 +1,7 @@
 use std::net::{SocketAddr, TcpStream};
 
 use log::{info, warn};
+use ubiblk_macros::error_context;
 
 use crate::backends::SECTOR_SIZE;
 use crate::config::RemoteStripeSourceConfig;
@@ -17,6 +18,7 @@ impl StripeServerClient {
         }
     }
 
+    #[error_context("Failed to fetch metadata from stripe server")]
     fn fetch_metadata(&mut self) -> Result<()> {
         info!("Fetching metadata from server");
 
@@ -79,6 +81,7 @@ impl StripeServerClient {
 }
 
 impl RemoteStripeProvider for StripeServerClient {
+    #[error_context("Failed to fetch stripe {} from stripe server", stripe_idx)]
     fn fetch_stripe(&mut self, stripe_idx: u64) -> Result<Vec<u8>> {
         info!("Fetching stripe {} from server", stripe_idx);
 
@@ -143,6 +146,7 @@ impl RemoteStripeProvider for StripeServerClient {
     }
 }
 
+#[error_context("Failed to connect to stripe server at {}", conf.address)]
 pub fn connect_to_stripe_server(conf: &RemoteStripeSourceConfig) -> Result<StripeServerClient> {
     let psk = if let (Some(identity), Some(secret)) = (&conf.psk_identity, &conf.psk_secret) {
         Some(PskCredentials::new(identity.clone(), secret.clone())?)
@@ -431,5 +435,7 @@ mod tests {
         };
         let result = connect_to_stripe_server(&conf);
         assert!(result.is_err());
+        let error_message = result.err().unwrap().to_string();
+        assert!(error_message.contains("Failed to connect to stripe server at 127.0.0.1:9999"));
     }
 }

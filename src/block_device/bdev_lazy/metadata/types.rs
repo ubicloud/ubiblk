@@ -1,3 +1,5 @@
+use ubiblk_macros::error_context;
+
 use crate::{backends::SECTOR_SIZE, stripe_source::StripeSource, Result};
 
 pub const UBI_MAGIC_SIZE: usize = 9;
@@ -184,6 +186,7 @@ impl UbiMetadata {
     }
 
     /// Deserialize and validate metadata from a byte buffer.
+    #[error_context("Failed to deserialize UBI metadata from buffer")]
     pub fn from_bytes(buf: &[u8]) -> Result<Box<Self>> {
         if buf.len() < SECTOR_SIZE {
             return Err(crate::ubiblk_error!(MetadataError {
@@ -297,6 +300,7 @@ impl UbiMetadata {
     }
 
     /// Serialize `self` into the given buffer.
+    #[error_context("Failed to serialize UBI metadata into buffer")]
     pub fn write_to_buf(&self, buf: &mut [u8]) -> Result<()> {
         let total_len: usize = self.metadata_size();
         if buf.len() < total_len {

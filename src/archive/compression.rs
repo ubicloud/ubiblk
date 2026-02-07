@@ -1,8 +1,11 @@
+use ubiblk_macros::error_context;
+
 use crate::backends::SECTOR_SIZE;
 
 use super::*;
 
 impl ArchiveCompressionAlgorithm {
+    #[error_context("Failed to compress data")]
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
         assert!(
             data.len().is_multiple_of(SECTOR_SIZE),
@@ -20,6 +23,8 @@ impl ArchiveCompressionAlgorithm {
             }
         }
     }
+
+    #[error_context("Failed to decompress data")]
     pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
         match self {
             ArchiveCompressionAlgorithm::None => Ok(data.to_vec()),
@@ -230,11 +235,9 @@ mod tests {
 
         let result = algorithm.decompress(&data);
         assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("Data too short to contain size header"));
+        let error_message = result.err().unwrap().to_string();
+        assert!(error_message.contains("Data too short to contain size header"));
+        assert!(error_message.contains("Failed to decompress data"));
     }
 
     #[test]

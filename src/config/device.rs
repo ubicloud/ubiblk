@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
+use ubiblk_macros::error_context;
 use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 
 use crate::config::stripe_source::{RawStripeSourceConfig, StripeSourceConfig};
@@ -115,6 +116,7 @@ pub struct DeviceConfig {
 
 impl DeviceConfig {
     #[allow(deprecated)]
+    #[error_context("Device config validation failed")]
     fn validate(&self) -> crate::Result<()> {
         // Bounds on resource-controlling fields to prevent OOM, thread exhaustion,
         // and division-by-zero from misconfigured or malicious configs.
@@ -208,6 +210,7 @@ impl DeviceConfig {
         Ok(config)
     }
 
+    #[error_context("Failed to load device config from {}", path.display())]
     pub fn load_from_file(path: &Path) -> crate::Result<Self> {
         Self::load_from_file_with_kek(path, &KeyEncryptionCipher::default())
     }
@@ -607,10 +610,12 @@ mod tests {
         let missing_path = Path::new("/non/existent/config.yaml");
         let result = DeviceConfig::load_from_file(missing_path);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to read device config file"));
+        let error_message = result.unwrap_err().to_string();
+        assert!(error_message.contains("Failed to read device config file"));
+        assert!(error_message.contains(&format!(
+            "Failed to load device config from {}",
+            missing_path.display()
+        )));
     }
 
     #[test]

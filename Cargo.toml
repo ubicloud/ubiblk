@@ -8,7 +8,8 @@ license = "AGPL-3.0-only"
 lto = "thin"
 codegen-units = 4
 debug = true
-strip = false
+split-debuginfo = "packed"
+strip = "symbols"
 opt-level = "s"
 
 [profile.release.package."*"]

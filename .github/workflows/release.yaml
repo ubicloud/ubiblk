@@ -41,6 +41,9 @@ jobs:
             override: true
             components: rustfmt, clippy
 
+      - name: Install LLVM tools for .dwp generation
+        run: rustup component add llvm-tools-preview
+
       - name: Add musl target
         run: rustup target add ${{ matrix.target }}
 
@@ -51,22 +54,44 @@ jobs:
         run: |
           cargo build --release --target=${{ matrix.target }}
 
-      # Strip debug info from binaries (except the backends)
-      - name: Strip debug info
-        run: |
-          cd target/${{ matrix.target }}/release
-          strip init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata
-          cd -
-
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
           tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf ubiblk-${{ matrix.arch }}.tar.gz vhost-backend ublk-backend init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata
           cd -
 
+      - name: Package debug symbols
+        run: |
+          cd target/${{ matrix.target }}/release
+          shopt -s nullglob
+          debug_files=(
+            vhost-backend.dwp
+            ublk-backend.dwp
+            init-metadata.dwp
+            archive.dwp
+            remote-stripe-server.dwp
+            remote-stripe-shell.dwp
+            dump-metadata.dwp
+          )
+          missing=0
+          for f in "${debug_files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "Missing debug symbol file: $f" >&2
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' \
+            -czf ubiblk-${{ matrix.arch }}-debug-symbols.tar.gz "${debug_files[@]}"
+          cd -
+
       - uses: ncipollo/release-action@v1
         if: github.ref_type == 'tag'
         with:
-          artifacts: "${{ github.workspace }}/target/${{ matrix.target }}/release/ubiblk-${{ matrix.arch }}.tar.gz"
+          artifacts: |
+            ${{ github.workspace }}/target/${{ matrix.target }}/release/ubiblk-${{ matrix.arch }}.tar.gz
+            ${{ github.workspace }}/target/${{ matrix.target }}/release/ubiblk-${{ matrix.arch }}-debug-symbols.tar.gz
           body: "Release ${{ github.ref_name }}"
           allowUpdates: true

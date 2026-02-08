@@ -2,7 +2,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
 use crate::{
-    archive::{stripe_hashes::cbor_to_vec, ArchiveMetadata},
+    archive::{ArchiveCompressionAlgorithm, ArchiveMetadata},
     Result, ResultExt,
 };
 
@@ -31,15 +31,44 @@ pub fn verify_hmac_tag(key: &[u8], bytes: &[u8], tag: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn metadata_hmac_input(metadata: &ArchiveMetadata) -> Result<Vec<u8>> {
-    let mut input = metadata.clone();
-    input.metadata_hmac = Vec::new();
+fn metadata_hmac_input(metadata: &ArchiveMetadata) -> Vec<u8> {
+    let mut data = Vec::new();
 
-    cbor_to_vec(&input, "archive metadata HMAC input")
+    // Domain separator to avoid cross-protocol HMAC tag reuse and make the
+    // metadata HMAC input self-describing. Keep this stable across versions.
+    data.extend_from_slice(b"ARCHIVE_METADATA_HMAC_V1");
+
+    data.extend_from_slice(&metadata.format_version.to_le_bytes());
+    data.extend_from_slice(&metadata.stripe_sector_count.to_le_bytes());
+
+    match &metadata.encryption_key {
+        Some((key1, key2)) => {
+            data.push(1);
+            push_len_prefixed(&mut data, key1);
+            push_len_prefixed(&mut data, key2);
+        }
+        None => data.push(0),
+    }
+
+    match &metadata.compression {
+        ArchiveCompressionAlgorithm::None => data.push(0),
+        ArchiveCompressionAlgorithm::Snappy => data.push(1),
+        ArchiveCompressionAlgorithm::Zstd { level } => {
+            data.push(2);
+            data.extend_from_slice(&level.to_le_bytes());
+        }
+    }
+
+    data
+}
+
+fn push_len_prefixed(buffer: &mut Vec<u8>, bytes: &[u8]) {
+    buffer.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    buffer.extend_from_slice(bytes);
 }
 
 pub fn compute_metadata_hmac_tag(key: &[u8], metadata: &ArchiveMetadata) -> Result<[u8; 32]> {
-    let input = metadata_hmac_input(metadata)?;
+    let input = metadata_hmac_input(metadata);
     compute_hmac_tag(key, &input)
 }
 
@@ -49,14 +78,14 @@ pub fn verify_metadata_hmac_tag(key: &[u8], metadata: &ArchiveMetadata) -> Resul
             description: "Archive metadata HMAC tag has invalid length".to_string(),
         }));
     }
-    let input = metadata_hmac_input(metadata)?;
+    let input = metadata_hmac_input(metadata);
     verify_hmac_tag(key, &input, &metadata.metadata_hmac)
         .context("Archive metadata HMAC verification failed")
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::archive::ArchiveCompressionAlgorithm;
+    use crate::{archive::ArchiveCompressionAlgorithm, utils::hash::sha256_hex};
 
     use super::*;
 
@@ -96,5 +125,39 @@ mod tests {
         assert!(result.is_err());
         let error_message = result.err().unwrap().to_string();
         assert!(error_message.contains("Archive metadata HMAC verification failed"));
+    }
+
+    #[test]
+    fn test_metadata_hmac_input_stable_bytes() {
+        let mut metadata = ArchiveMetadata {
+            format_version: 1,
+            stripe_sector_count: 128,
+            encryption_key: Some((vec![123u8; 32], vec![234u8; 32])),
+            compression: ArchiveCompressionAlgorithm::Zstd { level: 3 },
+            hmac_key: vec![0x00u8; 32],
+            metadata_hmac: vec![0xFFu8; 32],
+        };
+
+        let input1 = metadata_hmac_input(&metadata);
+        let input2 = metadata_hmac_input(&metadata);
+        assert_eq!(input1, input2, "metadata_hmac_input must be deterministic");
+
+        // mutating hmac_key and metadata_hmac should not change the input bytes
+        metadata.hmac_key[0] = 0xFF;
+        metadata.metadata_hmac[0] = 0x22;
+        let input3 = metadata_hmac_input(&metadata);
+        assert_eq!(
+            input1, input3,
+            "metadata_hmac_input should not depend on hmac_key or metadata_hmac"
+        );
+
+        // bytes should be stable and match the expected value to catch
+        // accidental changes
+        let expect_sha256 = "f7b3df24235376fa332dc740f1a8e559572bf7c364947114f865963276cf0350";
+        assert_eq!(
+            sha256_hex(&input1),
+            expect_sha256,
+            "metadata_hmac_input bytes changed"
+        );
     }
 }

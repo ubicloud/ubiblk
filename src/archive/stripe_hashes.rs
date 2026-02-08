@@ -3,12 +3,12 @@ use std::io::Cursor;
 
 use super::bytes32;
 use ciborium::{de, ser};
-use hmac::{Hmac, Mac};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use ubiblk_macros::error_context;
 
+use crate::archive::{compute_hmac_tag, verify_hmac_tag};
+use crate::ResultExt;
 use crate::{backends::SECTOR_SIZE, crypt::XtsBlockCipher, Result};
 
 pub type StripeContentMap = HashMap<usize, StripeContentSpecifier>;
@@ -40,33 +40,6 @@ pub enum StripeContentSpecifier {
     Some([u8; 32]),
 }
 
-#[error_context("Failed to compute manifest HMAC tag")]
-pub fn compute_manifest_hmac_tag(key: &[u8], bytes: &[u8]) -> Result<[u8; 32]> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|e| {
-        crate::ubiblk_error!(ArchiveError {
-            description: format!("Failed to initialize HMAC: {e}"),
-        })
-    })?;
-    mac.update(bytes);
-    Ok(mac.finalize().into_bytes().into())
-}
-
-#[error_context("Failed to verify manifest HMAC tag")]
-pub fn verify_manifest_hmac_tag(key: &[u8], bytes: &[u8], tag: &[u8]) -> Result<()> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|e| {
-        crate::ubiblk_error!(ArchiveError {
-            description: format!("Failed to initialize HMAC: {e}"),
-        })
-    })?;
-    mac.update(bytes);
-    mac.verify_slice(tag).map_err(|_| {
-        crate::ubiblk_error!(ArchiveError {
-            description: "stripe-mapping HMAC verification failed".to_string(),
-        })
-    })?;
-    Ok(())
-}
-
 #[error_context("Failed to serialize stripe mapping")]
 pub fn serialize_stripe_mapping(
     map: &StripeContentMap,
@@ -86,7 +59,7 @@ pub fn serialize_stripe_mapping(
         let sector_count = padded.len() / SECTOR_SIZE;
         cipher.encrypt(&mut padded, XTS_SECTOR_START, sector_count as u64);
     }
-    let hmac_tag = compute_manifest_hmac_tag(
+    let hmac_tag = compute_hmac_tag(
         hmac_key,
         &manifest_hmac_input(domain, version, plaintext_len, &padded),
     )?;
@@ -135,7 +108,8 @@ pub fn deserialize_stripe_mapping(
 
     // verify HMAC
     let hmac_input = manifest_hmac_input(&domain, version, raw_plaintext_len, &ciphertext);
-    verify_manifest_hmac_tag(hmac_key, &hmac_input, &hmac_tag)?;
+    verify_hmac_tag(hmac_key, &hmac_input, &hmac_tag)
+        .context("Verifying stripe-mapping HMAC failed")?;
 
     // decrypt
     let mut decrypted = ciphertext;
@@ -167,7 +141,7 @@ pub fn deserialize_stripe_mapping(
     Ok(map)
 }
 
-fn cbor_to_vec<T: Serialize>(value: &T, context: &str) -> Result<Vec<u8>> {
+pub(super) fn cbor_to_vec<T: Serialize>(value: &T, context: &str) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     ser::into_writer(value, &mut bytes).map_err(|e| {
         crate::ubiblk_error!(ArchiveError {
@@ -219,18 +193,6 @@ mod tests {
         let decoded: StripeContentMap = cbor_from_slice(&bytes, "stripe content map").unwrap();
 
         assert_eq!(map, decoded);
-    }
-
-    #[test]
-    fn test_manifest_hmac_verification() {
-        let key = [0x11u8; 32];
-        let data = b"stripe-mapping";
-        let tag = compute_manifest_hmac_tag(&key, data).unwrap();
-        verify_manifest_hmac_tag(&key, data, &tag).unwrap();
-
-        let mut tampered = data.to_vec();
-        tampered[0] ^= 0xFF;
-        assert!(verify_manifest_hmac_tag(&key, &tampered, &tag).is_err());
     }
 
     #[test]

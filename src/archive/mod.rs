@@ -102,6 +102,12 @@ pub struct ArchiveMetadata {
         serialize_with = "encode_key"
     )]
     pub hmac_key: Vec<u8>,
+    #[serde(
+        default,
+        deserialize_with = "decode_key",
+        serialize_with = "encode_key"
+    )]
+    pub metadata_hmac: Vec<u8>,
 }
 
 impl std::fmt::Debug for ArchiveMetadata {
@@ -115,6 +121,7 @@ impl std::fmt::Debug for ArchiveMetadata {
             )
             .field("compression", &self.compression)
             .field("hmac_key", &"[REDACTED]")
+            .field("metadata_hmac", &"[REDACTED]")
             .finish()
     }
 }
@@ -135,13 +142,16 @@ mod archiver;
 mod bytes32;
 mod compression;
 mod fs_store;
+mod hmac;
 mod s3_store;
 mod stripe_hashes;
 
 pub use archiver::StripeArchiver;
 pub use fs_store::FileSystemStore;
+#[cfg(test)]
+pub use hmac::compute_metadata_hmac_tag;
+pub use hmac::{compute_hmac_tag, verify_hmac_tag, verify_metadata_hmac_tag};
 pub use s3_store::S3Store;
-pub use stripe_hashes::{compute_manifest_hmac_tag, verify_manifest_hmac_tag};
 pub use stripe_hashes::{
     deserialize_stripe_mapping, serialize_stripe_mapping, StripeContentMap, StripeContentSpecifier,
 };
@@ -163,6 +173,7 @@ mod tests {
             encryption_key: Some((vec![123u8; 32], vec![234u8; 32])),
             compression: ArchiveCompressionAlgorithm::Zstd { level: 3 },
             hmac_key: vec![178u8; 32],
+            metadata_hmac: vec![199u8; 32],
         };
         let debug_str = format!("{:?}", metadata);
         assert!(debug_str.contains("format_version: 1"));
@@ -170,8 +181,10 @@ mod tests {
         assert!(debug_str.contains("encryption_key: Some(\"[REDACTED]\")"));
         assert!(debug_str.contains("compression: Zstd { level: 3 }"));
         assert!(debug_str.contains("hmac_key: \"[REDACTED]\""));
+        assert!(debug_str.contains("metadata_hmac: \"[REDACTED]\""));
         assert!(!debug_str.contains("123"));
         assert!(!debug_str.contains("234"));
         assert!(!debug_str.contains("178"));
+        assert!(!debug_str.contains("199"));
     }
 }

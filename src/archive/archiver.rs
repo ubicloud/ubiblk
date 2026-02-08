@@ -5,8 +5,9 @@ use log::{debug, info};
 use super::ArchiveStore;
 use crate::{
     archive::{
-        serialize_stripe_mapping, ArchiveCompressionAlgorithm, ArchiveMetadata, StripeContentMap,
-        StripeContentSpecifier, ARCHIVE_FORMAT_VERSION, DEFAULT_ARCHIVE_TIMEOUT,
+        hmac::compute_metadata_hmac_tag, serialize_stripe_mapping, ArchiveCompressionAlgorithm,
+        ArchiveMetadata, StripeContentMap, StripeContentSpecifier, ARCHIVE_FORMAT_VERSION,
+        DEFAULT_ARCHIVE_TIMEOUT,
     },
     backends::SECTOR_SIZE,
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedBuffer, UbiMetadata},
@@ -296,13 +297,16 @@ impl StripeArchiver {
             None
         };
         let hmac_key = self.kek.encrypt_key_data(&self.hmac_key)?;
-        let archive_metadata = ArchiveMetadata {
+        let mut archive_metadata = ArchiveMetadata {
             format_version: ARCHIVE_FORMAT_VERSION,
             stripe_sector_count: self.metadata.stripe_sector_count(),
             encryption_key,
             compression: self.compression.clone(),
             hmac_key,
+            metadata_hmac: Vec::new(),
         };
+        let tag = compute_metadata_hmac_tag(&self.hmac_key, &archive_metadata)?;
+        archive_metadata.metadata_hmac = tag.to_vec();
         Ok(archive_metadata)
     }
 }

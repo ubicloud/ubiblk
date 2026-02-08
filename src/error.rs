@@ -270,17 +270,6 @@ impl<T> From<std::sync::mpsc::SendError<T>> for UbiblkError {
     }
 }
 
-impl From<snap::Error> for UbiblkError {
-    #[track_caller]
-    fn from(source: snap::Error) -> Self {
-        let location = std::panic::Location::caller();
-        UbiblkError::ArchiveError {
-            description: source.to_string(),
-            meta: ErrorMeta::new(ErrorLocation::new(location.file(), location.line())),
-        }
-    }
-}
-
 impl UbiblkError {
     #[track_caller]
     pub fn context(self, message: impl Into<String>) -> Self {

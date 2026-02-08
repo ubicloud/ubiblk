@@ -59,7 +59,6 @@ struct Args {
 #[derive(Clone, Debug, ValueEnum)]
 enum CompressionChoice {
     None,
-    Snappy,
     Zstd,
 }
 
@@ -103,7 +102,6 @@ fn run() -> Result<()> {
 
     let compression = match args.compression {
         CompressionChoice::None => ArchiveCompressionAlgorithm::None,
-        CompressionChoice::Snappy => ArchiveCompressionAlgorithm::Snappy,
         CompressionChoice::Zstd => ArchiveCompressionAlgorithm::Zstd {
             level: args.zstd_level,
         },

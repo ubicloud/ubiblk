@@ -13,10 +13,6 @@ impl ArchiveCompressionAlgorithm {
         );
         match self {
             ArchiveCompressionAlgorithm::None => Ok(data.to_vec()),
-            ArchiveCompressionAlgorithm::Snappy => {
-                let compressed = snap::raw::Encoder::new().compress_vec(data)?;
-                Ok(with_size_header_and_padding(compressed)?)
-            }
             ArchiveCompressionAlgorithm::Zstd { level } => {
                 let compressed = zstd::stream::encode_all(data, *level)?;
                 Ok(with_size_header_and_padding(compressed)?)
@@ -28,19 +24,6 @@ impl ArchiveCompressionAlgorithm {
     pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
         match self {
             ArchiveCompressionAlgorithm::None => Ok(data.to_vec()),
-            ArchiveCompressionAlgorithm::Snappy => {
-                let compressed_data = compressed_payload(data)?;
-                let decompressed = snap::raw::Decoder::new()
-                    .decompress_vec(compressed_data)
-                    .map_err(|source| {
-                        crate::ubiblk_error!(ArchiveError {
-                            description: format!(
-                                "Failed to decompress using Snappy algorithm (possible algorithm mismatch or corrupt data): {source}"
-                            ),
-                        })
-                    })?;
-                ensure_sector_aligned(decompressed)
-            }
             ArchiveCompressionAlgorithm::Zstd { .. } => {
                 let compressed_data = compressed_payload(data)?;
                 let decompressed = zstd::stream::decode_all(compressed_data).map_err(|source| {
@@ -107,82 +90,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_snappy_compression() {
-        let algorithm = ArchiveCompressionAlgorithm::Snappy;
-        let data = vec![0xFFu8; SECTOR_SIZE * 10]; // 10 sectors of 0xFF
-
-        let result = algorithm.compress(&data);
-        assert!(result.is_ok());
-        let compressed = result.unwrap();
-        assert!(compressed.len().is_multiple_of(SECTOR_SIZE));
-
-        let result = algorithm.decompress(&compressed);
-        assert!(result.is_ok());
-        let decompressed = result.unwrap();
-        assert_eq!(decompressed, data);
-    }
-
-    #[test]
-    fn test_snappy_decompression_invalid_data() {
-        let algorithm = ArchiveCompressionAlgorithm::Snappy;
-        let invalid_data = vec![0x00u8; 16];
-
-        let result = algorithm.decompress(&invalid_data);
-        assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("Failed to decompress using Snappy algorithm"));
-    }
-
-    #[test]
-    fn test_snappy_decompression_non_sector_aligned_output() {
-        let algorithm = ArchiveCompressionAlgorithm::Snappy;
-        let compressed = snap::raw::Encoder::new()
-            .compress_vec(&[0xABu8; 3])
-            .unwrap();
-        let data = with_size_header_and_padding(compressed).unwrap();
-
-        let result = algorithm.decompress(&data);
-        assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("is not a multiple of sector size"));
-    }
-
-    #[test]
-    fn test_snappy_decompression_data_too_short() {
-        let algorithm = ArchiveCompressionAlgorithm::Snappy;
-        let data = vec![0x00u8; 3];
-
-        let result = algorithm.decompress(&data);
-        assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("Data too short to contain size header"));
-    }
-
-    #[test]
-    fn test_snappy_decompression_size_out_of_bounds() {
-        let algorithm = ArchiveCompressionAlgorithm::Snappy;
-        let mut data = vec![0x00u8; 8];
-        data[0..4].copy_from_slice(&16u32.to_le_bytes());
-
-        let result = algorithm.decompress(&data);
-        assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("Compressed size 16 exceeds available data 4"));
-    }
-
-    #[test]
     fn test_none_compression() {
         let algorithm = ArchiveCompressionAlgorithm::None;
         let data = vec![0xAAu8; SECTOR_SIZE * 5];
@@ -243,7 +150,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "Data length must be a multiple of sector size")]
     fn test_panics_on_non_sector_size_data() {
-        let algorithm = ArchiveCompressionAlgorithm::Snappy;
+        let algorithm = ArchiveCompressionAlgorithm::None;
         let data = vec![0xFFu8; SECTOR_SIZE * 10 + 1]; // Not a multiple of sector size
         let _ = algorithm.compress(&data);
     }

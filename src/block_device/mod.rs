@@ -37,6 +37,7 @@ impl Clone for Box<dyn BlockDevice> {
 mod bdev_crypt;
 mod bdev_lazy;
 mod bdev_null;
+pub mod bdev_ops;
 mod bdev_sync;
 mod bdev_uring;
 mod wait_for_completion;
@@ -54,6 +55,8 @@ pub use bdev_lazy::{
     },
     status_report::{StatusReport, StatusReporter},
 };
+
+pub use bdev_ops::{OperationContext, OpsBlockDevice, OpsRequest, OpsSharedState, StripeOperation};
 
 pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_null::NullBlockDevice;

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use ubiblk_macros::error_context;
 
 use crate::{
-    backends::common::{run_backend_loop, BackendEnv, SECTOR_SIZE},
+    backends::common::{io_tracking::IoTracker, run_backend_loop, BackendEnv, SECTOR_SIZE},
     block_device::BlockDevice,
     config::DeviceConfig,
     Result, ResultExt,
@@ -87,10 +87,14 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
         log::warn!("Failed to set Ctrl-C handler: {e}");
     }
 
+    let io_trackers = backend_env.io_trackers().clone();
     let announce_symlink = device_symlink.clone();
     ctrl.run_target(
         move |dev| configure_ublk_device(dev, device_size),
-        move |qid, dev| serve_ublk_queue(qid, dev, bdev.clone(), backend_alignment),
+        move |qid, dev| {
+            let io_tracker = io_trackers[qid as usize].clone();
+            serve_ublk_queue(qid, dev, bdev.clone(), backend_alignment, io_tracker)
+        },
         move |ctrl| announce_ublk_device(ctrl, announce_symlink.as_deref()),
     )?;
 
@@ -222,7 +226,13 @@ fn set_thread_name(name: &str) {
     }
 }
 
-fn serve_ublk_queue(qid: u16, dev: &UblkDev, bdev: Box<dyn BlockDevice>, alignment: usize) {
+fn serve_ublk_queue(
+    qid: u16,
+    dev: &UblkDev,
+    bdev: Box<dyn BlockDevice>,
+    alignment: usize,
+    io_tracker: IoTracker,
+) {
     set_thread_name(&format!("ublk-q{qid}"));
 
     let io_channel = match bdev.create_channel() {
@@ -260,6 +270,7 @@ fn serve_ublk_queue(qid: u16, dev: &UblkDev, bdev: Box<dyn BlockDevice>, alignme
         io_channel,
         bufs,
         dev.dev_info.queue_depth as usize,
+        io_tracker,
     );
 
     queue.wait_and_handle_io(move |q, tag, io| handler.handle(q, tag, io));

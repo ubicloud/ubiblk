@@ -7,6 +7,7 @@ use libublk::{
 };
 use log::error;
 
+use crate::backends::common::io_tracking::IoTracker;
 use crate::backends::ublk::{UblkIoRequest, UblkOp};
 use crate::block_device::{IoChannel, SharedBuffer};
 use crate::{backends::common::SECTOR_SIZE, utils::AlignedBuf};
@@ -26,6 +27,7 @@ pub struct UblkIoHandler {
     pub io_channel: Box<dyn IoChannel>,
     pub backend_bufs: Vec<SharedBuffer>,
     pub bufs: Vec<IoBuf<u8>>,
+    io_tracker: IoTracker,
 }
 
 impl UblkIoHandler {
@@ -35,6 +37,7 @@ impl UblkIoHandler {
         io_channel: Box<dyn IoChannel>,
         ublk_io_bufs: Vec<IoBuf<u8>>,
         queue_size: usize,
+        io_tracker: IoTracker,
     ) -> Self {
         let backend_bufs = (0..queue_size)
             .map(|_| {
@@ -52,6 +55,7 @@ impl UblkIoHandler {
             io_channel,
             backend_bufs,
             bufs: ublk_io_bufs,
+            io_tracker,
         }
     }
 
@@ -101,12 +105,19 @@ impl UblkIoHandler {
         }
 
         match request.op {
-            UblkOp::Read => self.io_channel.add_read(
-                request.sector_offset,
-                request.sector_count,
-                backend_buf.clone(),
-                request.request_id,
-            ),
+            UblkOp::Read => {
+                self.io_channel.add_read(
+                    request.sector_offset,
+                    request.sector_count,
+                    backend_buf.clone(),
+                    request.request_id,
+                );
+                self.io_tracker.add_read(
+                    request.request_id,
+                    request.sector_offset,
+                    request.sector_count as u64,
+                );
+            }
             UblkOp::Write => {
                 let ublk_slice = ublk_buf.subslice(..bytes);
                 backend_buf.borrow_mut().as_mut_slice()[..bytes].copy_from_slice(ublk_slice);
@@ -116,8 +127,16 @@ impl UblkIoHandler {
                     backend_buf.clone(),
                     request.request_id,
                 );
+                self.io_tracker.add_write(
+                    request.request_id,
+                    request.sector_offset,
+                    request.sector_count as u64,
+                );
             }
-            UblkOp::Flush => self.io_channel.add_flush(request.request_id),
+            UblkOp::Flush => {
+                self.io_channel.add_flush(request.request_id);
+                self.io_tracker.add_flush(request.request_id);
+            }
             UblkOp::Unsupported => return Err(UblkIoError::Invalid),
         }
 
@@ -198,6 +217,7 @@ impl UblkIoHandler {
                     continue;
                 };
 
+                self.io_tracker.clear(request_id);
                 let io_result = self.complete_request(&request, success);
 
                 let completion = match io_result {
@@ -235,10 +255,11 @@ mod tests {
     fn setup_handler(max_io_bytes: usize, queue_size: usize) -> (UblkIoHandler, TestBlockDevice) {
         let device = TestBlockDevice::new(4 * SECTOR_SIZE as u64);
         let io_channel = device.create_channel().unwrap();
+        let io_tracker = IoTracker::new(queue_size);
         let bufs = (0..queue_size)
             .map(|_| IoBuf::<u8>::new(max_io_bytes))
             .collect();
-        let handler = UblkIoHandler::new(1, max_io_bytes, io_channel, bufs, queue_size);
+        let handler = UblkIoHandler::new(1, max_io_bytes, io_channel, bufs, queue_size, io_tracker);
         (handler, device)
     }
 
@@ -352,5 +373,55 @@ mod tests {
             handler.enqueue_request(&unsupported_request),
             Err(UblkIoError::Invalid)
         ));
+    }
+
+    #[test]
+    fn io_tracker_cumulative_counters() {
+        let device = TestBlockDevice::new(4 * SECTOR_SIZE as u64);
+        let io_channel = device.create_channel().unwrap();
+        let io_tracker = IoTracker::new(2);
+        let tracker_clone = io_tracker.clone();
+        let bufs = (0..2).map(|_| IoBuf::<u8>::new(SECTOR_SIZE)).collect();
+        let mut handler = UblkIoHandler::new(1, SECTOR_SIZE, io_channel, bufs, 2, io_tracker);
+
+        handler.bufs[0].as_mut_slice()[..SECTOR_SIZE].fill(0xaa);
+
+        handler
+            .enqueue_request(&UblkIoRequest {
+                op: UblkOp::Read,
+                sector_offset: 0,
+                sector_count: 1,
+                request_id: 0,
+                bytes: SECTOR_SIZE,
+            })
+            .unwrap();
+
+        handler
+            .enqueue_request(&UblkIoRequest {
+                op: UblkOp::Write,
+                sector_offset: 2,
+                sector_count: 1,
+                request_id: 1,
+                bytes: SECTOR_SIZE,
+            })
+            .unwrap();
+
+        handler
+            .enqueue_request(&UblkIoRequest {
+                op: UblkOp::Flush,
+                sector_offset: 0,
+                sector_count: 0,
+                request_id: 0,
+                bytes: 0,
+            })
+            .unwrap();
+
+        let (bytes_read, bytes_written, read_ops, write_ops, flush_ops) =
+            tracker_clone.cumulative_stats();
+        assert_eq!(bytes_read, SECTOR_SIZE as u64);
+        assert_eq!(bytes_written, SECTOR_SIZE as u64);
+        assert_eq!(read_ops, 1);
+        assert_eq!(write_ops, 1);
+        assert_eq!(flush_ops, 1);
     }
 }

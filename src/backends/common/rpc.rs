@@ -215,6 +215,24 @@ fn process_request(request: RpcRequest, state: &RpcState) -> Value {
             let queue_snapshots = queue_snapshots(state);
             json!({ "queues": queue_snapshots })
         }
+        "stats" => {
+            let queue_stats: Vec<Value> = state
+                .io_trackers
+                .iter()
+                .map(|tracker| {
+                    let (bytes_read, bytes_written, read_ops, write_ops, flush_ops) =
+                        tracker.cumulative_stats();
+                    json!({
+                        "bytes_read": bytes_read,
+                        "bytes_written": bytes_written,
+                        "read_ops": read_ops,
+                        "write_ops": write_ops,
+                        "flush_ops": flush_ops,
+                    })
+                })
+                .collect();
+            json!({ "stats": { "queues": queue_stats } })
+        }
         other => json!({
             "error": format!("unknown command: {other}"),
         }),
@@ -489,5 +507,79 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("invalid request"));
+    }
+
+    #[test]
+    fn test_rpc_stats() {
+        let path = test_socket_path("stats");
+
+        let io_tracker_1 = IoTracker::new(4);
+        io_tracker_1.add_read(0, 100, 8); // 8 sectors = 4096 bytes
+        io_tracker_1.add_write(1, 200, 16); // 16 sectors = 8192 bytes
+        io_tracker_1.add_flush(2);
+
+        let io_tracker_2 = IoTracker::new(4);
+        io_tracker_2.add_write(0, 50, 10); // 10 sectors = 5120 bytes
+        io_tracker_2.add_read(1, 75, 20); // 20 sectors = 10240 bytes
+        io_tracker_2.add_read(2, 100, 5); // 5 sectors = 2560 bytes
+
+        let io_tracker_3 = IoTracker::new(4);
+        // No IOs added to tracker 3
+
+        let io_trackers = vec![io_tracker_1, io_tracker_2, io_tracker_3];
+
+        let handle =
+            wrapped_start_rpc_server(&path, None, io_trackers).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "stats");
+
+        handle.stop().expect("Failed to stop RPC server");
+
+        // Verify response structure
+        assert!(response.get("stats").is_some());
+        let stats = &response["stats"];
+        assert!(stats.get("queues").is_some());
+        let queues = stats["queues"].as_array().unwrap();
+        assert_eq!(queues.len(), 3);
+
+        // Verify tracker 1 stats
+        assert_eq!(queues[0]["bytes_read"], 4096);
+        assert_eq!(queues[0]["bytes_written"], 8192);
+        assert_eq!(queues[0]["read_ops"], 1);
+        assert_eq!(queues[0]["write_ops"], 1);
+        assert_eq!(queues[0]["flush_ops"], 1);
+
+        // Verify tracker 2 stats
+        assert_eq!(queues[1]["bytes_read"], 12800); // 10240 + 2560
+        assert_eq!(queues[1]["bytes_written"], 5120);
+        assert_eq!(queues[1]["read_ops"], 2);
+        assert_eq!(queues[1]["write_ops"], 1);
+        assert_eq!(queues[1]["flush_ops"], 0);
+
+        // Verify tracker 3 stats (all zeros)
+        assert_eq!(queues[2]["bytes_read"], 0);
+        assert_eq!(queues[2]["bytes_written"], 0);
+        assert_eq!(queues[2]["read_ops"], 0);
+        assert_eq!(queues[2]["write_ops"], 0);
+        assert_eq!(queues[2]["flush_ops"], 0);
+    }
+
+    #[test]
+    fn test_rpc_stats_empty() {
+        let path = test_socket_path("stats_empty");
+
+        // Start server with empty trackers vector
+        let handle =
+            wrapped_start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "stats");
+
+        handle.stop().expect("Failed to stop RPC server");
+
+        // Should return empty array
+        assert!(response.get("stats").is_some());
+        let stats = &response["stats"];
+        assert!(stats.get("queues").is_some());
+        assert_eq!(stats["queues"].as_array().unwrap().len(), 0);
     }
 }

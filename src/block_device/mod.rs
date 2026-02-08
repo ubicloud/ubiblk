@@ -57,8 +57,9 @@ pub use bdev_lazy::{
 };
 
 pub use bdev_ops::{
-    ArchiveDestination, OperationContext, OpsBlockDevice, OpsRequest, OpsSharedState,
-    SnapshotCoordinator, SnapshotOperation, SnapshotState, SnapshotStatus, StripeOperation,
+    ArchiveDestination, DualKeyCryptBlockDevice, DualKeyState, OperationContext, OpsBlockDevice,
+    OpsRequest, OpsSharedState, RekeyOperation, SnapshotCoordinator, SnapshotOperation,
+    SnapshotState, SnapshotStatus, StripeOperation,
 };
 
 pub use bdev_crypt::CryptBlockDevice;

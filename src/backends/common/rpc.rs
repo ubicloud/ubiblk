@@ -16,8 +16,10 @@ use std::{
 use crate::{
     backends::common::io_tracking::{IoKind, IoTracker},
     block_device::{
-        bdev_ops::uploader::SnapshotCoordinator, BgWorkerRequest, OpsSharedState, SnapshotOperation,
+        bdev_ops::{shared_state::NORMAL, uploader::SnapshotCoordinator},
+        BgWorkerRequest, DualKeyState, OpsSharedState, RekeyOperation, SnapshotOperation,
     },
+    crypt::XtsBlockCipher,
     utils::umask_guard::UmaskGuard,
     Result,
 };
@@ -177,11 +179,116 @@ impl SnapshotRpcHandler {
     }
 }
 
+/// Rekey status for RPC reporting.
+#[derive(Debug)]
+pub enum RekeyStatus {
+    /// No rekey in progress.
+    Idle,
+    /// Rekey is stalling (draining in-flight IO).
+    Stalling,
+    /// Rekey is actively processing stripes.
+    Operating {
+        stripes_processed: usize,
+        stripe_count: usize,
+    },
+}
+
+/// Handles rekey-related RPC commands.
+///
+/// Shared across RPC handler threads via `Arc`.
+pub struct RekeyRpcHandler {
+    ops_shared: OpsSharedState,
+    bgworker_tx: Sender<BgWorkerRequest>,
+    stripe_count: usize,
+    /// Tracks whether a rekey is in progress (for status reporting).
+    rekey_active: Arc<AtomicBool>,
+}
+
+impl RekeyRpcHandler {
+    pub fn new(
+        ops_shared: OpsSharedState,
+        bgworker_tx: Sender<BgWorkerRequest>,
+        stripe_count: usize,
+    ) -> Self {
+        RekeyRpcHandler {
+            ops_shared,
+            bgworker_tx,
+            stripe_count,
+            rekey_active: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Handle the `start_rekey` RPC command.
+    ///
+    /// Expects old and new XTS key pairs to be provided externally
+    /// (from config with pending_encryption_key).
+    pub fn start_rekey(&self, old_xts: XtsBlockCipher, new_xts: XtsBlockCipher) -> Value {
+        // Atomic claim — only one operation can run at a time
+        if !self.ops_shared.try_begin_stalling() {
+            return json!({ "error": "operation already in progress" });
+        }
+
+        // Create DualKeyState and RekeyOperation
+        let dual_key_state = Arc::new(DualKeyState::new(self.stripe_count));
+        let operation = RekeyOperation::new(old_xts, new_xts, dual_key_state);
+
+        // Mark rekey as active
+        self.rekey_active.store(true, Ordering::Release);
+
+        // Send to bgworker
+        if let Err(e) = self.bgworker_tx.send(BgWorkerRequest::StartOperation {
+            operation: Box::new(operation),
+        }) {
+            error!("Failed to send StartOperation to bgworker: {}", e);
+            self.ops_shared.set_phase(NORMAL);
+            self.rekey_active.store(false, Ordering::Release);
+            return json!({ "error": format!("failed to send operation to bgworker: {}", e) });
+        }
+
+        info!("Rekey operation started for {} stripes", self.stripe_count);
+        json!({
+            "result": "rekey started",
+            "stripe_count": self.stripe_count,
+        })
+    }
+
+    /// Handle the `rekey_status` RPC command.
+    pub fn rekey_status(&self) -> Value {
+        if !self.rekey_active.load(Ordering::Acquire) {
+            return json!({ "state": "idle" });
+        }
+
+        let phase = self.ops_shared.phase();
+        match phase {
+            crate::block_device::bdev_ops::shared_state::STALLING => {
+                json!({
+                    "state": "stalling",
+                    "stripe_count": self.stripe_count,
+                })
+            }
+            crate::block_device::bdev_ops::shared_state::OPERATING => {
+                let processed = self.ops_shared.stripes_processed();
+                json!({
+                    "state": "operating",
+                    "stripes_processed": processed,
+                    "stripe_count": self.stripe_count,
+                })
+            }
+            _ => {
+                // Phase returned to normal — rekey completed (or failed)
+                self.rekey_active.store(false, Ordering::Release);
+                json!({ "state": "idle" })
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 struct RpcState {
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
     snapshot_handler: Option<Arc<SnapshotRpcHandler>>,
+    rekey_handler: Option<Arc<RekeyRpcHandler>>,
 }
 
 #[derive(Deserialize)]
@@ -220,7 +327,7 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
 ) -> Result<RpcServerHandle> {
-    start_rpc_server_with_snapshot(path, status_reporter, io_trackers, None)
+    start_rpc_server_with_ops(path, status_reporter, io_trackers, None, None)
 }
 
 #[error_context("Failed to start RPC server on path: {path:?}")]
@@ -229,6 +336,17 @@ pub fn start_rpc_server_with_snapshot<P: AsRef<Path>>(
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
     snapshot_handler: Option<Arc<SnapshotRpcHandler>>,
+) -> Result<RpcServerHandle> {
+    start_rpc_server_with_ops(path, status_reporter, io_trackers, snapshot_handler, None)
+}
+
+#[error_context("Failed to start RPC server on path: {path:?}")]
+pub fn start_rpc_server_with_ops<P: AsRef<Path>>(
+    path: P,
+    status_reporter: Option<StatusReporter>,
+    io_trackers: Vec<IoTracker>,
+    snapshot_handler: Option<Arc<SnapshotRpcHandler>>,
+    rekey_handler: Option<Arc<RekeyRpcHandler>>,
 ) -> Result<RpcServerHandle> {
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
@@ -255,6 +373,7 @@ pub fn start_rpc_server_with_snapshot<P: AsRef<Path>>(
         status_reporter,
         io_trackers,
         snapshot_handler,
+        rekey_handler,
     });
 
     info!("RPC server listening on {:?}", path);
@@ -388,6 +507,10 @@ fn process_request(request: RpcRequest, state: &RpcState) -> Value {
         "cancel_snapshot" => match &state.snapshot_handler {
             Some(handler) => handler.cancel_snapshot(),
             None => json!({ "error": "snapshot not supported" }),
+        },
+        "rekey_status" => match &state.rekey_handler {
+            Some(handler) => handler.rekey_status(),
+            None => json!({ "error": "rekey not supported" }),
         },
         other => json!({
             "error": format!("unknown command: {other}"),

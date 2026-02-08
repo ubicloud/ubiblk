@@ -63,6 +63,10 @@ impl XtsBlockCipher {
         kek.encrypt_xts_keys(&self.key1, &self.key2)
     }
 
+    pub fn keys(&self) -> (&[u8; 32], &[u8; 32]) {
+        (&self.key1, &self.key2)
+    }
+
     fn get_initial_tweak(&self, sector: u64) -> [u8; 16] {
         /*
          * Based on SPDK's _sw_accel_crypto_operation() in spdk/lib/accel/accel_sw.c:

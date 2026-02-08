@@ -1,7 +1,7 @@
 pub mod device;
 pub mod stripe_source;
 
-pub use device::{DeviceConfig, IoEngine};
+pub use device::{DeviceConfig, IoEngine, RekeyState};
 pub use stripe_source::{
     ArchiveStripeSourceConfig, AwsCredentials, RawStripeSourceConfig, RemoteStripeSourceConfig,
     StripeSourceConfig,

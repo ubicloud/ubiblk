@@ -7,6 +7,16 @@ use virtio_bindings::virtio_blk::VIRTIO_BLK_ID_BYTES;
 use crate::config::stripe_source::{RawStripeSourceConfig, StripeSourceConfig};
 use crate::crypt::{decode_optional_key_pair, CipherMethod, KeyEncryptionCipher};
 
+/// State of an in-progress rekey operation, used for crash recovery.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RekeyState {
+    #[default]
+    NotStarted,
+    InProgress,
+    Complete,
+}
+
 fn default_poll_queue_timeout_us() -> u128 {
     1000
 }
@@ -112,6 +122,21 @@ pub struct DeviceConfig {
 
     #[serde(default)]
     pub io_engine: IoEngine,
+
+    // --- Rekey fields (used for crash recovery) ---
+    /// Pending encryption key pair being rotated to.
+    /// Present only during an in-progress rekey operation.
+    #[serde(default, deserialize_with = "decode_optional_key_pair")]
+    pub pending_encryption_key: Option<(Vec<u8>, Vec<u8>)>,
+
+    /// Current rekey state for crash recovery.
+    #[serde(default)]
+    pub rekey_state: RekeyState,
+
+    /// Stripe index up to which rekeying has completed (exclusive).
+    /// Stripes [0..rekey_progress) have been rekeyed.
+    #[serde(default)]
+    pub rekey_progress: u64,
 }
 
 impl DeviceConfig {
@@ -261,6 +286,11 @@ impl DeviceConfig {
             }
             let (key1, key2) = kek.decrypt_xts_keys(key1, key2)?;
             self.encryption_key = Some((key1.to_vec(), key2.to_vec()));
+        }
+
+        if let Some((key1, key2)) = self.pending_encryption_key.take() {
+            let (key1, key2) = kek.decrypt_xts_keys(key1, key2)?;
+            self.pending_encryption_key = Some((key1.to_vec(), key2.to_vec()));
         }
 
         if let Some(stripe_source) = self.stripe_source.as_mut() {

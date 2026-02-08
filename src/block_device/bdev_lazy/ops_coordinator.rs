@@ -1,3 +1,4 @@
+use crate::block_device::bdev_lazy::metadata::shared_state::NoSource;
 use crate::block_device::bdev_lazy::metadata::types::{ops_phase, ops_type, OpsRecoveryInfo};
 use crate::block_device::{
     bdev_ops::{
@@ -5,7 +6,7 @@ use crate::block_device::{
         operation::{OperationContext, StripeOperation},
         shared_state::{OpsSharedState, NORMAL, OPERATING},
     },
-    BlockDevice, IoChannel,
+    BlockDevice, IoChannel, SharedMetadataState,
 };
 
 use super::metadata_flusher::MetadataFlusher;
@@ -50,6 +51,7 @@ pub struct OpsCoordinator {
     ops_target_channel: Option<Box<dyn IoChannel>>,
     stripe_count: usize,
     stripe_sector_count_shift: u8,
+    metadata_state: SharedMetadataState,
 }
 
 impl OpsCoordinator {
@@ -60,6 +62,7 @@ impl OpsCoordinator {
         metadata_dev: Box<dyn BlockDevice>,
         stripe_count: usize,
         stripe_sector_count_shift: u8,
+        metadata_state: SharedMetadataState,
     ) -> Self {
         OpsCoordinator {
             ops_shared,
@@ -71,6 +74,7 @@ impl OpsCoordinator {
             ops_target_channel: None,
             stripe_count,
             stripe_sector_count_shift,
+            metadata_state,
         }
     }
 
@@ -240,10 +244,35 @@ impl OpsCoordinator {
         info!("Operation '{}': entered Operating phase", op_name);
     }
 
+    /// Check if a stripe is empty (no source data and never written by guest).
+    fn is_stripe_empty(&self, stripe_id: usize) -> bool {
+        self.metadata_state.stripe_fetch_state(stripe_id) == NoSource
+            && !self.metadata_state.stripe_written(stripe_id)
+    }
+
+    /// Skip a stripe: clear its OPS_LOCKED durably and unlock without processing.
+    fn skip_and_unlock_stripe(&mut self, stripe_id: usize, metadata_flusher: &mut MetadataFlusher) {
+        // Durably clear OPS_LOCKED, then volatile unlock — same as process_and_unlock
+        // but without calling process_stripe/on_stripe_done.
+        metadata_flusher.clear_ops_locked(stripe_id);
+        while metadata_flusher.busy() {
+            metadata_flusher.update();
+        }
+        self.ops_shared.unlock_stripe(stripe_id);
+        self.ops_shared.increment_stripes_processed();
+    }
+
     fn update_operation(&mut self, metadata_flusher: &mut MetadataFlusher) {
         if self.ops_shared.phase() != OPERATING {
             return;
         }
+
+        let skip_empty = self
+            .active_operation
+            .as_ref()
+            .unwrap()
+            .operation
+            .skip_empty_stripes();
 
         // Priority stripes first (requested by frontend writes)
         while let Some(stripe_id) = self
@@ -254,16 +283,32 @@ impl OpsCoordinator {
             .pop_front()
         {
             if self.ops_shared.stripe_locked(stripe_id) {
-                self.process_and_unlock_stripe(stripe_id, metadata_flusher);
+                if skip_empty && self.is_stripe_empty(stripe_id) {
+                    self.skip_and_unlock_stripe(stripe_id, metadata_flusher);
+                } else {
+                    self.process_and_unlock_stripe(stripe_id, metadata_flusher);
+                }
             }
         }
 
-        // Background: process next locked stripe
-        let active = self.active_operation.as_mut().unwrap();
-        while active.next_stripe < self.stripe_count {
-            let s = active.next_stripe;
-            active.next_stripe += 1;
+        // Background: process next locked stripe.
+        // We read/advance next_stripe in a scoped borrow, then call methods on self.
+        loop {
+            let s = {
+                let active = self.active_operation.as_mut().unwrap();
+                if active.next_stripe >= self.stripe_count {
+                    break;
+                }
+                let s = active.next_stripe;
+                active.next_stripe += 1;
+                s
+            };
             if self.ops_shared.stripe_locked(s) {
+                if skip_empty && self.is_stripe_empty(s) {
+                    // Skip is cheap (no I/O) — continue to next stripe
+                    self.skip_and_unlock_stripe(s, metadata_flusher);
+                    continue;
+                }
                 self.process_and_unlock_stripe(s, metadata_flusher);
                 break; // one per iteration to stay responsive
             }

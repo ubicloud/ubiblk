@@ -61,6 +61,16 @@ pub trait StripeOperation: Send {
     /// The framework releases all stripe locks before calling this.
     fn on_failure(&mut self, error: &str, ctx: &mut OperationContext);
 
+    /// Whether stripes with no source data and no guest writes should be skipped.
+    /// When true, the coordinator skips `process_stripe` for stripes where
+    /// `fetch_state == NoSource && write_state == NotWritten` — they contain no
+    /// meaningful data. The stripe is still unlocked and counted as processed.
+    /// Snapshot: `true` (no meaningful data to copy).
+    /// Rekey: `false` (may want to re-encrypt all allocated space).
+    fn skip_empty_stripes(&self) -> bool {
+        false
+    }
+
     /// Whether this operation supports cancellation.
     /// Snapshot: `true` (discard staging, release locks).
     /// Rekey: `false` (partial rekey leaves mixed-key state).

@@ -151,6 +151,10 @@ impl StripeOperation for SnapshotOperation {
         error!("Snapshot {} failed: {}", self.snapshot_id, error);
     }
 
+    fn skip_empty_stripes(&self) -> bool {
+        true
+    }
+
     fn supports_cancel(&self) -> bool {
         true
     }
@@ -171,6 +175,7 @@ mod tests {
         assert_eq!(op.name(), "snapshot");
         assert!(!op.gate_reads());
         assert!(op.supports_cancel());
+        assert!(op.skip_empty_stripes());
         assert_eq!(op.snapshot_id(), 1);
     }
 

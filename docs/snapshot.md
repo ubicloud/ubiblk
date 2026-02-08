@@ -92,8 +92,27 @@ For each stripe, `SnapshotOperation::process_stripe` (`snapshot.rs:93`) executes
 3. **Flush** staging for durability (`snapshot.rs:119-123`)
 
 After flush completes, `on_stripe_done` increments the progress counter (`snapshot.rs:128`),
-and the bgworker unlocks the stripe (`bgworker.rs:395`), allowing queued guest writes to
-proceed.
+and the bgworker unlocks the stripe, allowing queued guest writes to proceed.
+
+### Empty stripe skip optimization
+
+Stripes where `has_source = false` and `written = false` contain no meaningful data (they
+have never been fetched from a source and the guest has never written to them). The snapshot
+coordinator skips these stripes entirely: no target read, no staging write, no staging flush.
+The stripe is still unlocked and counted as processed for completion tracking, but `process_stripe`
+and `on_stripe_done` are not called.
+
+This optimization is controlled by `StripeOperation::skip_empty_stripes()` (`operation.rs:65`):
+- `SnapshotOperation` returns `true` — empty stripes are skipped
+- `RekeyOperation` returns `false` — all stripes are re-encrypted
+
+The coordinator checks `SharedMetadataState` for each stripe (`ops_coordinator.rs`):
+if `fetch_state == NoSource && write_state == NotWritten`, the stripe is skipped via
+`skip_and_unlock_stripe()` which durably clears `OPS_LOCKED` and unlocks without I/O.
+
+**Impact**: For a device with N total stripes and E empty stripes, the snapshot copies only
+N - E stripes. Staging regions for skipped stripes are left unmodified (zeros or previous
+content).
 
 ### Bgworker coordination
 
@@ -323,6 +342,8 @@ Guest writes to already-copied (unlocked) stripes are unaffected.
 For a 1 TiB device with 1 MiB stripes (1,048,576 stripes):
 - Copy phase: ~1,048,576 * 1.5 ms ~ 26 minutes (sequential, single-threaded)
 - Actual time is lower due to priority processing interleaving
+- Empty stripes (`!has_source && !written`) are skipped with zero I/O, reducing total time
+  proportional to the fraction of empty stripes
 
 ## Limitations
 

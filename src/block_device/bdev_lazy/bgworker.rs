@@ -83,6 +83,7 @@ impl BgWorker {
             metadata_dev.clone(),
             stripe_count,
             stripe_sector_count_shift,
+            self.metadata_state.clone(),
         ));
     }
 
@@ -1165,6 +1166,137 @@ mod tests {
         sender.send(BgWorkerRequest::Shutdown).unwrap();
         bg_worker.run();
         // No panic, no error — just ran and shut down normally
+    }
+
+    #[test]
+    fn snapshot_skips_empty_stripes() {
+        use crate::backends::SECTOR_SIZE;
+        use crate::block_device::bdev_ops::snapshot::SnapshotOperation;
+
+        // Setup: 16 total stripes, only first 8 have HAS_SOURCE (image_stripe_count=8).
+        // Stripes 8-15 are empty (NoSource, NotWritten) and should be skipped.
+        let stripe_sector_count_shift = 11u8;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+        let stripe_size = stripe_sector_count as usize * SECTOR_SIZE;
+        let total_stripes = 16usize;
+        let source_stripes = 8usize; // only first 8 have source data
+
+        let dev_size = (stripe_size * total_stripes) as u64;
+        let source_dev = TestBlockDevice::new(dev_size);
+        let target_dev = TestBlockDevice::new(dev_size);
+        let metadata_dev = TestBlockDevice::new(1024 * 1024);
+
+        // Write known data to ALL target stripes (including empty ones)
+        for s in 0..total_stripes {
+            let pattern = vec![(s + 1) as u8; stripe_size];
+            target_dev.write(s * stripe_size, &pattern, stripe_size);
+        }
+
+        // Create metadata with only first 8 stripes having HAS_SOURCE
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, total_stripes, source_stripes);
+        metadata.save_to_bdev(&metadata_dev).unwrap();
+        let metadata_state = {
+            let loaded = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&loaded)
+        };
+
+        // Verify metadata setup: stripes 0-7 have source (NotFetched), 8-15 are NoSource
+        use crate::block_device::bdev_lazy::metadata::shared_state::{
+            NoSource as FetchNoSource, NotFetched,
+        };
+        for s in 0..source_stripes {
+            assert_eq!(
+                metadata_state.stripe_fetch_state(s),
+                NotFetched,
+                "stripe {s} should be NotFetched (has source, not yet fetched)"
+            );
+        }
+        for s in source_stripes..total_stripes {
+            assert_eq!(
+                metadata_state.stripe_fetch_state(s),
+                FetchNoSource,
+                "stripe {s} should be NoSource"
+            );
+            assert!(
+                !metadata_state.stripe_written(s),
+                "stripe {s} should be NotWritten"
+            );
+        }
+
+        let stripe_source = Box::new(
+            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
+                .unwrap(),
+        );
+
+        let stripe_count = target_dev.sector_count().div_ceil(stripe_sector_count) as usize;
+        let (tx, rx) = channel();
+        let (_ops_tx, ops_rx) = channel();
+        let ops_shared = OpsSharedState::new(stripe_count);
+
+        let mut bg_worker = BgWorker::new(
+            stripe_source,
+            &target_dev,
+            &metadata_dev,
+            4096,
+            false,
+            metadata_state,
+            rx,
+        )
+        .unwrap();
+        bg_worker.set_ops_support(
+            ops_shared.clone(),
+            ops_rx,
+            &target_dev,
+            &metadata_dev,
+            stripe_count,
+            stripe_sector_count_shift,
+        );
+
+        // Create staging device (initialized to zeros)
+        let staging = TestBlockDevice::new(dev_size);
+        let operation = SnapshotOperation::new(staging.clone(), 1);
+        let stripes_copied = operation.stripes_copied();
+
+        assert!(ops_shared.try_begin_stalling());
+
+        tx.send(BgWorkerRequest::StartOperation {
+            operation: Box::new(operation),
+        })
+        .unwrap();
+        tx.send(BgWorkerRequest::Shutdown).unwrap();
+
+        bg_worker.run();
+
+        // All stripes processed (both copied and skipped)
+        assert_eq!(ops_shared.phase(), NORMAL);
+        assert_eq!(ops_shared.stripes_processed(), stripe_count);
+
+        // stripes_copied counts only actually-copied stripes (via on_stripe_done),
+        // not skipped ones. Skipped stripes don't call process_stripe/on_stripe_done.
+        assert_eq!(
+            stripes_copied.load(Ordering::Acquire),
+            source_stripes,
+            "only source stripes should be copied"
+        );
+
+        // Non-empty stripes (0-7): staging should match target data
+        for s in 0..source_stripes {
+            let expected = vec![(s + 1) as u8; stripe_size];
+            let mut actual = vec![0u8; stripe_size];
+            staging.read(s * stripe_size, &mut actual, stripe_size);
+            assert_eq!(actual, expected, "stripe {s} should be copied to staging");
+        }
+
+        // Empty stripes (8-15): staging should still be zeros (not copied)
+        for s in source_stripes..stripe_count {
+            let expected = vec![0u8; stripe_size];
+            let mut actual = vec![0u8; stripe_size];
+            staging.read(s * stripe_size, &mut actual, stripe_size);
+            assert_eq!(
+                actual, expected,
+                "stripe {s} (empty) should NOT be copied — staging should remain zeros"
+            );
+        }
     }
 
     #[test]

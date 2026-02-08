@@ -1,28 +1,19 @@
 use super::{
     metadata::shared_state::SharedMetadataState, metadata_flusher::MetadataFlusher,
-    stripe_fetcher::StripeFetcher,
+    ops_coordinator::OpsCoordinator, stripe_fetcher::StripeFetcher,
 };
 
-use crate::block_device::bdev_lazy::metadata::types::{ops_phase, ops_type, OpsRecoveryInfo};
 use crate::{
     block_device::{
-        bdev_ops::{
-            device::OpsRequest,
-            operation::{OperationContext, StripeOperation},
-            shared_state::{OpsSharedState, NORMAL, OPERATING},
-        },
-        BlockDevice, IoChannel,
+        bdev_ops::{device::OpsRequest, operation::StripeOperation, shared_state::OpsSharedState},
+        BlockDevice,
     },
     stripe_source::StripeSource,
     Result,
 };
 
-use log::{error, info, warn};
-use std::{
-    collections::VecDeque,
-    path::Path,
-    sync::mpsc::{Receiver, TryRecvError},
-};
+use log::{error, info};
+use std::sync::mpsc::{Receiver, TryRecvError};
 
 pub enum BgWorkerRequest {
     Fetch { stripe_id: usize },
@@ -32,27 +23,13 @@ pub enum BgWorkerRequest {
     Shutdown,
 }
 
-struct ActiveOperation {
-    operation: Box<dyn StripeOperation>,
-    next_stripe: usize,
-    priority_queue: VecDeque<usize>,
-}
-
 pub struct BgWorker {
     stripe_fetcher: StripeFetcher,
     metadata_flusher: MetadataFlusher,
     req_receiver: Receiver<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     done: bool,
-    // Operation support
-    ops_shared: Option<OpsSharedState>,
-    ops_request_receiver: Option<Receiver<OpsRequest>>,
-    active_operation: Option<ActiveOperation>,
-    target_dev: Box<dyn BlockDevice>,
-    metadata_dev: Box<dyn BlockDevice>,
-    ops_target_channel: Option<Box<dyn IoChannel>>,
-    stripe_count: usize,
-    stripe_sector_count_shift: u8,
+    ops_coordinator: Option<OpsCoordinator>,
 }
 
 impl BgWorker {
@@ -68,8 +45,6 @@ impl BgWorker {
     ) -> Result<Self> {
         let source_sector_count = stripe_source.sector_count();
         let stripe_sector_count = metadata_state.stripe_sector_count();
-        let stripe_sector_count_shift = metadata_state.stripe_sector_count_shift();
-        let stripe_count = target_dev.sector_count().div_ceil(stripe_sector_count) as usize;
         let metadata_flusher =
             MetadataFlusher::new(metadata_dev, source_sector_count, metadata_state.clone())?;
         let stripe_fetcher = StripeFetcher::new(
@@ -86,14 +61,7 @@ impl BgWorker {
             req_receiver,
             done: false,
             metadata_state,
-            ops_shared: None,
-            ops_request_receiver: None,
-            active_operation: None,
-            target_dev: target_dev.clone(),
-            metadata_dev: metadata_dev.clone(),
-            ops_target_channel: None,
-            stripe_count,
-            stripe_sector_count_shift,
+            ops_coordinator: None,
         })
     }
 
@@ -103,17 +71,23 @@ impl BgWorker {
         &mut self,
         ops_shared: OpsSharedState,
         ops_request_receiver: Receiver<OpsRequest>,
+        target_dev: &dyn BlockDevice,
+        metadata_dev: &dyn BlockDevice,
+        stripe_count: usize,
+        stripe_sector_count_shift: u8,
     ) {
-        self.ops_shared = Some(ops_shared);
-        self.ops_request_receiver = Some(ops_request_receiver);
+        self.ops_coordinator = Some(OpsCoordinator::new(
+            ops_shared,
+            ops_request_receiver,
+            target_dev.clone(),
+            metadata_dev.clone(),
+            stripe_count,
+            stripe_sector_count_shift,
+        ));
     }
 
     pub fn shared_state(&self) -> SharedMetadataState {
         self.metadata_state.clone()
-    }
-
-    fn operation_active(&self) -> bool {
-        self.active_operation.is_some()
     }
 
     pub fn process_request(&mut self, req: BgWorkerRequest) {
@@ -125,10 +99,16 @@ impl BgWorker {
                 self.metadata_flusher.set_stripe_written(stripe_id)
             }
             BgWorkerRequest::StartOperation { operation } => {
-                self.begin_operation(operation);
+                if let Some(coordinator) = &mut self.ops_coordinator {
+                    coordinator.start_operation(operation);
+                } else {
+                    error!("StartOperation received but ops support not configured");
+                }
             }
             BgWorkerRequest::CancelOperation => {
-                self.cancel_operation();
+                if let Some(coordinator) = &mut self.ops_coordinator {
+                    coordinator.cancel_operation(&mut self.metadata_flusher);
+                }
             }
             BgWorkerRequest::Shutdown => {
                 info!("Received shutdown request, stopping worker");
@@ -162,28 +142,6 @@ impl BgWorker {
         }
     }
 
-    /// Receive priority processing requests from OpsIoChannels.
-    fn receive_ops_requests(&mut self) {
-        let receiver = match &self.ops_request_receiver {
-            Some(r) => r,
-            None => return,
-        };
-        let active = match &mut self.active_operation {
-            Some(a) => a,
-            None => return,
-        };
-
-        loop {
-            match receiver.try_recv() {
-                Ok(OpsRequest::PriorityProcess { stripe_id }) => {
-                    active.priority_queue.push_back(stripe_id);
-                }
-                Err(TryRecvError::Disconnected) => break,
-                Err(TryRecvError::Empty) => break,
-            }
-        }
-    }
-
     pub fn update(&mut self) {
         self.stripe_fetcher.update();
         for (stripe_id, success) in self.stripe_fetcher.take_finished_fetches() {
@@ -198,581 +156,31 @@ impl BgWorker {
     }
 
     pub fn run(&mut self) {
-        self.recover_interrupted_operation();
-
-        while !self.done {
-            let busy = self.stripe_fetcher.busy()
-                || self.metadata_flusher.busy()
-                || self.operation_active();
-            let block = !busy;
-            self.receive_requests(block);
-            self.receive_ops_requests();
-            self.update();
-            self.update_operation();
-        }
-    }
-
-    // --- Operation lifecycle ---
-
-    fn begin_operation(&mut self, mut operation: Box<dyn StripeOperation>) {
-        let ops_shared = match &self.ops_shared {
-            Some(s) => s.clone(),
-            None => {
-                error!("StartOperation received but ops support not configured");
-                return;
-            }
-        };
-
-        let op_name = operation.name().to_string();
-        info!("Beginning operation '{}': draining pipelines", op_name);
-
-        // 1. Set gate_reads for this operation
-        ops_shared.set_gate_reads(operation.gate_reads());
-
-        // 2. Drain own in-flight fetches and metadata flushes
-        while self.stripe_fetcher.busy() || self.metadata_flusher.busy() {
-            self.update();
+        if let Some(coordinator) = &mut self.ops_coordinator {
+            coordinator.recover_interrupted_operation(&mut self.metadata_flusher);
         }
 
-        // 3. Wait for all frontend channels to drain
         loop {
-            let drained = ops_shared.channels_drained();
-            let total = ops_shared.num_channels();
-            if drained >= total {
+            let ops_busy = self.ops_coordinator.as_ref().map_or(false, |c| c.busy());
+
+            // Don't exit while the coordinator has an active drain or operation.
+            // In the original code, begin_operation() was a blocking call that
+            // completed the drain inline, so Shutdown couldn't interrupt it.
+            // With the state machine approach, the drain is incremental, so we
+            // must keep the loop alive until the coordinator finishes.
+            if self.done && !ops_busy {
                 break;
             }
-            self.receive_requests(false);
+
+            let busy = self.stripe_fetcher.busy() || self.metadata_flusher.busy() || ops_busy;
+            let block = !busy && !self.done;
+            self.receive_requests(block);
+            if let Some(coordinator) = &mut self.ops_coordinator {
+                coordinator.receive_ops_requests();
+                coordinator.update(&mut self.stripe_fetcher, &mut self.metadata_flusher);
+            }
             self.update();
         }
-
-        info!(
-            "Operation '{}': all channels drained, quiescent point reached",
-            op_name
-        );
-
-        // === QUIESCENT POINT ===
-
-        // 4. Create a target channel for operation use
-        let target_channel = match self.target_dev.create_channel() {
-            Ok(ch) => ch,
-            Err(e) => {
-                error!("Failed to create target channel for operation: {}", e);
-                self.abort_operation(&mut *operation, &e.to_string(), &ops_shared);
-                return;
-            }
-        };
-        self.ops_target_channel = Some(target_channel);
-
-        // 5. Operation-specific setup
-        {
-            let mut ctx = self.make_operation_context(&ops_shared);
-            if let Err(e) = operation.begin(&mut ctx) {
-                error!("Operation '{}' begin() failed: {}", op_name, e);
-                self.ops_target_channel = None;
-                self.abort_operation(&mut *operation, &e.to_string(), &ops_shared);
-                return;
-            }
-        }
-
-        // 6. PERSIST: Set ops state + OPS_LOCKED on all stripes in metadata,
-        //    then write ALL metadata sectors to disk and flush.
-        //    This must be durable BEFORE volatile state transitions.
-        {
-            let metadata = self.metadata_flusher.metadata_mut();
-            metadata.set_ops_state(
-                ops_phase::OPERATING,
-                operation.ops_type(),
-                operation.ops_id(),
-                operation.ops_staging_path(),
-            );
-            metadata.set_all_ops_locked();
-        }
-        if let Err(e) = self
-            .metadata_flusher
-            .metadata_mut()
-            .save_to_bdev(&*self.metadata_dev)
-        {
-            error!("Operation '{}' failed to persist metadata: {}", op_name, e);
-            self.metadata_flusher.metadata_mut().clear_ops_state();
-            self.ops_target_channel = None;
-            self.abort_operation(&mut *operation, &e.to_string(), &ops_shared);
-            return;
-        }
-
-        // 7. Lock all stripes (volatile)
-        ops_shared.lock_all_stripes();
-
-        // 8. Create active state
-        self.active_operation = Some(ActiveOperation {
-            operation,
-            next_stripe: 0,
-            priority_queue: VecDeque::new(),
-        });
-        ops_shared.reset_stripes_processed();
-
-        // 9. Transition to Operating (volatile)
-        ops_shared.set_phase(OPERATING);
-
-        // 10. Reset drain barrier for next operation
-        ops_shared.reset_drained();
-
-        info!("Operation '{}': entered Operating phase", op_name);
-    }
-
-    fn update_operation(&mut self) {
-        let ops_shared = match &self.ops_shared {
-            Some(s) => s.clone(),
-            None => return,
-        };
-
-        if self.active_operation.is_none() {
-            return;
-        }
-
-        if ops_shared.phase() != OPERATING {
-            return;
-        }
-
-        // Priority stripes first (requested by frontend writes)
-        while let Some(stripe_id) = self
-            .active_operation
-            .as_mut()
-            .unwrap()
-            .priority_queue
-            .pop_front()
-        {
-            if ops_shared.stripe_locked(stripe_id) {
-                self.process_and_unlock_stripe(stripe_id, &ops_shared);
-            }
-        }
-
-        // Background: process next locked stripe
-        let active = self.active_operation.as_mut().unwrap();
-        while active.next_stripe < self.stripe_count {
-            let s = active.next_stripe;
-            active.next_stripe += 1;
-            if ops_shared.stripe_locked(s) {
-                self.process_and_unlock_stripe(s, &ops_shared);
-                break; // one per iteration to stay responsive
-            }
-        }
-
-        // Check if all done
-        if ops_shared.stripes_processed() == self.stripe_count {
-            self.complete_operation(&ops_shared);
-        }
-    }
-
-    fn process_and_unlock_stripe(&mut self, stripe_id: usize, ops_shared: &OpsSharedState) {
-        // Split borrows: borrow ops_target_channel and active_operation separately
-        let target_channel = self
-            .ops_target_channel
-            .as_deref_mut()
-            .expect("ops_target_channel must be set during active operation");
-        let active = self.active_operation.as_mut().unwrap();
-        let stripe_sector_count_shift = self.stripe_sector_count_shift;
-        let stripe_count = self.stripe_count;
-
-        // 1. Perform operation-specific work
-        {
-            let mut ctx = OperationContext {
-                target_channel,
-                stripe_sector_count_shift,
-                stripe_count,
-                shared: ops_shared,
-            };
-            if let Err(e) = active.operation.process_stripe(stripe_id, &mut ctx) {
-                error!(
-                    "Operation '{}' process_stripe({}) failed: {}",
-                    active.operation.name(),
-                    stripe_id,
-                    e
-                );
-                let err_str = e.to_string();
-                drop(ctx);
-                self.abort_operation_active(&err_str, ops_shared);
-                return;
-            }
-        }
-
-        // Re-borrow after the previous scope ended
-        let target_channel = self
-            .ops_target_channel
-            .as_deref_mut()
-            .expect("ops_target_channel must be set during active operation");
-        let active = self.active_operation.as_mut().unwrap();
-
-        // 2. Post-process hook BEFORE unlock (critical for rekey dual-key safety)
-        {
-            let mut ctx = OperationContext {
-                target_channel,
-                stripe_sector_count_shift,
-                stripe_count,
-                shared: ops_shared,
-            };
-            if let Err(e) = active.operation.on_stripe_done(stripe_id, &mut ctx) {
-                error!(
-                    "Operation '{}' on_stripe_done({}) failed: {}",
-                    active.operation.name(),
-                    stripe_id,
-                    e
-                );
-                let err_str = e.to_string();
-                drop(ctx);
-                self.abort_operation_active(&err_str, ops_shared);
-                return;
-            }
-        }
-
-        // 3. PERSIST: Queue durable clear of OPS_LOCKED bit. Wait for the
-        //    metadata flusher to complete the write+flush before volatile unlock.
-        //    This ensures durability-before-visibility: if we crash after the
-        //    volatile unlock but before the next stripe, the cleared bit on disk
-        //    means we won't re-process this stripe on recovery.
-        self.metadata_flusher.clear_ops_locked(stripe_id);
-        while self.metadata_flusher.busy() {
-            self.metadata_flusher.update();
-        }
-
-        // 4. Unlock (volatile) — Release ensures all prior writes are visible
-        ops_shared.unlock_stripe(stripe_id);
-
-        // 5. Increment progress
-        ops_shared.increment_stripes_processed();
-    }
-
-    fn complete_operation(&mut self, ops_shared: &OpsSharedState) {
-        let mut active = self.active_operation.take().unwrap();
-        let op_name = active.operation.name().to_string();
-
-        {
-            let mut ctx = self.make_operation_context(ops_shared);
-            if let Err(e) = active.operation.complete(&mut ctx) {
-                error!("Operation '{}' complete() failed: {}", op_name, e);
-            }
-        }
-
-        self.ops_target_channel = None;
-
-        // PERSIST: Clear ops state on disk before volatile phase transition.
-        self.persist_ops_clear(&op_name);
-
-        // Return to normal (volatile)
-        ops_shared.set_gate_reads(false);
-        ops_shared.set_phase(NORMAL);
-
-        info!("Operation '{}': completed successfully", op_name);
-    }
-
-    fn abort_operation(
-        &mut self,
-        operation: &mut dyn StripeOperation,
-        error: &str,
-        ops_shared: &OpsSharedState,
-    ) {
-        let op_name = operation.name().to_string();
-        error!("Aborting operation '{}': {}", op_name, error);
-
-        ops_shared.unlock_all_stripes();
-
-        {
-            let mut ctx = self.make_operation_context(ops_shared);
-            operation.on_failure(error, &mut ctx);
-        }
-
-        self.ops_target_channel = None;
-
-        // PERSIST: Clear ops state on disk before volatile phase transition.
-        self.persist_ops_clear(&op_name);
-
-        ops_shared.set_gate_reads(false);
-        ops_shared.reset_stripes_processed();
-        ops_shared.reset_drained();
-        ops_shared.set_phase(NORMAL);
-    }
-
-    fn abort_operation_active(&mut self, error: &str, ops_shared: &OpsSharedState) {
-        let mut active = self.active_operation.take().unwrap();
-        self.abort_operation(&mut *active.operation, error, ops_shared);
-    }
-
-    fn cancel_operation(&mut self) {
-        let ops_shared = match &self.ops_shared {
-            Some(s) => s.clone(),
-            None => return,
-        };
-
-        let active = match &self.active_operation {
-            Some(a) => a,
-            None => {
-                info!("CancelOperation received but no operation active");
-                return;
-            }
-        };
-
-        if !active.operation.supports_cancel() {
-            error!(
-                "Operation '{}' does not support cancellation",
-                active.operation.name()
-            );
-            return;
-        }
-
-        let op_name = active.operation.name().to_string();
-        info!("Cancelling operation '{}'", op_name);
-        self.abort_operation_active("cancelled by user", &ops_shared);
-    }
-
-    /// Clear ops state in metadata and persist to disk. Called during
-    /// complete_operation and abort_operation to ensure the on-disk state
-    /// reflects that no operation is in progress before volatile state changes.
-    fn persist_ops_clear(&mut self, op_name: &str) {
-        let metadata = self.metadata_flusher.metadata_mut();
-        metadata.clear_ops_state();
-        // Also clear any remaining OPS_LOCKED bits (relevant for abort/cancel
-        // where not all stripes were processed and cleared individually).
-        for i in 0..metadata.stripe_headers.len() {
-            metadata.clear_ops_locked(i);
-        }
-        if let Err(e) = self
-            .metadata_flusher
-            .metadata_mut()
-            .save_to_bdev(&*self.metadata_dev)
-        {
-            // Log but don't fail — on next startup, recovery will see
-            // ops_phase==OPERATING but the OPS_LOCKED bits may already be
-            // partially cleared. Recovery checks for locked stripes and
-            // will handle the remaining ones.
-            error!(
-                "Operation '{}': failed to persist ops clear to metadata: {}",
-                op_name, e
-            );
-        }
-    }
-
-    fn make_operation_context<'a>(
-        &'a mut self,
-        ops_shared: &'a OpsSharedState,
-    ) -> OperationContext<'a> {
-        OperationContext {
-            target_channel: self
-                .ops_target_channel
-                .as_deref_mut()
-                .expect("ops_target_channel must be set before making operation context"),
-            stripe_sector_count_shift: self.stripe_sector_count_shift,
-            stripe_count: self.stripe_count,
-            shared: ops_shared,
-        }
-    }
-
-    // --- Crash recovery ---
-
-    /// Check for an interrupted operation on startup and resume or clear it.
-    fn recover_interrupted_operation(&mut self) {
-        let recovery_info = match self.metadata_flusher.metadata_mut().ops_recovery_info() {
-            Some(info) => info,
-            None => return,
-        };
-
-        info!(
-            "Crash recovery: detected interrupted operation (type={}, id={}, locked_stripes={})",
-            recovery_info.ops_type,
-            recovery_info.ops_id,
-            recovery_info.locked_stripes.len(),
-        );
-
-        if recovery_info.locked_stripes.is_empty() {
-            info!("Crash recovery: no locked stripes, clearing operation state");
-            self.persist_ops_clear("recovery");
-            return;
-        }
-
-        match recovery_info.ops_type {
-            ops_type::SNAPSHOT => self.recover_snapshot(&recovery_info),
-            ops_type::REKEY => self.recover_rekey(&recovery_info),
-            _ => {
-                warn!(
-                    "Crash recovery: unknown operation type {}, clearing state",
-                    recovery_info.ops_type
-                );
-                self.persist_ops_clear("recovery-unknown");
-            }
-        }
-    }
-
-    fn recover_snapshot(&mut self, info: &OpsRecoveryInfo) {
-        let staging_path = match &info.staging_path {
-            Some(path) => path.clone(),
-            None => {
-                warn!(
-                    "Crash recovery: snapshot {} has no staging path, clearing state",
-                    info.ops_id
-                );
-                self.persist_ops_clear("recovery-snapshot-no-path");
-                return;
-            }
-        };
-
-        if !Path::new(&staging_path).exists() {
-            warn!(
-                "Crash recovery: staging file '{}' missing for snapshot {}, accepting data loss and clearing state",
-                staging_path, info.ops_id
-            );
-            self.persist_ops_clear("recovery-snapshot-missing-staging");
-            return;
-        }
-
-        info!(
-            "Crash recovery: resuming snapshot {} — re-copying {} locked stripes to '{}'",
-            info.ops_id,
-            info.locked_stripes.len(),
-            staging_path,
-        );
-
-        let staging_dev = match crate::block_device::SyncBlockDevice::new(
-            staging_path.clone().into(),
-            false,
-            true,
-            false,
-        ) {
-            Ok(dev) => dev,
-            Err(e) => {
-                error!(
-                    "Crash recovery: failed to open staging file '{}': {}, clearing state",
-                    staging_path, e
-                );
-                self.persist_ops_clear("recovery-snapshot-open-failed");
-                return;
-            }
-        };
-
-        let mut staging_channel = match staging_dev.create_channel() {
-            Ok(ch) => ch,
-            Err(e) => {
-                error!(
-                    "Crash recovery: failed to create staging channel: {}, clearing state",
-                    e
-                );
-                self.persist_ops_clear("recovery-snapshot-channel-failed");
-                return;
-            }
-        };
-
-        let mut target_channel = match self.target_dev.create_channel() {
-            Ok(ch) => ch,
-            Err(e) => {
-                error!(
-                    "Crash recovery: failed to create target channel: {}, clearing state",
-                    e
-                );
-                self.persist_ops_clear("recovery-snapshot-target-channel-failed");
-                return;
-            }
-        };
-
-        let stripe_size_sectors = 1u64 << self.stripe_sector_count_shift;
-        let timeout = std::time::Duration::from_secs(30);
-        let mut recovered = 0;
-
-        for &stripe_id in &info.locked_stripes {
-            let offset = (stripe_id as u64) * stripe_size_sectors;
-            let sector_count = stripe_size_sectors as u32;
-            let buf_size = sector_count as usize * crate::backends::SECTOR_SIZE;
-            let buf = crate::block_device::shared_buffer(buf_size);
-
-            let read_id = stripe_id * 3;
-            target_channel.add_read(offset, sector_count, buf.clone(), read_id);
-            if let Err(e) = target_channel.submit() {
-                error!(
-                    "Crash recovery: target read submit failed for stripe {}: {}",
-                    stripe_id, e
-                );
-                break;
-            }
-            if let Err(e) =
-                crate::block_device::wait_for_completion(target_channel.as_mut(), read_id, timeout)
-            {
-                error!(
-                    "Crash recovery: target read failed for stripe {}: {}",
-                    stripe_id, e
-                );
-                break;
-            }
-
-            let write_id = stripe_id * 3 + 1;
-            staging_channel.add_write(offset, sector_count, buf, write_id);
-            if let Err(e) = staging_channel.submit() {
-                error!(
-                    "Crash recovery: staging write submit failed for stripe {}: {}",
-                    stripe_id, e
-                );
-                break;
-            }
-            if let Err(e) = crate::block_device::wait_for_completion(
-                staging_channel.as_mut(),
-                write_id,
-                timeout,
-            ) {
-                error!(
-                    "Crash recovery: staging write failed for stripe {}: {}",
-                    stripe_id, e
-                );
-                break;
-            }
-
-            let flush_id = stripe_id * 3 + 2;
-            staging_channel.add_flush(flush_id);
-            if let Err(e) = staging_channel.submit() {
-                error!(
-                    "Crash recovery: staging flush submit failed for stripe {}: {}",
-                    stripe_id, e
-                );
-                break;
-            }
-            if let Err(e) = crate::block_device::wait_for_completion(
-                staging_channel.as_mut(),
-                flush_id,
-                timeout,
-            ) {
-                error!(
-                    "Crash recovery: staging flush failed for stripe {}: {}",
-                    stripe_id, e
-                );
-                break;
-            }
-
-            self.metadata_flusher.clear_ops_locked(stripe_id);
-            while self.metadata_flusher.busy() {
-                self.metadata_flusher.update();
-            }
-
-            recovered += 1;
-        }
-
-        if recovered == info.locked_stripes.len() {
-            info!(
-                "Crash recovery: snapshot {} complete — {} stripes recovered",
-                info.ops_id, recovered
-            );
-        } else {
-            error!(
-                "Crash recovery: snapshot {} partially recovered ({}/{} stripes), clearing remaining locks",
-                info.ops_id, recovered, info.locked_stripes.len()
-            );
-        }
-
-        self.persist_ops_clear("recovery-snapshot");
-    }
-
-    fn recover_rekey(&mut self, info: &OpsRecoveryInfo) {
-        warn!(
-            "Crash recovery: interrupted rekey operation (id={}, {} locked stripes). \
-             Rekey cannot be automatically resumed — key material is not persisted. \
-             Clearing operation state; locked stripes retain old encryption key.",
-            info.ops_id,
-            info.locked_stripes.len(),
-        );
-        self.persist_ops_clear("recovery-rekey");
     }
 }
 
@@ -943,7 +351,7 @@ mod tests {
         BgWorker,
         std::sync::mpsc::Sender<BgWorkerRequest>,
         OpsSharedState,
-        std::sync::mpsc::Sender<super::OpsRequest>,
+        std::sync::mpsc::Sender<OpsRequest>,
     ) {
         let stripe_sector_count_shift = 11;
         let stripe_sector_count = 1u64 << stripe_sector_count_shift;
@@ -978,7 +386,14 @@ mod tests {
             rx,
         )
         .unwrap();
-        bg_worker.set_ops_support(ops_shared.clone(), ops_rx);
+        bg_worker.set_ops_support(
+            ops_shared.clone(),
+            ops_rx,
+            &target_dev,
+            &metadata_dev,
+            stripe_count,
+            stripe_sector_count_shift,
+        );
 
         (bg_worker, tx, ops_shared, ops_tx)
     }
@@ -1109,7 +524,7 @@ mod tests {
         BgWorker,
         std::sync::mpsc::Sender<BgWorkerRequest>,
         OpsSharedState,
-        std::sync::mpsc::Sender<super::OpsRequest>,
+        std::sync::mpsc::Sender<OpsRequest>,
         TestBlockDevice,
     ) {
         let stripe_sector_count_shift = 11;
@@ -1145,7 +560,14 @@ mod tests {
             rx,
         )
         .unwrap();
-        bg_worker.set_ops_support(ops_shared.clone(), ops_rx);
+        bg_worker.set_ops_support(
+            ops_shared.clone(),
+            ops_rx,
+            &target_dev,
+            &metadata_dev,
+            stripe_count,
+            stripe_sector_count_shift,
+        );
 
         (bg_worker, tx, ops_shared, ops_tx, target_dev)
     }
@@ -1236,7 +658,7 @@ mod tests {
         BgWorker,
         std::sync::mpsc::Sender<BgWorkerRequest>,
         OpsSharedState,
-        std::sync::mpsc::Sender<super::OpsRequest>,
+        std::sync::mpsc::Sender<OpsRequest>,
         TestBlockDevice,
         TestBlockDevice,
     ) {
@@ -1273,7 +695,14 @@ mod tests {
             rx,
         )
         .unwrap();
-        bg_worker.set_ops_support(ops_shared.clone(), ops_rx);
+        bg_worker.set_ops_support(
+            ops_shared.clone(),
+            ops_rx,
+            &target_dev,
+            &metadata_dev,
+            stripe_count,
+            stripe_sector_count_shift,
+        );
 
         (bg_worker, tx, ops_shared, ops_tx, target_dev, metadata_dev)
     }
@@ -1509,9 +938,12 @@ mod tests {
             SharedMetadataState::new(&loaded)
         };
 
+        let stripe_count = target_dev.sector_count().div_ceil(stripe_sector_count) as usize;
         let (tx, rx) = channel();
+        let (_ops_tx, ops_rx) = channel();
+        let ops_shared = OpsSharedState::new(stripe_count);
 
-        let bg_worker = BgWorker::new(
+        let mut bg_worker = BgWorker::new(
             stripe_source,
             &target_dev,
             &metadata_dev,
@@ -1521,6 +953,14 @@ mod tests {
             rx,
         )
         .unwrap();
+        bg_worker.set_ops_support(
+            ops_shared,
+            ops_rx,
+            &target_dev,
+            &metadata_dev,
+            stripe_count,
+            stripe_sector_count_shift,
+        );
 
         (bg_worker, tx, target_dev, metadata_dev, staging_file)
     }
@@ -1676,7 +1116,11 @@ mod tests {
             SharedMetadataState::new(&loaded)
         };
 
+        let stripe_count = target_dev.sector_count().div_ceil(stripe_sector_count) as usize;
         let (tx, rx) = channel();
+        let (_ops_tx, ops_rx) = channel();
+        let ops_shared = OpsSharedState::new(stripe_count);
+
         let mut bg_worker = BgWorker::new(
             stripe_source,
             &target_dev,
@@ -1687,6 +1131,14 @@ mod tests {
             rx,
         )
         .unwrap();
+        bg_worker.set_ops_support(
+            ops_shared,
+            ops_rx,
+            &target_dev,
+            &metadata_dev,
+            stripe_count,
+            stripe_sector_count_shift,
+        );
 
         tx.send(BgWorkerRequest::Shutdown).unwrap();
         bg_worker.run();

@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""ubitop - real-time throughput monitor for ubiblk devices.
+
+Connects to the ubiblk RPC socket and displays per-queue read/write
+throughput with auto-scaling bars.
+"""
+
+import argparse
+import json
+import socket
+import time
+
+from rich.console import Console, Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
+
+class RpcClient:
+    """Newline-delimited JSON client for the ubiblk RPC socket."""
+
+    def __init__(self, socket_path):
+        self.socket_path = socket_path
+        self._sock = None
+        self._buf = b""
+
+    def connect(self):
+        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._sock.connect(self.socket_path)
+        self._buf = b""
+
+    def close(self):
+        if self._sock is not None:
+            self._sock.close()
+            self._sock = None
+
+    def call(self, command):
+        """Send a command and return the parsed JSON response."""
+        request = json.dumps({"command": command}) + "\n"
+        self._sock.sendall(request.encode())
+        return self._read_response()
+
+    def _read_response(self):
+        while True:
+            idx = self._buf.find(b"\n")
+            if idx != -1:
+                line = self._buf[:idx]
+                self._buf = self._buf[idx + 1:]
+                return json.loads(line)
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("RPC socket closed")
+            self._buf += chunk
+
+
+class ThroughputDisplay:
+    """Manages the TUI display with auto-scaling bars."""
+
+    def __init__(self, poll_interval=1.0):
+        self.poll_interval = poll_interval
+        self.max_throughput = 500 * 1024 * 1024  # Initial 500 MB/s
+
+    def format_bytes(self, bytes_val):
+        """Format bytes into human-readable units."""
+        units = ["B", "KB", "MB", "GB", "TB"]
+        val = float(bytes_val)
+        unit_idx = 0
+        while val >= 1024 and unit_idx < len(units) - 1:
+            val /= 1024
+            unit_idx += 1
+        return f"{val:7.2f} {units[unit_idx]}"
+
+    def format_rate(self, bytes_per_sec):
+        """Format throughput rate."""
+        return self.format_bytes(bytes_per_sec) + "/s"
+
+    def update_max_throughput(self, current_max):
+        """Auto-scale: if exceeded, scale to 1.2x the current max."""
+        if current_max > self.max_throughput:
+            self.max_throughput = current_max * 1.2
+
+    def create_bar(self, value, max_value, width=30, color="blue"):
+        """Create a visual throughput bar."""
+        if max_value == 0:
+            filled = 0
+        else:
+            filled = int((value / max_value) * width)
+        bar = "\u2584" * filled + "\u2581" * (width - filled)
+        return f"[{color}]{bar}[/{color}]"
+
+    def render(self, stats):
+        """Render the full display from computed rate stats."""
+        queues = stats["queues"]
+
+        total_read_rate = sum(q["read_rate"] for q in queues)
+        total_write_rate = sum(q["write_rate"] for q in queues)
+        total_read_bytes = sum(q["bytes_read"] for q in queues)
+        total_write_bytes = sum(q["bytes_written"] for q in queues)
+
+        current_max = max(
+            max((q["read_rate"] for q in queues), default=0),
+            max((q["write_rate"] for q in queues), default=0),
+        )
+        self.update_max_throughput(current_max)
+
+        header = Text()
+        header.append("ubitop", style="bold cyan")
+        header.append(f" - {len(queues)} queues | ", style="dim")
+        header.append("Total: ", style="dim")
+        header.append(f"\u2193{self.format_rate(total_read_rate)}", style="blue bold")
+        header.append(" / ", style="dim")
+        header.append(f"\u2191{self.format_rate(total_write_rate)}", style="red bold")
+        header.append(f" | Poll: {self.poll_interval}s", style="dim")
+        header.append(f" | Scale: {self.format_rate(self.max_throughput)}", style="dim")
+
+        table = Table(
+            show_header=True, header_style="bold magenta", box=None, padding=(0, 1)
+        )
+        table.add_column("Queue", justify="right", width=5)
+        table.add_column("Read Rate", justify="right", width=16)
+        table.add_column("Read Bar", width=32)
+        table.add_column("Write Rate", justify="right", width=16)
+        table.add_column("Write Bar", width=32)
+        table.add_column("IOPS", justify="right", width=8)
+        table.add_column("Inflt", justify="right", width=5)
+        table.add_column("Total Read", justify="right", width=14)
+        table.add_column("Total Write", justify="right", width=14)
+
+        total_iops = sum(q["iops"] for q in queues)
+        total_inflight = sum(q["inflight"] for q in queues)
+
+        for i, q in enumerate(queues):
+            read_bar = self.create_bar(
+                q["read_rate"], self.max_throughput, width=30, color="blue"
+            )
+            write_bar = self.create_bar(
+                q["write_rate"], self.max_throughput, width=30, color="red"
+            )
+            table.add_row(
+                str(i),
+                self.format_rate(q["read_rate"]),
+                read_bar,
+                self.format_rate(q["write_rate"]),
+                write_bar,
+                f"{q['iops']:.0f}",
+                str(q["inflight"]),
+                self.format_bytes(q["bytes_read"]),
+                self.format_bytes(q["bytes_written"]),
+            )
+
+        total_read_bar = self.create_bar(
+            total_read_rate, self.max_throughput, width=30, color="cyan"
+        )
+        total_write_bar = self.create_bar(
+            total_write_rate, self.max_throughput, width=30, color="yellow"
+        )
+
+        table.add_row(
+            "\u2501" * 5,
+            "\u2501" * 16,
+            "\u2501" * 32,
+            "\u2501" * 16,
+            "\u2501" * 32,
+            "\u2501" * 8,
+            "\u2501" * 5,
+            "\u2501" * 14,
+            "\u2501" * 14,
+            style="dim",
+        )
+        table.add_row(
+            "ALL",
+            self.format_rate(total_read_rate),
+            total_read_bar,
+            self.format_rate(total_write_rate),
+            total_write_bar,
+            f"{total_iops:.0f}",
+            str(total_inflight),
+            self.format_bytes(total_read_bytes),
+            self.format_bytes(total_write_bytes),
+            style="bold",
+        )
+
+        content = Group(header, Text(), table)
+        return Panel(content, border_style="green", padding=(1, 2))
+
+
+def poll_stats(client, prev, interval):
+    """Fetch stats and compute per-queue rates by diffing cumulative counters."""
+    stats_resp = client.call("stats")
+    queues_resp = client.call("queues")
+    stats_queues = stats_resp["stats"]["queues"]
+    inflight_queues = queues_resp["queues"]
+
+    result = []
+    for i, q in enumerate(stats_queues):
+        rate_read = 0.0
+        rate_write = 0.0
+        iops = 0.0
+        if prev is not None and i < len(prev):
+            rate_read = (q["bytes_read"] - prev[i]["bytes_read"]) / interval
+            rate_write = (q["bytes_written"] - prev[i]["bytes_written"]) / interval
+            cur_ops = q["read_ops"] + q["write_ops"]
+            prev_ops = prev[i]["read_ops"] + prev[i]["write_ops"]
+            iops = (cur_ops - prev_ops) / interval
+        inflight = len(inflight_queues[i]) if i < len(inflight_queues) else 0
+        result.append(
+            {
+                "bytes_read": q["bytes_read"],
+                "bytes_written": q["bytes_written"],
+                "read_ops": q["read_ops"],
+                "write_ops": q["write_ops"],
+                "read_rate": rate_read,
+                "write_rate": rate_write,
+                "iops": iops,
+                "inflight": inflight,
+            }
+        )
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Real-time throughput monitor for ubiblk devices."
+    )
+    parser.add_argument(
+        "--socket", required=True, help="Path to the ubiblk RPC Unix socket"
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Poll interval in seconds (default: 1)",
+    )
+    args = parser.parse_args()
+    if args.interval <= 0:
+        parser.error("--interval must be a positive number")
+
+    console = Console()
+    display = ThroughputDisplay(poll_interval=args.interval)
+    client = RpcClient(args.socket)
+    prev = None
+
+    while True:
+        try:
+            client.connect()
+            console.print(f"[green]Connected to {args.socket}[/green]")
+            with Live(console=console, refresh_per_second=2, screen=True) as live:
+                while True:
+                    queues = poll_stats(client, prev, args.interval)
+                    prev = queues
+                    rendered = display.render({"queues": queues})
+                    live.update(rendered)
+                    time.sleep(args.interval)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Stopped by user[/yellow]")
+            break
+        except (OSError, ConnectionError, json.JSONDecodeError) as e:
+            client.close()
+            prev = None
+            console.print(f"[red]Connection error: {e}[/red]")
+            console.print(f"[dim]Retrying in {args.interval}s...[/dim]")
+            try:
+                time.sleep(args.interval)
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Stopped by user[/yellow]")
+                break
+
+
+if __name__ == "__main__":
+    main()

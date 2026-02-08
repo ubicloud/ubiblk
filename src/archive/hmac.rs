@@ -52,7 +52,6 @@ fn metadata_hmac_input(metadata: &ArchiveMetadata) -> Vec<u8> {
 
     match &metadata.compression {
         ArchiveCompressionAlgorithm::None => data.push(0),
-        ArchiveCompressionAlgorithm::Snappy => data.push(1),
         ArchiveCompressionAlgorithm::Zstd { level } => {
             data.push(2);
             data.extend_from_slice(&level.to_le_bytes());
@@ -108,7 +107,7 @@ mod tests {
             format_version: 1,
             stripe_sector_count: 128,
             encryption_key: Some((vec![123u8; 32], vec![234u8; 32])),
-            compression: ArchiveCompressionAlgorithm::Snappy,
+            compression: ArchiveCompressionAlgorithm::None,
             hmac_key: hmac_key.to_vec(),
             metadata_hmac: Vec::new(),
         };

@@ -18,7 +18,7 @@ archive --config <CONFIG_YAML> --target-config <TARGET_CONFIG_YAML> [options]
   to prevent accidental exposure of KEK material.
 - `--allow-regular-file-as-kek`: Allow reading the KEK from a regular file.
 - `--encrypt` (`-e`): Encrypt archived stripes with a random AES-XTS key.
-- `--compression`: Compression algorithm (`none`, `snappy`, or `zstd`). Defaults to `none`.
+- `--compression`: Compression algorithm (`none` or `zstd`). Defaults to `none`.
 - `--zstd-level`: Zstd compression level. Defaults to `3`.
 
 **Target config format:**
@@ -100,7 +100,7 @@ to validate compatibility.
 `--encrypt` is enabled, the two keys stored in `encryption_key` are encrypted
 with the KEK (if provided) before being base64 encoded; otherwise,
 `encryption_key` is `null`. The `compression` field records the algorithm used
-to store stripe payloads. For `none` and `snappy`, this is a string value.
+to store stripe payloads. For `none`, this is a string value.
 For zstd, this is an object containing the configured compression level.
 The `level` field is required when `compression` is `zstd`.
 `hmac_key` stores a KEK-encrypted HMAC key used to authenticate

@@ -500,15 +500,6 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_stripe_source_snappy_encrypted() {
-        do_test_archive_stripe_source(
-            true,
-            KeyEncryptionCipher::default(),
-            ArchiveCompressionAlgorithm::Snappy,
-        );
-    }
-
-    #[test]
     fn test_archive_stripe_source_zstd_encrypted() {
         do_test_archive_stripe_source(
             true,

@@ -74,7 +74,6 @@ pub trait ArchiveStore {
 pub enum ArchiveCompressionAlgorithm {
     #[default]
     None,
-    Snappy,
     Zstd {
         level: i32,
     },

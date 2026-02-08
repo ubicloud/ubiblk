@@ -56,7 +56,10 @@ pub use bdev_lazy::{
     status_report::{StatusReport, StatusReporter},
 };
 
-pub use bdev_ops::{OperationContext, OpsBlockDevice, OpsRequest, OpsSharedState, StripeOperation};
+pub use bdev_ops::{
+    ArchiveDestination, OperationContext, OpsBlockDevice, OpsRequest, OpsSharedState,
+    SnapshotCoordinator, SnapshotOperation, SnapshotState, SnapshotStatus, StripeOperation,
+};
 
 pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_null::NullBlockDevice;

@@ -15,6 +15,9 @@ use std::{
 
 use crate::{
     backends::common::io_tracking::{IoKind, IoTracker},
+    block_device::{
+        bdev_ops::uploader::SnapshotCoordinator, BgWorkerRequest, OpsSharedState, SnapshotOperation,
+    },
     utils::umask_guard::UmaskGuard,
     Result,
 };
@@ -25,12 +28,160 @@ use ubiblk_macros::error_context;
 
 use crate::block_device::StatusReporter;
 
+use std::sync::atomic::AtomicUsize;
+use std::sync::{mpsc::Sender, RwLock};
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Handles snapshot-related RPC commands.
+///
+/// Shared across RPC handler threads via `Arc`. The `RwLock<Option<SnapshotCoordinator>>`
+/// holds the active snapshot coordinator (if any).
+pub struct SnapshotRpcHandler {
+    ops_shared: OpsSharedState,
+    bgworker_tx: Sender<BgWorkerRequest>,
+    staging_device_factory:
+        Box<dyn Fn() -> crate::Result<Box<dyn crate::block_device::BlockDevice>> + Send + Sync>,
+    stripe_count: usize,
+    stripe_size_bytes: u64,
+    active_snapshot: RwLock<Option<SnapshotCoordinator>>,
+    next_snapshot_id: AtomicUsize,
+}
+
+impl SnapshotRpcHandler {
+    pub fn new(
+        ops_shared: OpsSharedState,
+        bgworker_tx: Sender<BgWorkerRequest>,
+        staging_device_factory: Box<
+            dyn Fn() -> crate::Result<Box<dyn crate::block_device::BlockDevice>> + Send + Sync,
+        >,
+        stripe_count: usize,
+        stripe_size_bytes: u64,
+    ) -> Self {
+        SnapshotRpcHandler {
+            ops_shared,
+            bgworker_tx,
+            staging_device_factory,
+            stripe_count,
+            stripe_size_bytes,
+            active_snapshot: RwLock::new(None),
+            next_snapshot_id: AtomicUsize::new(1),
+        }
+    }
+
+    /// Handle the `create_snapshot` RPC command.
+    pub fn create_snapshot(&self) -> Value {
+        // Atomic claim — only one operation can run at a time
+        if !self.ops_shared.try_begin_stalling() {
+            return json!({ "error": "operation already in progress" });
+        }
+
+        let id = self.next_snapshot_id.fetch_add(1, Ordering::Relaxed) as u64;
+
+        // Create staging device
+        let staging_device = match (self.staging_device_factory)() {
+            Ok(dev) => dev,
+            Err(e) => {
+                // Reset phase since we failed before starting
+                self.ops_shared
+                    .set_phase(crate::block_device::bdev_ops::shared_state::NORMAL);
+                return json!({ "error": format!("failed to create staging device: {}", e) });
+            }
+        };
+
+        // Create the snapshot operation
+        let operation = SnapshotOperation::new(staging_device, id);
+        let stripes_copied = operation.stripes_copied();
+        let upload_error = operation.upload_error();
+
+        // Create coordinator for status tracking
+        let stripes_uploaded = Arc::new(AtomicUsize::new(0));
+        let ops_shared = self.ops_shared.clone();
+        let coordinator = SnapshotCoordinator {
+            id,
+            destination: crate::block_device::bdev_ops::uploader::ArchiveDestination::LocalFs {
+                path: std::path::PathBuf::from("/tmp/snapshot"), // placeholder
+            },
+            stripe_count: self.stripe_count,
+            stripe_size: self.stripe_size_bytes,
+            stripes_copied: stripes_copied.clone(),
+            stripes_uploaded: stripes_uploaded.clone(),
+            upload_error: upload_error.clone(),
+            upload_handle: Some(
+                crate::block_device::bdev_ops::uploader::spawn_local_fs_mirror(
+                    stripes_copied,
+                    stripes_uploaded,
+                    self.stripe_count,
+                ),
+            ),
+            phase_fn: Box::new(move || ops_shared.phase()),
+        };
+
+        // Store coordinator
+        if let Ok(mut guard) = self.active_snapshot.write() {
+            *guard = Some(coordinator);
+        }
+
+        // Send to bgworker
+        if let Err(e) = self.bgworker_tx.send(BgWorkerRequest::StartOperation {
+            operation: Box::new(operation),
+        }) {
+            error!("Failed to send StartOperation to bgworker: {}", e);
+            self.ops_shared
+                .set_phase(crate::block_device::bdev_ops::shared_state::NORMAL);
+            return json!({ "error": format!("failed to send operation to bgworker: {}", e) });
+        }
+
+        info!("Snapshot {} created", id);
+        json!({
+            "id": id,
+            "stripe_count": self.stripe_count,
+            "stripe_size_bytes": self.stripe_size_bytes,
+            "total_bytes": self.stripe_count as u64 * self.stripe_size_bytes,
+        })
+    }
+
+    /// Handle the `snapshot_status` RPC command.
+    pub fn snapshot_status(&self) -> Value {
+        let guard = match self.active_snapshot.read() {
+            Ok(g) => g,
+            Err(_) => return json!({ "error": "lock poisoned" }),
+        };
+
+        match &*guard {
+            Some(coord) => {
+                let status = coord.status();
+                json!({
+                    "id": status.id,
+                    "state": format!("{:?}", status.state),
+                    "stripes_copied": status.stripes_copied,
+                    "stripes_uploaded": status.stripes_uploaded,
+                    "stripe_count": status.stripe_count,
+                    "error": status.error,
+                })
+            }
+            None => json!({ "error": "no snapshot in progress" }),
+        }
+    }
+
+    /// Handle the `cancel_snapshot` RPC command.
+    pub fn cancel_snapshot(&self) -> Value {
+        let phase = self.ops_shared.phase();
+        if phase == crate::block_device::bdev_ops::shared_state::NORMAL {
+            return json!({ "error": "no operation active" });
+        }
+        if let Err(e) = self.bgworker_tx.send(BgWorkerRequest::CancelOperation) {
+            return json!({ "error": format!("failed to send cancel: {}", e) });
+        }
+        json!({ "result": "cancel requested" })
+    }
+}
 
 #[derive(Clone)]
 struct RpcState {
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
+    snapshot_handler: Option<Arc<SnapshotRpcHandler>>,
 }
 
 #[derive(Deserialize)]
@@ -69,6 +220,16 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
 ) -> Result<RpcServerHandle> {
+    start_rpc_server_with_snapshot(path, status_reporter, io_trackers, None)
+}
+
+#[error_context("Failed to start RPC server on path: {path:?}")]
+pub fn start_rpc_server_with_snapshot<P: AsRef<Path>>(
+    path: P,
+    status_reporter: Option<StatusReporter>,
+    io_trackers: Vec<IoTracker>,
+    snapshot_handler: Option<Arc<SnapshotRpcHandler>>,
+) -> Result<RpcServerHandle> {
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
         if e.kind() != io::ErrorKind::NotFound {
@@ -93,6 +254,7 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     let state = Arc::new(RpcState {
         status_reporter,
         io_trackers,
+        snapshot_handler,
     });
 
     info!("RPC server listening on {:?}", path);
@@ -215,6 +377,18 @@ fn process_request(request: RpcRequest, state: &RpcState) -> Value {
             let queue_snapshots = queue_snapshots(state);
             json!({ "queues": queue_snapshots })
         }
+        "create_snapshot" => match &state.snapshot_handler {
+            Some(handler) => handler.create_snapshot(),
+            None => json!({ "error": "snapshot not supported" }),
+        },
+        "snapshot_status" => match &state.snapshot_handler {
+            Some(handler) => handler.snapshot_status(),
+            None => json!({ "error": "snapshot not supported" }),
+        },
+        "cancel_snapshot" => match &state.snapshot_handler {
+            Some(handler) => handler.cancel_snapshot(),
+            None => json!({ "error": "snapshot not supported" }),
+        },
         other => json!({
             "error": format!("unknown command: {other}"),
         }),

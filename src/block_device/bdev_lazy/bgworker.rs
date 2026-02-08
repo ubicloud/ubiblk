@@ -807,6 +807,133 @@ mod tests {
         assert_eq!(ops_shared.phase(), NORMAL);
     }
 
+    fn build_bg_worker_with_ops_and_target() -> (
+        BgWorker,
+        std::sync::mpsc::Sender<BgWorkerRequest>,
+        OpsSharedState,
+        std::sync::mpsc::Sender<super::OpsRequest>,
+        TestBlockDevice,
+    ) {
+        let stripe_sector_count_shift = 11;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+        let source_dev = TestBlockDevice::new(1024 * 1024);
+        let target_dev = TestBlockDevice::new(1024 * 1024);
+        let metadata_dev = TestBlockDevice::new(1024 * 1024);
+        let stripe_count = target_dev.sector_count().div_ceil(stripe_sector_count) as usize;
+
+        let stripe_source = Box::new(
+            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
+                .unwrap(),
+        );
+
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, 16, 16);
+        metadata.save_to_bdev(&metadata_dev).unwrap();
+        let metadata_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+
+        let (tx, rx) = channel();
+        let (ops_tx, ops_rx) = channel();
+        let ops_shared = OpsSharedState::new(stripe_count);
+
+        let mut bg_worker = BgWorker::new(
+            stripe_source,
+            &target_dev,
+            &metadata_dev,
+            4096,
+            false,
+            metadata_state,
+            rx,
+        )
+        .unwrap();
+        bg_worker.set_ops_support(ops_shared.clone(), ops_rx);
+
+        (bg_worker, tx, ops_shared, ops_tx, target_dev)
+    }
+
+    #[test]
+    fn snapshot_operation_through_bgworker() {
+        use crate::backends::SECTOR_SIZE;
+        use crate::block_device::bdev_ops::snapshot::SnapshotOperation;
+
+        let (mut bg_worker, sender, ops_shared, _ops_tx, target_dev) =
+            build_bg_worker_with_ops_and_target();
+
+        let stripe_sector_count_shift = 11u8;
+        let stripe_size = (1u64 << stripe_sector_count_shift) as usize * SECTOR_SIZE;
+        let stripe_count = ops_shared.stripe_count();
+
+        // Write known data to target device: stripe i filled with byte (i+1)
+        for s in 0..stripe_count {
+            let pattern = vec![(s + 1) as u8; stripe_size];
+            target_dev.write(s * stripe_size, &pattern, stripe_size);
+        }
+
+        // Create staging device
+        let staging = TestBlockDevice::new(1024 * 1024);
+        let operation = SnapshotOperation::new(staging.clone(), 1);
+        let stripes_copied = operation.stripes_copied();
+
+        // Transition to stalling
+        assert!(ops_shared.try_begin_stalling());
+
+        // Send StartOperation then Shutdown
+        sender
+            .send(BgWorkerRequest::StartOperation {
+                operation: Box::new(operation),
+            })
+            .unwrap();
+        sender.send(BgWorkerRequest::Shutdown).unwrap();
+
+        // Run bgworker to completion
+        bg_worker.run();
+
+        // Verify: all stripes processed, phase back to Normal
+        assert_eq!(ops_shared.phase(), NORMAL);
+        assert_eq!(ops_shared.stripes_processed(), stripe_count);
+        assert_eq!(stripes_copied.load(Ordering::Acquire), stripe_count);
+
+        // Verify staging data matches target
+        for s in 0..stripe_count {
+            let expected = vec![(s + 1) as u8; stripe_size];
+            let mut actual = vec![0u8; stripe_size];
+            staging.read(s * stripe_size, &mut actual, stripe_size);
+            assert_eq!(actual, expected, "stripe {s} data mismatch on staging");
+        }
+    }
+
+    #[test]
+    fn snapshot_cancel_through_bgworker() {
+        use crate::block_device::bdev_ops::snapshot::SnapshotOperation;
+
+        let (mut bg_worker, sender, ops_shared, _ops_tx, _target_dev) =
+            build_bg_worker_with_ops_and_target();
+
+        let staging = TestBlockDevice::new(1024 * 1024);
+        let operation = SnapshotOperation::new(staging.clone(), 2);
+
+        // Transition to stalling
+        assert!(ops_shared.try_begin_stalling());
+
+        // Send StartOperation, then immediately CancelOperation, then Shutdown
+        sender
+            .send(BgWorkerRequest::StartOperation {
+                operation: Box::new(operation),
+            })
+            .unwrap();
+        sender.send(BgWorkerRequest::CancelOperation).unwrap();
+        sender.send(BgWorkerRequest::Shutdown).unwrap();
+
+        bg_worker.run();
+
+        // Phase should be back to Normal, all stripes unlocked
+        assert_eq!(ops_shared.phase(), NORMAL);
+        for s in 0..ops_shared.stripe_count() {
+            assert!(!ops_shared.stripe_locked(s));
+        }
+    }
+
     #[test]
     fn bg_worker_marks_failed_stripes_with_flaky_source() {
         let stripe_sector_count_shift = 11;

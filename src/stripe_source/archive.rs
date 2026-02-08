@@ -4,9 +4,9 @@ use ubiblk_macros::error_context;
 
 use crate::{
     archive::{
-        deserialize_stripe_mapping, validate_format_version, ArchiveCompressionAlgorithm,
-        ArchiveMetadata, ArchiveStore, StripeContentMap, StripeContentSpecifier,
-        DEFAULT_ARCHIVE_TIMEOUT,
+        deserialize_stripe_mapping, validate_format_version, verify_metadata_hmac_tag,
+        ArchiveCompressionAlgorithm, ArchiveMetadata, ArchiveStore, StripeContentMap,
+        StripeContentSpecifier, DEFAULT_ARCHIVE_TIMEOUT,
     },
     backends::SECTOR_SIZE,
     block_device::SharedBuffer,
@@ -38,12 +38,13 @@ impl ArchiveStripeSource {
     pub fn new(mut store: Box<dyn ArchiveStore>, kek: KeyEncryptionCipher) -> Result<Self> {
         let metadata: ArchiveMetadata = Self::fetch_metadata(store.as_mut())?;
         let hmac_key = Self::decrypt_hmac_key(&metadata, &kek)?;
+        verify_metadata_hmac_tag(&hmac_key, &metadata)?;
         let xts_cipher = match metadata.encryption_key {
             None => None,
             Some(key) => Some(XtsBlockCipher::from_encrypted(key.0, key.1, &kek)?),
         };
         let stripe_hashes =
-            Self::fetch_stripe_hashes(store.as_mut(), hmac_key.as_ref(), xts_cipher.clone())?;
+            Self::fetch_stripe_hashes(store.as_mut(), &hmac_key, xts_cipher.clone())?;
         let max_stripe_id = stripe_hashes.keys().max().cloned().unwrap_or(0);
         let stripe_sector_count = metadata.stripe_sector_count;
         let finished_requests = Vec::new();
@@ -75,16 +76,11 @@ impl ArchiveStripeSource {
     #[error_context("Failed to fetch stripe hashes")]
     fn fetch_stripe_hashes(
         store: &mut dyn ArchiveStore,
-        hmac_key: Option<&[u8; 32]>,
+        hmac_key: &[u8; 32],
         xts_cipher: Option<XtsBlockCipher>,
     ) -> Result<StripeContentMap> {
         let manifest_name = "stripe-mapping";
         let stripe_hashes_bytes = store.get_object(manifest_name, DEFAULT_ARCHIVE_TIMEOUT)?;
-        let hmac_key = hmac_key.ok_or_else(|| {
-            crate::ubiblk_error!(MetadataError {
-                description: format!("missing HMAC key for {manifest_name}"),
-            })
-        })?;
         let stripe_hashes = deserialize_stripe_mapping(&stripe_hashes_bytes, hmac_key, xts_cipher)
             .map_err(|e| {
                 crate::ubiblk_error!(MetadataError {
@@ -94,17 +90,14 @@ impl ArchiveStripeSource {
         Ok(stripe_hashes)
     }
 
-    fn decrypt_hmac_key(
-        metadata: &ArchiveMetadata,
-        kek: &KeyEncryptionCipher,
-    ) -> Result<Option<[u8; 32]>> {
+    fn decrypt_hmac_key(metadata: &ArchiveMetadata, kek: &KeyEncryptionCipher) -> Result<[u8; 32]> {
         let key = kek.decrypt_key_data(&metadata.hmac_key)?;
         let key_array: [u8; 32] = key.try_into().map_err(|_| {
             crate::ubiblk_error!(MetadataError {
                 description: "invalid HMAC key length in metadata".to_string(),
             })
         })?;
-        Ok(Some(key_array))
+        Ok(key_array)
     }
 
     fn start_fetch_stripe(
@@ -293,10 +286,32 @@ mod tests {
     };
 
     use super::*;
-    use crate::archive::{MemStore, StripeArchiver};
+    use crate::archive::{
+        compute_metadata_hmac_tag, verify_metadata_hmac_tag, MemStore, StripeArchiver,
+    };
 
     const STRIPE_SECTOR_COUNT_SHIFT: u8 = 4;
     const STRIPE_SECTOR_COUNT: u64 = 1 << STRIPE_SECTOR_COUNT_SHIFT;
+
+    fn build_metadata_json(
+        format_version: u32,
+        stripe_sector_count: u64,
+        encryption_key: Option<(Vec<u8>, Vec<u8>)>,
+        compression: ArchiveCompressionAlgorithm,
+        hmac_key: &[u8],
+    ) -> String {
+        let mut metadata = ArchiveMetadata {
+            format_version,
+            stripe_sector_count,
+            encryption_key,
+            compression,
+            hmac_key: hmac_key.to_vec(),
+            metadata_hmac: Vec::new(),
+        };
+        let tag = crate::archive::compute_metadata_hmac_tag(hmac_key, &metadata).unwrap();
+        metadata.metadata_hmac = tag.to_vec();
+        serde_json::to_string(&metadata).unwrap()
+    }
 
     struct Setup {
         store: Box<MemStore>,
@@ -564,15 +579,11 @@ mod tests {
         let stripe_mapping =
             crate::archive::serialize_stripe_mapping(&StripeContentMap::new(), &hmac_key, None)
                 .unwrap();
-        let hmac_key_b64 = STANDARD.encode(hmac_key);
         store
             .put_object(
                 "metadata.json",
-                format!(
-                    r#"{{"format_version":1,"stripe_sector_count":16,"encryption_key":null,"hmac_key":"{}"}}"#,
-                    hmac_key_b64
-                )
-                .as_bytes(),
+                build_metadata_json(1, 16, None, ArchiveCompressionAlgorithm::None, &hmac_key)
+                    .as_bytes(),
                 Duration::from_secs(5),
             )
             .unwrap();
@@ -639,19 +650,86 @@ mod tests {
     }
 
     #[test]
+    fn test_metadata_hmac_written_and_verified() {
+        let kek = KeyEncryptionCipher::default();
+        let mut setup = prep(
+            4,
+            2,
+            false,
+            &[0],
+            kek.clone(),
+            ArchiveCompressionAlgorithm::None,
+        );
+        setup.archiver.archive_all().unwrap();
+
+        let metadata_bytes = setup
+            .store
+            .get_object("metadata.json", Duration::from_secs(5))
+            .unwrap();
+        let metadata: ArchiveMetadata = serde_json::from_slice(&metadata_bytes).unwrap();
+        let hmac_key = ArchiveStripeSource::decrypt_hmac_key(&metadata, &kek).unwrap();
+        let computed_tag = compute_metadata_hmac_tag(&hmac_key, &metadata).unwrap();
+        assert_eq!(
+            metadata.metadata_hmac.as_slice(),
+            computed_tag.as_slice(),
+            "metadata_hmac does not match recomputed tag"
+        );
+        verify_metadata_hmac_tag(&hmac_key, &metadata).unwrap();
+
+        let mut tampered = metadata.clone();
+        tampered.stripe_sector_count += 1;
+        let result = verify_metadata_hmac_tag(&hmac_key, &tampered);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_archive_stripe_source_rejects_tampered_metadata_hmac() {
+        let kek = KeyEncryptionCipher::default();
+        let mut setup = prep(
+            4,
+            2,
+            false,
+            &[0],
+            kek.clone(),
+            ArchiveCompressionAlgorithm::None,
+        );
+        setup.archiver.archive_all().unwrap();
+
+        let metadata_bytes = setup
+            .store
+            .get_object("metadata.json", Duration::from_secs(5))
+            .unwrap();
+        let mut metadata: ArchiveMetadata = serde_json::from_slice(&metadata_bytes).unwrap();
+        metadata.stripe_sector_count += 1;
+        let tampered_json = serde_json::to_string(&metadata).unwrap();
+        setup
+            .store
+            .put_object(
+                "metadata.json",
+                tampered_json.as_bytes(),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+
+        let result = ArchiveStripeSource::new(clone_memstore(&setup.store), kek);
+        assert!(result.is_err());
+        let error = result.err().unwrap().to_string();
+        assert!(
+            error.contains("Archive metadata HMAC verification failed"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn test_fetch_stripe_hashes_bad_cbor() {
         let mut store = MemStore::new();
         let hmac_key = [0x22u8; 32];
         let stripe_mapping = b"not-cbor";
-        let hmac_key_b64 = STANDARD.encode(hmac_key);
         store
             .put_object(
                 "metadata.json",
-                format!(
-                    r#"{{"format_version":1,"stripe_sector_count":16,"encryption_key":null,"hmac_key":"{}"}}"#,
-                    hmac_key_b64
-                )
-                .as_bytes(),
+                build_metadata_json(1, 16, None, ArchiveCompressionAlgorithm::None, &hmac_key)
+                    .as_bytes(),
                 Duration::from_secs(5),
             )
             .unwrap();

@@ -4,6 +4,7 @@ use crate::Result;
 
 use super::dual_key::DualKeyState;
 use super::operation::{OperationContext, StripeOperation};
+use crate::block_device::bdev_lazy::metadata::types::ops_type;
 
 use log::{error, info};
 use std::sync::Arc;
@@ -50,6 +51,15 @@ impl RekeyOperation {
 impl StripeOperation for RekeyOperation {
     fn name(&self) -> &str {
         "rekey"
+    }
+
+    fn ops_type(&self) -> u8 {
+        ops_type::REKEY
+    }
+
+    fn ops_id(&self) -> u64 {
+        // Rekey operations don't have a unique ID — use 0.
+        0
     }
 
     fn gate_reads(&self) -> bool {

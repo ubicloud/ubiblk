@@ -24,6 +24,17 @@ pub trait StripeOperation: Send {
     /// Human-readable name for logging and RPC status (e.g., "snapshot", "rekey").
     fn name(&self) -> &str;
 
+    /// Operation type constant for persistence (ops_type::SNAPSHOT, ops_type::REKEY, etc.).
+    fn ops_type(&self) -> u8;
+
+    /// Unique operation identifier for crash recovery correlation.
+    fn ops_id(&self) -> u64;
+
+    /// Optional staging path for operations that use a staging device (e.g., snapshot).
+    fn ops_staging_path(&self) -> Option<String> {
+        None
+    }
+
     /// Whether reads to locked stripes should be gated.
     /// `false` = snapshot (target unchanged), `true` = rekey (in-place re-encryption).
     fn gate_reads(&self) -> bool;

@@ -87,6 +87,7 @@ mod tests {
     fn test_invalid_version() {
         let device = TestBlockDevice::new(1024 * 1024);
         let mut metadata = UbiMetadata::new(11, 16, 16);
+        // Set minor version higher than what we support
         metadata.version_minor = (METADATA_VERSION_MINOR + 1).to_le_bytes();
         metadata.save_to_bdev(&device).expect("save metadata");
 
@@ -98,5 +99,19 @@ mod tests {
                     .to_string()
                     .contains("Metadata version mismatch")
         );
+    }
+
+    #[test]
+    fn test_loads_v2_0_metadata() {
+        // v2.0 metadata (minor=0) should load successfully — forward compatible
+        let device = TestBlockDevice::new(1024 * 1024);
+        let mut metadata = UbiMetadata::new(11, 16, 16);
+        metadata.version_minor = 0u16.to_le_bytes();
+        metadata.save_to_bdev(&device).expect("save metadata");
+
+        let loaded = UbiMetadata::load_from_bdev(&device).expect("load v2.0 metadata");
+        // v2.0 has no ops state — bytes are zero, which maps to NORMAL
+        assert_eq!(loaded.ops_phase, 0);
+        assert_eq!(loaded.ops_type, 0);
     }
 }

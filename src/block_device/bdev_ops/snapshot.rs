@@ -2,6 +2,7 @@ use crate::block_device::{shared_buffer, wait_for_completion, BlockDevice, IoCha
 use crate::Result;
 
 use super::operation::{OperationContext, StripeOperation};
+use crate::block_device::bdev_lazy::metadata::types::ops_type;
 
 use log::error;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -74,6 +75,14 @@ impl SnapshotOperation {
 impl StripeOperation for SnapshotOperation {
     fn name(&self) -> &str {
         "snapshot"
+    }
+
+    fn ops_type(&self) -> u8 {
+        ops_type::SNAPSHOT
+    }
+
+    fn ops_id(&self) -> u64 {
+        self.snapshot_id
     }
 
     fn gate_reads(&self) -> bool {

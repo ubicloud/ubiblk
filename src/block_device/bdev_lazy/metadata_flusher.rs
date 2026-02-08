@@ -16,6 +16,7 @@ const MAX_CONCURRENT_CHANGES: usize = 16;
 enum MetadataFlusherRequestKind {
     SetFetched,
     SetWritten,
+    ClearOpsLocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,8 +36,10 @@ struct HeaderUpdateStatus {
     stage: RequestStage,
     stripe_id: usize,
     header: u8,
-    /// The specific flag bit(s) added by this request, used to revert on failure.
+    /// The specific flag bit(s) changed by this request, used to revert on failure.
     requested_bitmask: u8,
+    /// If true, the operation clears the bitmask (AND-NOT); if false, it sets it (OR).
+    is_clear_op: bool,
     sector: u64,
 }
 
@@ -100,6 +103,22 @@ impl MetadataFlusher {
         });
     }
 
+    /// Queue clearing the OPS_LOCKED bit for a stripe. Used per-stripe after
+    /// process_and_unlock_stripe completes. The bit clear is durable (write +
+    /// flush) before the volatile unlock, following durability-before-visibility.
+    pub fn clear_ops_locked(&mut self, stripe_id: usize) {
+        self.queued_requests.push_back(MetadataFlusherRequest {
+            stripe_id,
+            kind: MetadataFlusherRequestKind::ClearOpsLocked,
+        });
+    }
+
+    /// Provide mutable access to the underlying metadata for direct manipulation
+    /// (e.g., setting all OPS_LOCKED bits before a bulk save).
+    pub fn metadata_mut(&mut self) -> &mut UbiMetadata {
+        &mut self.metadata
+    }
+
     pub fn update(&mut self) {
         self.start_writes();
         self.poll_channel();
@@ -108,7 +127,13 @@ impl MetadataFlusher {
     fn cleanup_failed_submission(&mut self, stripe_ids: &[usize], return_buffer: bool) {
         for stripe_id in stripe_ids {
             if let Some(status) = self.header_updates.remove(stripe_id) {
-                self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
+                if status.is_clear_op {
+                    // Revert clear: re-set the bit
+                    self.metadata.stripe_headers[status.stripe_id] |= status.requested_bitmask;
+                } else {
+                    // Revert set: clear the bit
+                    self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
+                }
                 if return_buffer {
                     self.buffer_pool.return_buffer(&status.buffer);
                 }
@@ -129,10 +154,14 @@ impl MetadataFlusher {
                 }
                 (Some(status), false) => {
                     error!("Failed to write metadata for stripe {stripe_id}");
-                    // Revert only the specific flag bit we added, so a future
-                    // retry for the same operation won't be skipped by the
-                    // dedup check in start_writes.
-                    self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
+                    // Revert the specific flag bit change, so a future retry
+                    // for the same operation won't be skipped by the dedup
+                    // check in start_writes.
+                    if status.is_clear_op {
+                        self.metadata.stripe_headers[status.stripe_id] |= status.requested_bitmask;
+                    } else {
+                        self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
+                    }
                     // Only return the buffer if it hasn't already been returned.
                     // On write success the buffer is returned before transitioning
                     // to Flushing, so a subsequent flush failure must not return
@@ -194,15 +223,26 @@ impl MetadataFlusher {
             let requested_bitmask = match req.kind {
                 MetadataFlusherRequestKind::SetFetched => metadata_flags::FETCHED,
                 MetadataFlusherRequestKind::SetWritten => metadata_flags::WRITTEN,
+                MetadataFlusherRequestKind::ClearOpsLocked => metadata_flags::OPS_LOCKED,
             };
+            let is_clear_op = req.kind == MetadataFlusherRequestKind::ClearOpsLocked;
 
-            if self.metadata.stripe_headers[req.stripe_id] & requested_bitmask != 0 {
+            if is_clear_op {
+                if self.metadata.stripe_headers[req.stripe_id] & requested_bitmask == 0 {
+                    // Already clear, skip
+                    continue;
+                }
+            } else if self.metadata.stripe_headers[req.stripe_id] & requested_bitmask != 0 {
                 // Already set, skip
                 continue;
             }
 
             let buf = self.buffer_pool.get_buffer().unwrap();
-            self.metadata.stripe_headers[req.stripe_id] |= requested_bitmask;
+            if is_clear_op {
+                self.metadata.stripe_headers[req.stripe_id] &= !requested_bitmask;
+            } else {
+                self.metadata.stripe_headers[req.stripe_id] |= requested_bitmask;
+            }
 
             let headers_start = group * STRIPE_HEADERS_PER_SECTOR;
             let headers_end =
@@ -221,6 +261,7 @@ impl MetadataFlusher {
                     stripe_id: req.stripe_id,
                     header: self.metadata.stripe_headers[req.stripe_id],
                     requested_bitmask,
+                    is_clear_op,
                     sector,
                 },
             );
@@ -576,5 +617,110 @@ mod tests {
 
         // Now it should succeed
         assert!(shared_state.stripe_fetched(5));
+    }
+
+    #[test]
+    fn test_clear_ops_locked() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // First, set the OPS_LOCKED bit in metadata
+        metadata_flusher.metadata_mut().set_all_ops_locked();
+        metadata_flusher
+            .metadata_mut()
+            .save_to_bdev(&metadata_dev)
+            .unwrap();
+
+        // Reload flusher to pick up the saved metadata
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // Queue clear for stripe 5
+        metadata_flusher.clear_ops_locked(5);
+        wait_for_completion(&mut metadata_flusher);
+
+        // Verify: reload metadata from disk, stripe 5 OPS_LOCKED should be cleared
+        let loaded = UbiMetadata::load_from_bdev(&metadata_dev).expect("reload metadata");
+        assert_eq!(
+            loaded.stripe_headers[5] & metadata_flags::OPS_LOCKED,
+            0,
+            "stripe 5 OPS_LOCKED should be cleared"
+        );
+
+        // Other stripes should still have OPS_LOCKED set
+        for i in [0, 1, 2, 3, 4, 6, 7] {
+            assert_ne!(
+                loaded.stripe_headers[i] & metadata_flags::OPS_LOCKED,
+                0,
+                "stripe {i} OPS_LOCKED should still be set"
+            );
+        }
+    }
+
+    #[test]
+    fn test_clear_ops_locked_idempotent() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // OPS_LOCKED is not set initially — clearing should be a no-op
+        metadata_flusher.clear_ops_locked(3);
+        wait_for_completion(&mut metadata_flusher);
+
+        // Verify: no crash, no hang
+        assert!(!metadata_flusher.busy());
+    }
+
+    #[test]
+    fn test_clear_ops_locked_failure_allows_retry() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // Set OPS_LOCKED on stripe 5
+        metadata_flusher.metadata_mut().set_all_ops_locked();
+        metadata_flusher
+            .metadata_mut()
+            .save_to_bdev(&metadata_dev)
+            .unwrap();
+
+        // Reload to pick up saved state
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // Queue clear and inject failure
+        metadata_flusher.clear_ops_locked(5);
+        metadata_dev
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        metadata_flusher.update();
+
+        // Should not be busy (failure cleaned up), bit should NOT be cleared yet
+        assert!(!metadata_flusher.busy());
+
+        // Retry: should succeed
+        metadata_flusher.clear_ops_locked(5);
+        wait_for_completion(&mut metadata_flusher);
+
+        // Verify on disk
+        let loaded = UbiMetadata::load_from_bdev(&metadata_dev).expect("reload metadata");
+        assert_eq!(
+            loaded.stripe_headers[5] & metadata_flags::OPS_LOCKED,
+            0,
+            "stripe 5 OPS_LOCKED should be cleared after retry"
+        );
     }
 }

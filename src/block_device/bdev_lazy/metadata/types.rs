@@ -5,7 +5,7 @@ use crate::{backends::SECTOR_SIZE, stripe_source::StripeSource, Result};
 pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
 pub const METADATA_VERSION_MAJOR: u16 = 2;
-pub const METADATA_VERSION_MINOR: u16 = 0;
+pub const METADATA_VERSION_MINOR: u16 = 1;
 
 pub const CRC32_SIZE: usize = 4;
 pub const STRIPE_HEADERS_PER_SECTOR: usize = SECTOR_SIZE - CRC32_SIZE; // 508
@@ -22,6 +22,44 @@ pub mod metadata_flags {
     /// Stripe exists in the base source. Such a stripe might have been fetched
     /// already, or not yet.
     pub const HAS_SOURCE: u8 = 1 << 2;
+    /// Stripe is locked by an active operation (snapshot/rekey). Set at
+    /// begin_operating, cleared per-stripe as processing completes. Used for
+    /// crash recovery: on startup, stripes with this bit still set must be
+    /// re-processed.
+    pub const OPS_LOCKED: u8 = 1 << 3;
+}
+
+/// Operation phase values stored in sector 0 at offset 18.
+pub mod ops_phase {
+    /// No operation in progress.
+    pub const NORMAL: u8 = 0;
+    /// Operation is active, stripes are being processed.
+    /// Stalling (phase 1) is never persisted — a crash during stalling
+    /// reverts to Normal since no on-disk state was written.
+    pub const OPERATING: u8 = 2;
+}
+
+/// Operation type values stored in sector 0 at offset 19.
+pub mod ops_type {
+    pub const NONE: u8 = 0;
+    pub const SNAPSHOT: u8 = 1;
+    pub const REKEY: u8 = 2;
+}
+
+/// Offsets within sector 0 for operation state (v2.1 extension).
+pub const OPS_PHASE_OFFSET: usize = 18;
+pub const OPS_TYPE_OFFSET: usize = 19;
+pub const OPS_ID_OFFSET: usize = 20;
+pub const OPS_STAGING_PATH_OFFSET: usize = 28;
+pub const OPS_STAGING_PATH_MAX: usize = 256;
+
+/// Recovery information extracted from metadata when ops_phase == OPERATING.
+#[derive(Debug, Clone)]
+pub struct OpsRecoveryInfo {
+    pub ops_type: u8,
+    pub ops_id: u64,
+    pub staging_path: Option<String>,
+    pub locked_stripes: Vec<usize>,
 }
 
 #[repr(C)]
@@ -38,8 +76,15 @@ pub struct UbiMetadata {
     // bit 0: fetched or not
     // bit 1: written or not
     // bit 2: exists in source
-    // bits 3-7: reserved
+    // bit 3: ops_locked (active operation lock)
+    // bits 4-7: reserved
     pub stripe_headers: Vec<u8>,
+
+    // Operation state (v2.1 extension, stored in sector 0 padding area)
+    pub ops_phase: u8,
+    pub ops_type: u8,
+    pub ops_id: u64,
+    pub ops_staging_path: Option<String>,
 }
 
 /// Compute CRC32 over a slice and return as little-endian bytes.
@@ -155,6 +200,10 @@ impl UbiMetadata {
             version_minor: METADATA_VERSION_MINOR.to_le_bytes(),
             stripe_sector_count_shift,
             stripe_headers: headers,
+            ops_phase: ops_phase::NORMAL,
+            ops_type: ops_type::NONE,
+            ops_id: 0,
+            ops_staging_path: None,
         })
     }
 
@@ -182,6 +231,10 @@ impl UbiMetadata {
             version_minor: METADATA_VERSION_MINOR.to_le_bytes(),
             stripe_sector_count_shift,
             stripe_headers: headers,
+            ops_phase: ops_phase::NORMAL,
+            ops_type: ops_type::NONE,
+            ops_id: 0,
+            ops_staging_path: None,
         })
     }
 
@@ -226,16 +279,18 @@ impl UbiMetadata {
 
         let mut version_minor = [0u8; 2];
         version_minor.copy_from_slice(&buf[UBI_MAGIC_SIZE + 2..UBI_MAGIC_SIZE + 4]);
+        let found_minor = u16::from_le_bytes(version_minor);
         if version_major != METADATA_VERSION_MAJOR.to_le_bytes()
-            || version_minor != METADATA_VERSION_MINOR.to_le_bytes()
+            || found_minor > METADATA_VERSION_MINOR
         {
             return Err(crate::ubiblk_error!(MetadataError {
                 description: format!(
-                    "Metadata version mismatch! Expected: {}.{}, Found: {}.{}",
+                    "Metadata version mismatch! Expected: {}.0-{}.{}, Found: {}.{}",
+                    METADATA_VERSION_MAJOR,
                     METADATA_VERSION_MAJOR,
                     METADATA_VERSION_MINOR,
                     u16::from_le_bytes(version_major),
-                    u16::from_le_bytes(version_minor)
+                    found_minor
                 ),
             }));
         }
@@ -290,12 +345,45 @@ impl UbiMetadata {
         assert!(all_headers.len() >= stripe_count);
         all_headers.truncate(stripe_count);
 
+        // Parse operation state from sector 0 extension area (v2.1+).
+        // For v2.0 metadata these bytes are zero (padding), so ops_phase=0
+        // (NORMAL) which is the correct default.
+        let ops_phase_val = buf[OPS_PHASE_OFFSET];
+        let ops_type_val = buf[OPS_TYPE_OFFSET];
+        let ops_id_val = u64::from_le_bytes([
+            buf[OPS_ID_OFFSET],
+            buf[OPS_ID_OFFSET + 1],
+            buf[OPS_ID_OFFSET + 2],
+            buf[OPS_ID_OFFSET + 3],
+            buf[OPS_ID_OFFSET + 4],
+            buf[OPS_ID_OFFSET + 5],
+            buf[OPS_ID_OFFSET + 6],
+            buf[OPS_ID_OFFSET + 7],
+        ]);
+        let ops_staging_path_val = {
+            let path_bytes =
+                &buf[OPS_STAGING_PATH_OFFSET..OPS_STAGING_PATH_OFFSET + OPS_STAGING_PATH_MAX];
+            let nul_pos = path_bytes
+                .iter()
+                .position(|&b| b == 0)
+                .unwrap_or(OPS_STAGING_PATH_MAX);
+            if nul_pos > 0 {
+                String::from_utf8(path_bytes[..nul_pos].to_vec()).ok()
+            } else {
+                None
+            }
+        };
+
         Ok(Box::new(UbiMetadata {
             magic,
             version_major,
             version_minor,
             stripe_sector_count_shift,
             stripe_headers: all_headers,
+            ops_phase: ops_phase_val,
+            ops_type: ops_type_val,
+            ops_id: ops_id_val,
+            ops_staging_path: ops_staging_path_val,
         }))
     }
 
@@ -309,12 +397,14 @@ impl UbiMetadata {
             }));
         }
 
-        // Write header sector (sector 0)
-        let mut header = [0u8; Self::HEADER_SIZE];
-        header[..UBI_MAGIC_SIZE].copy_from_slice(&self.magic);
-        header[UBI_MAGIC_SIZE..UBI_MAGIC_SIZE + 2].copy_from_slice(&self.version_major);
-        header[UBI_MAGIC_SIZE + 2..UBI_MAGIC_SIZE + 4].copy_from_slice(&self.version_minor);
-        header[UBI_MAGIC_SIZE + 4] = self.stripe_sector_count_shift;
+        // Write header sector (sector 0).
+        // Build the full sector 0 content area (508 bytes, before CRC32).
+        let mut sector0_content = [0u8; SECTOR_SIZE - CRC32_SIZE];
+        sector0_content[..UBI_MAGIC_SIZE].copy_from_slice(&self.magic);
+        sector0_content[UBI_MAGIC_SIZE..UBI_MAGIC_SIZE + 2].copy_from_slice(&self.version_major);
+        sector0_content[UBI_MAGIC_SIZE + 2..UBI_MAGIC_SIZE + 4]
+            .copy_from_slice(&self.version_minor);
+        sector0_content[UBI_MAGIC_SIZE + 4] = self.stripe_sector_count_shift;
 
         let stripe_count = self.stripe_headers.len();
         let stripe_count_bytes = u32::try_from(stripe_count)
@@ -324,9 +414,29 @@ impl UbiMetadata {
                 })
             })?
             .to_le_bytes();
-        header[STRIPE_COUNT_OFFSET..STRIPE_COUNT_OFFSET + 4].copy_from_slice(&stripe_count_bytes);
+        sector0_content[STRIPE_COUNT_OFFSET..STRIPE_COUNT_OFFSET + 4]
+            .copy_from_slice(&stripe_count_bytes);
 
-        write_sector_with_crc32(&mut buf[..SECTOR_SIZE], &header);
+        // Operation state fields (v2.1 extension)
+        sector0_content[OPS_PHASE_OFFSET] = self.ops_phase;
+        sector0_content[OPS_TYPE_OFFSET] = self.ops_type;
+        sector0_content[OPS_ID_OFFSET..OPS_ID_OFFSET + 8]
+            .copy_from_slice(&self.ops_id.to_le_bytes());
+        if let Some(ref path) = self.ops_staging_path {
+            let path_bytes = path.as_bytes();
+            let len = path_bytes.len().min(OPS_STAGING_PATH_MAX - 1);
+            sector0_content[OPS_STAGING_PATH_OFFSET..OPS_STAGING_PATH_OFFSET + len]
+                .copy_from_slice(&path_bytes[..len]);
+            // null terminator is already zero from initialization
+        }
+
+        // Write sector 0 with CRC32 (write_sector_with_crc32 expects the
+        // content portion only; it zero-fills and appends CRC32).
+        // Since sector0_content is exactly 508 bytes, pass it directly.
+        buf[..SECTOR_SIZE].fill(0);
+        buf[..sector0_content.len()].copy_from_slice(&sector0_content);
+        let crc = crc32fast::hash(&buf[..SECTOR_SIZE - CRC32_SIZE]).to_le_bytes();
+        buf[SECTOR_SIZE - CRC32_SIZE..SECTOR_SIZE].copy_from_slice(&crc);
 
         // Write stripe header sectors with CRC32
         let num_sectors = self.stripe_header_sector_count();
@@ -340,6 +450,62 @@ impl UbiMetadata {
             write_sector_with_crc32(&mut buf[sector_start..sector_start + SECTOR_SIZE], headers);
         }
         Ok(())
+    }
+
+    /// Check if an operation was in progress when metadata was last written.
+    /// Returns recovery info if ops_phase == OPERATING.
+    pub fn ops_recovery_info(&self) -> Option<OpsRecoveryInfo> {
+        if self.ops_phase != ops_phase::OPERATING {
+            return None;
+        }
+        let locked_stripes = self
+            .stripe_headers
+            .iter()
+            .enumerate()
+            .filter(|(_, &h)| h & metadata_flags::OPS_LOCKED != 0)
+            .map(|(i, _)| i)
+            .collect();
+        Some(OpsRecoveryInfo {
+            ops_type: self.ops_type,
+            ops_id: self.ops_id,
+            staging_path: self.ops_staging_path.clone(),
+            locked_stripes,
+        })
+    }
+
+    /// Set operation state fields. Call before writing metadata to persist
+    /// the operation phase transition.
+    pub fn set_ops_state(
+        &mut self,
+        phase: u8,
+        op_type: u8,
+        op_id: u64,
+        staging_path: Option<String>,
+    ) {
+        self.ops_phase = phase;
+        self.ops_type = op_type;
+        self.ops_id = op_id;
+        self.ops_staging_path = staging_path;
+    }
+
+    /// Clear operation state, returning to normal.
+    pub fn clear_ops_state(&mut self) {
+        self.ops_phase = ops_phase::NORMAL;
+        self.ops_type = ops_type::NONE;
+        self.ops_id = 0;
+        self.ops_staging_path = None;
+    }
+
+    /// Set the OPS_LOCKED bit on all stripes.
+    pub fn set_all_ops_locked(&mut self) {
+        for h in self.stripe_headers.iter_mut() {
+            *h |= metadata_flags::OPS_LOCKED;
+        }
+    }
+
+    /// Clear the OPS_LOCKED bit on a single stripe.
+    pub fn clear_ops_locked(&mut self, stripe_id: usize) {
+        self.stripe_headers[stripe_id] &= !metadata_flags::OPS_LOCKED;
     }
 
     pub fn has_fetched_all_stripes(&self) -> bool {
@@ -629,5 +795,147 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("stripe sector count shift"));
+    }
+
+    #[test]
+    fn test_ops_state_roundtrip() {
+        let mut metadata = UbiMetadata::new(9, 16, 16);
+        metadata.set_ops_state(
+            ops_phase::OPERATING,
+            ops_type::SNAPSHOT,
+            42,
+            Some("/tmp/staging".to_string()),
+        );
+        metadata.set_all_ops_locked();
+
+        let metadata_size = metadata.metadata_size();
+        let mut buf = vec![0u8; metadata_size];
+        metadata.write_to_buf(&mut buf).expect("write to buffer");
+
+        let loaded = UbiMetadata::from_bytes(&buf).expect("deserialize");
+        assert_eq!(loaded.ops_phase, ops_phase::OPERATING);
+        assert_eq!(loaded.ops_type, ops_type::SNAPSHOT);
+        assert_eq!(loaded.ops_id, 42);
+        assert_eq!(loaded.ops_staging_path.as_deref(), Some("/tmp/staging"));
+
+        // All stripes should have OPS_LOCKED set
+        for i in 0..16 {
+            assert_ne!(
+                loaded.stripe_headers[i] & metadata_flags::OPS_LOCKED,
+                0,
+                "stripe {i} should have OPS_LOCKED"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ops_recovery_info() {
+        let mut metadata = UbiMetadata::new(9, 8, 8);
+        // No operation in progress
+        assert!(metadata.ops_recovery_info().is_none());
+
+        // Set up an in-progress operation with some stripes locked
+        metadata.set_ops_state(ops_phase::OPERATING, ops_type::REKEY, 99, None);
+        metadata.set_all_ops_locked();
+        // Clear locks on stripes 0, 1, 2 (already processed)
+        metadata.clear_ops_locked(0);
+        metadata.clear_ops_locked(1);
+        metadata.clear_ops_locked(2);
+
+        let info = metadata.ops_recovery_info().unwrap();
+        assert_eq!(info.ops_type, ops_type::REKEY);
+        assert_eq!(info.ops_id, 99);
+        assert!(info.staging_path.is_none());
+        assert_eq!(info.locked_stripes, vec![3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_ops_clear_state() {
+        let mut metadata = UbiMetadata::new(9, 8, 8);
+        metadata.set_ops_state(
+            ops_phase::OPERATING,
+            ops_type::SNAPSHOT,
+            1,
+            Some("/staging".to_string()),
+        );
+        assert_eq!(metadata.ops_phase, ops_phase::OPERATING);
+
+        metadata.clear_ops_state();
+        assert_eq!(metadata.ops_phase, ops_phase::NORMAL);
+        assert_eq!(metadata.ops_type, ops_type::NONE);
+        assert_eq!(metadata.ops_id, 0);
+        assert!(metadata.ops_staging_path.is_none());
+    }
+
+    #[test]
+    fn test_ops_state_roundtrip_through_bdev() {
+        // Full roundtrip: write metadata with ops state, reload, verify.
+        // This exercises save_to_bdev + load_from_bdev with the new fields.
+        let mut metadata = UbiMetadata::new(9, 16, 16);
+        metadata.set_ops_state(
+            ops_phase::OPERATING,
+            ops_type::SNAPSHOT,
+            12345,
+            Some("/mnt/staging/snap-12345".to_string()),
+        );
+        metadata.set_all_ops_locked();
+        // Simulate partial progress: clear locks on first 5 stripes
+        for i in 0..5 {
+            metadata.clear_ops_locked(i);
+        }
+
+        let metadata_size = metadata.metadata_size();
+        let mut buf = vec![0u8; metadata_size];
+        metadata.write_to_buf(&mut buf).expect("write to buffer");
+
+        let loaded = UbiMetadata::from_bytes(&buf).expect("deserialize");
+
+        // Verify ops state
+        let info = loaded.ops_recovery_info().unwrap();
+        assert_eq!(info.ops_type, ops_type::SNAPSHOT);
+        assert_eq!(info.ops_id, 12345);
+        assert_eq!(
+            info.staging_path.as_deref(),
+            Some("/mnt/staging/snap-12345")
+        );
+        assert_eq!(
+            info.locked_stripes,
+            vec![5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+
+        // Verify stripe headers preserved correctly
+        for i in 0..5 {
+            assert_eq!(
+                loaded.stripe_headers[i] & metadata_flags::OPS_LOCKED,
+                0,
+                "stripe {i} lock should be cleared"
+            );
+        }
+        for i in 5..16 {
+            assert_ne!(
+                loaded.stripe_headers[i] & metadata_flags::OPS_LOCKED,
+                0,
+                "stripe {i} should still be locked"
+            );
+        }
+    }
+
+    #[test]
+    fn test_v2_0_metadata_zero_ops_state() {
+        // v2.0 metadata has zero bytes in the extension area.
+        // Verify that parsing produces NORMAL phase.
+        let mut metadata = UbiMetadata::new(9, 4, 4);
+        metadata.version_minor = 0u16.to_le_bytes();
+
+        let metadata_size = metadata.metadata_size();
+        let mut buf = vec![0u8; metadata_size];
+        metadata.write_to_buf(&mut buf).expect("write to buffer");
+
+        let loaded = UbiMetadata::from_bytes(&buf).expect("deserialize");
+        assert_eq!(loaded.ops_phase, ops_phase::NORMAL);
+        assert_eq!(loaded.ops_type, ops_type::NONE);
+        assert_eq!(loaded.ops_id, 0);
+        assert!(loaded.ops_staging_path.is_none());
+        assert!(loaded.ops_recovery_info().is_none());
     }
 }

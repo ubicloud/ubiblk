@@ -7,6 +7,8 @@ use log::{info, warn};
 
 use crate::backends::SECTOR_SIZE;
 
+const EXTRA_TRACKING_SLOTS: usize = 8;
+
 pub enum IoKind {
     Read = 1,
     Write = 2,
@@ -31,7 +33,12 @@ pub struct IoTracker {
 
 impl IoTracker {
     pub fn new(size: usize) -> Self {
-        let vec = (0..size)
+        // Pre-allocate a few extra request slots beyond the queue size so that
+        // additional slot indices returned by get_request_slot() (for example,
+        // when edk2 issues oversized IO that spans more descriptors) can still
+        // be tracked. This reduces the number of "Large IO" logs triggered when
+        // runtime slot indices grow beyond the initially configured slots.
+        let vec = (0..size + EXTRA_TRACKING_SLOTS)
             .map(|_| {
                 Arc::new(IoRecord {
                     kind: AtomicU8::new(0),

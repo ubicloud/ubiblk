@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::backend_thread::UbiBlkBackendThread;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use vhost::vhost_user::message::*;
 use vhost_user_backend::{bitmap::BitmapMmapRegion, VhostUserBackend, VringRwLock, VringT};
 use virtio_bindings::{
@@ -272,8 +272,37 @@ impl VhostUserBackend for UbiBlkBackend {
         }
     }
 
-    fn get_config(&self, _offset: u32, _size: u32) -> Vec<u8> {
-        self.config.as_slice().to_vec()
+    fn get_config(&self, _offset: u32, size: u32) -> Vec<u8> {
+        // 1. QEMU (tag v8.2.2):
+        //    a. sets offset to 0 at vhost_user_get_config
+        //       (hw/virtio/vhost-user.c:2414)
+        //    b. calculates size dynamically based on available features in
+        //       virtio_get_config_size (hw/virtio/virtio.c:2956). This can be
+        //       less than the full config struct size.
+        // 2. Cloud-Hypervisor (tag v46.0):
+        //    a. sets offset to VHOST_USER_CONFIG_OFFSET (0x100), which is the
+        //       starting position of the device configuration space in virtio
+        //       devices (virtio-devices/src/vhost_user/blk.rs:147)
+        //    b. always sets size to the full config struct size
+        //       (virtio-devices/src/vhost_user/blk.rs:142)
+        // 3. vhost-user spec's requirement for VHOST_USER_GET_CONFIG:
+        //    > vhost-user back-end’s payload size MUST match the front-end’s
+        //    > request
+        // Based on above, we ignore the offset and return the first "size"
+        // bytes of the config struct, which works for both QEMU and
+        // Cloud-Hypervisor.
+        let config_bytes = self.config.as_slice();
+        let requested_size = size as usize;
+        if size as usize > config_bytes.len() {
+            warn!(
+                "get_config requested size {size} exceeds config struct size {}, padding with zeros",
+                config_bytes.len()
+            );
+        }
+        let mut buf = vec![0u8; requested_size];
+        let copy_len = std::cmp::min(requested_size, config_bytes.len());
+        buf[..copy_len].copy_from_slice(&config_bytes[..copy_len]);
+        buf
     }
 
     fn exit_event(&self, thread_index: usize) -> Option<EventFd> {
@@ -588,5 +617,33 @@ mod tests {
         let mut thread = backend.threads()[0].lock().unwrap();
         let res = backend.maybe_pin_cpu(&mut thread, 0);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_get_config() {
+        let backend = default_backend();
+
+        // Test with offset 0 and full size
+        let bytes = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
+        assert_eq!(bytes.len(), std::mem::size_of::<VirtioBlockConfig>());
+
+        // Test with non-zero offset (should be ignored) and full size
+        let bytes = backend.get_config(0x100, std::mem::size_of::<VirtioBlockConfig>() as u32);
+        assert_eq!(bytes.len(), std::mem::size_of::<VirtioBlockConfig>());
+
+        // Test with offset 0 and smaller size
+        let bytes = backend.get_config(0, 16);
+        assert_eq!(bytes.len(), 16);
+
+        // Test with non-zero offset and smaller size
+        let bytes = backend.get_config(0x100, 16);
+        assert_eq!(bytes.len(), 16);
+
+        // Test with size larger than config struct
+        let bytes = backend.get_config(0, (std::mem::size_of::<VirtioBlockConfig>() + 16) as u32);
+        assert_eq!(bytes.len(), std::mem::size_of::<VirtioBlockConfig>() + 16);
+        assert!(bytes[std::mem::size_of::<VirtioBlockConfig>()..]
+            .iter()
+            .all(|&b| b == 0));
     }
 }

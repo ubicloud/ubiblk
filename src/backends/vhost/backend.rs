@@ -272,8 +272,14 @@ impl VhostUserBackend for UbiBlkBackend {
         }
     }
 
-    fn get_config(&self, _offset: u32, _size: u32) -> Vec<u8> {
-        self.config.as_slice().to_vec()
+    fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
+        let config_bytes = self.config.as_slice();
+        let start = offset as usize;
+        let end = start.saturating_add(size as usize).min(config_bytes.len());
+        if start >= config_bytes.len() {
+            return Vec::new();
+        }
+        config_bytes[start..end].to_vec()
     }
 
     fn exit_event(&self, thread_index: usize) -> Option<EventFd> {
@@ -518,6 +524,50 @@ mod tests {
         assert_eq!(capacity, 8);
         assert_eq!(blk_size, SECTOR_SIZE as u32);
         assert_eq!(queues as usize, DEFAULT_NUM_QUEUES);
+    }
+
+    /// get_config should return a partial slice when size < full config.
+    /// This is what QEMU does: it requests only the bytes relevant to negotiated features.
+    #[test]
+    fn get_config_partial() {
+        let backend = default_backend();
+        let full = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
+
+        // QEMU requests 36 bytes when DISCARD/WRITE_ZEROES are not negotiated
+        let partial = backend.get_config(0, 36);
+        assert_eq!(partial.len(), 36);
+        assert_eq!(&partial[..], &full[..36]);
+    }
+
+    /// get_config with offset should skip leading bytes.
+    #[test]
+    fn get_config_with_offset() {
+        let backend = default_backend();
+        let full = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
+
+        let partial = backend.get_config(8, 4);
+        assert_eq!(partial.len(), 4);
+        assert_eq!(&partial[..], &full[8..12]);
+    }
+
+    /// get_config with offset beyond config should return empty.
+    #[test]
+    fn get_config_out_of_bounds() {
+        let backend = default_backend();
+        let result = backend.get_config(1000, 4);
+        assert!(result.is_empty());
+    }
+
+    /// get_config should clamp size when it runs past the end of the config.
+    #[test]
+    fn get_config_truncates_at_end() {
+        let backend = default_backend();
+        let full = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
+        let start = full.len() - 2;
+
+        let partial = backend.get_config(start as u32, 4);
+        assert_eq!(partial.len(), 2);
+        assert_eq!(&partial[..], &full[start..]);
     }
 
     /// queues_per_thread should reflect the number of queues configured.

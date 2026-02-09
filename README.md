@@ -34,6 +34,7 @@ cargo test
 
 - [Remote stripe server, shell, and protocol](docs/remote-stripe.md)
 - [Archive binary and archive format](docs/archive.md)
+- [ubitop: realtime throughput monitoring tool](docs/ubitop.md)
 
 ## Security Notes
 
@@ -144,6 +145,8 @@ supported:
   `null` when no background worker is active.
 - `{"command": "queues"}` – returns an array of I/O activity snapshots for
   each queue.
+- `{"command": "stats"}` – returns cumulative bytes and operation counts per
+  queue.
 
 Example using socat to query the status and pretty-print the response:
 

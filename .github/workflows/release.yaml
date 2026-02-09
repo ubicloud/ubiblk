@@ -35,17 +35,13 @@ jobs:
           sudo make install
 
       - name: Install Rust
-        uses: actions-rs/toolchain@v1
+        uses: dtolnay/rust-toolchain@stable
         with:
-            toolchain: stable
-            override: true
-            components: rustfmt, clippy
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
 
       - name: Install LLVM tools for .dwp generation
         run: rustup component add llvm-tools-preview
-
-      - name: Add musl target
-        run: rustup target add ${{ matrix.target }}
 
       - name: Run tests
         run: cargo test --target=${{ matrix.target }}

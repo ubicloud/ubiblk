@@ -37,6 +37,7 @@ jobs:
           meson setup build --prefix=/usr/local
           meson compile -C build
           sudo --preserve-env=PATH,RUSTUP_HOME,CARGO_HOME,HOME meson install -C build
+          sudo ldconfig
 
       - name: Clone and build isa-l_crypto
         run: |

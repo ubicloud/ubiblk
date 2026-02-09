@@ -271,8 +271,14 @@ impl VhostUserBackend for UbiBlkBackend {
         }
     }
 
-    fn get_config(&self, _offset: u32, _size: u32) -> Vec<u8> {
-        self.config.as_slice().to_vec()
+    fn get_config(&self, offset: u32, size: u32) -> Vec<u8> {
+        let config_bytes = self.config.as_slice();
+        let start = offset as usize;
+        let end = start.saturating_add(size as usize).min(config_bytes.len());
+        if start >= config_bytes.len() {
+            return Vec::new();
+        }
+        config_bytes[start..end].to_vec()
     }
 
     fn exit_event(&self, thread_index: usize) -> Option<EventFd> {

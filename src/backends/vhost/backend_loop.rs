@@ -61,8 +61,12 @@ fn serve_vhost(backend_env: &BackendEnv) -> Result<()> {
 
     match result {
         Ok(()) => {}
-        Err(VhostUserBackendError::HandleRequest(VhostUserError::Disconnected))
-        | Err(VhostUserBackendError::HandleRequest(VhostUserError::PartialMessage)) => {}
+        Err(VhostUserBackendError::HandleRequest(e @ VhostUserError::Disconnected))
+        | Err(VhostUserBackendError::HandleRequest(e @ VhostUserError::PartialMessage))
+        | Err(VhostUserBackendError::HandleRequest(e @ VhostUserError::InvalidMessage))
+        | Err(VhostUserBackendError::HandleRequest(e @ VhostUserError::SocketBroken(_))) => {
+            info!("Client disconnected: {}", e);
+        }
         Err(e) => {
             return Err(e.into());
         }

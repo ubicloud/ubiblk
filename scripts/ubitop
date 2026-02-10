@@ -59,7 +59,8 @@ class ThroughputDisplay:
 
     def __init__(self, poll_interval=1.0):
         self.poll_interval = poll_interval
-        self.max_throughput = 500 * 1024 * 1024  # Initial 500 MB/s
+        self.max_throughput = 500 * 1024 * 1024  # Initial 500 MB/s (per-queue)
+        self.total_max_throughput = 500 * 1024 * 1024  # Initial 500 MB/s (ALL)
 
     def format_bytes(self, bytes_val):
         """Format bytes into human-readable units."""
@@ -75,10 +76,12 @@ class ThroughputDisplay:
         """Format throughput rate."""
         return self.format_bytes(bytes_per_sec) + "/s"
 
-    def update_max_throughput(self, current_max):
-        """Auto-scale: if exceeded, scale to 1.2x the current max."""
-        if current_max > self.max_throughput:
-            self.max_throughput = current_max * 1.2
+    def update_max_throughput(self, queue_max, total_max):
+        """Auto-scale: if exceeded, scale to 1.2x the observed max."""
+        if queue_max > self.max_throughput:
+            self.max_throughput = queue_max * 1.2
+        if total_max > self.total_max_throughput:
+            self.total_max_throughput = total_max * 1.2
 
     def create_bar(self, value, max_value, width=30, color="blue"):
         """Create a visual throughput bar."""
@@ -86,6 +89,7 @@ class ThroughputDisplay:
             filled = 0
         else:
             filled = int((value / max_value) * width)
+        filled = max(0, min(width, filled))
         bar = "\u2584" * filled + "\u2581" * (width - filled)
         return f"[{color}]{bar}[/{color}]"
 
@@ -98,11 +102,12 @@ class ThroughputDisplay:
         total_read_bytes = sum(q["bytes_read"] for q in queues)
         total_write_bytes = sum(q["bytes_written"] for q in queues)
 
-        current_max = max(
+        queue_max = max(
             max((q["read_rate"] for q in queues), default=0),
             max((q["write_rate"] for q in queues), default=0),
         )
-        self.update_max_throughput(current_max)
+        total_max = max(total_read_rate, total_write_rate)
+        self.update_max_throughput(queue_max, total_max)
 
         header = Text()
         header.append("ubitop", style="bold cyan")
@@ -112,7 +117,6 @@ class ThroughputDisplay:
         header.append(" / ", style="dim")
         header.append(f"\u2191{self.format_rate(total_write_rate)}", style="red bold")
         header.append(f" | Poll: {self.poll_interval}s", style="dim")
-        header.append(f" | Scale: {self.format_rate(self.max_throughput)}", style="dim")
 
         table = Table(
             show_header=True, header_style="bold magenta", box=None, padding=(0, 1)
@@ -150,10 +154,10 @@ class ThroughputDisplay:
             )
 
         total_read_bar = self.create_bar(
-            total_read_rate, self.max_throughput, width=30, color="cyan"
+            total_read_rate, self.total_max_throughput, width=30, color="cyan"
         )
         total_write_bar = self.create_bar(
-            total_write_rate, self.max_throughput, width=30, color="yellow"
+            total_write_rate, self.total_max_throughput, width=30, color="yellow"
         )
 
         table.add_row(

@@ -59,12 +59,12 @@ class ThroughputDisplay:
 
     def __init__(self, poll_interval=1.0):
         self.poll_interval = poll_interval
-        self.max_throughput = 500 * 1024 * 1024  # Initial 500 MB/s (per-queue)
-        self.total_max_throughput = 500 * 1024 * 1024  # Initial 500 MB/s (ALL)
+        self.max_throughput = 500 * 1024 * 1024  # Initial 500 MiB/s (per-queue)
+        self.total_max_throughput = 500 * 1024 * 1024  # Initial 500 MiB/s (ALL)
 
     def format_bytes(self, bytes_val):
         """Format bytes into human-readable units."""
-        units = ["B", "KB", "MB", "GB", "TB"]
+        units = ["B", "KiB", "MiB", "GiB", "TiB"]
         val = float(bytes_val)
         unit_idx = 0
         while val >= 1024 and unit_idx < len(units) - 1:

@@ -80,7 +80,15 @@ impl BackendEnv {
     #[error_context("Failed to run bgworker thread")]
     pub fn run_bgworker_thread(&mut self) -> Result<()> {
         if let Some(config) = self.bgworker_config.take() {
-            self.bgworker_thread = Some(Self::spawn_bgworker_thread(config)?);
+            let (startup_sender, startup_receiver) = channel();
+            self.bgworker_thread = Some(Self::spawn_bgworker_thread(config, startup_sender)?);
+
+            let startup_status = startup_receiver.recv().map_err(|e| {
+                crate::ubiblk_error!(ChannelError {
+                    reason: format!("Failed to receive bgworker startup status: {e}"),
+                })
+            })?;
+            startup_status?;
         }
 
         Ok(())
@@ -208,17 +216,35 @@ impl BackendEnv {
             .collect()
     }
 
-    fn spawn_bgworker_thread(config: BgWorkerConfig) -> Result<std::thread::JoinHandle<()>> {
+    fn spawn_bgworker_thread(
+        config: BgWorkerConfig,
+        startup_sender: Sender<Result<()>>,
+    ) -> Result<std::thread::JoinHandle<()>> {
         std::thread::Builder::new()
             .name("bgworker".to_string())
-            .spawn(move || Self::run_bgworker(config))
+            .spawn(move || match Self::build_bgworker(config) {
+                Ok(mut worker) => {
+                    if let Err(send_err) = startup_sender.send(Ok(())) {
+                        error!("Failed to send bgworker startup success: {send_err}");
+                    } else {
+                        info!("Bgworker thread started successfully");
+                        worker.run();
+                    }
+                }
+                Err(e) => {
+                    let startup_result = Err(e).context("Failed to build bgworker");
+                    if let Err(send_err) = startup_sender.send(startup_result) {
+                        error!("Failed to send bgworker startup error to main thread: {send_err}. Original error: {:?}", send_err.0);
+                    }
+                }
+            })
             .map_err(|e| {
                 error!("Failed to spawn bgworker thread: {e}");
                 crate::ubiblk_error!(ThreadCreation { source: e })
             })
     }
 
-    fn run_bgworker(config: BgWorkerConfig) {
+    fn build_bgworker(config: BgWorkerConfig) -> Result<BgWorker> {
         let BgWorkerConfig {
             target_dev,
             stripe_source_builder,
@@ -233,11 +259,11 @@ impl BackendEnv {
             Ok(source) => source,
             Err(e) => {
                 error!("Failed to build stripe source: {e}");
-                return;
+                return Err(e);
             }
         };
 
-        match BgWorker::new(
+        BgWorker::new(
             stripe_source,
             &*target_dev,
             &*metadata_dev,
@@ -245,10 +271,7 @@ impl BackendEnv {
             autofetch,
             shared_state,
             receiver,
-        ) {
-            Ok(mut worker) => worker.run(),
-            Err(e) => error!("Failed to construct bgworker: {e}"),
-        }
+        )
     }
 }
 
@@ -446,13 +469,16 @@ mod tests {
     fn run_bgworker_handles_shutdown_request() {
         let (config, sender) = build_test_bgworker_config();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
-        BackendEnv::run_bgworker(config);
+        let mut worker = BackendEnv::build_bgworker(config).unwrap();
+        worker.run();
     }
 
     #[test]
     fn spawn_bgworker_thread_runs_and_joins() {
         let (config, sender) = build_test_bgworker_config();
-        let handle = BackendEnv::spawn_bgworker_thread(config).unwrap();
+        let (startup_sender, startup_receiver) = channel();
+        let handle = BackendEnv::spawn_bgworker_thread(config, startup_sender).unwrap();
+        startup_receiver.recv().unwrap().unwrap();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
         handle.join().unwrap();
     }
@@ -520,5 +546,47 @@ mod tests {
 
         let result = BackendEnv::build(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn run_backend_loop_fails_when_bgworker_fails_to_start() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let image_file = tempfile::NamedTempFile::new().unwrap();
+        image_file.as_file().set_len(4 * 1024 * 1024).unwrap();
+
+        let metadata_path = tempfile::NamedTempFile::new().unwrap();
+        metadata_path.as_file().set_len(1024 * 1024).unwrap();
+
+        let config = DeviceConfig {
+            path: disk_file.path().to_str().unwrap().to_string(),
+            stripe_source: Some(StripeSourceConfig::Raw {
+                config: RawStripeSourceConfig {
+                    path: image_file.path().to_path_buf(),
+                },
+            }),
+            metadata_path: Some(metadata_path.path().to_str().unwrap().to_string()),
+            copy_on_read: true,
+            queue_size: 128,
+            ..Default::default()
+        };
+
+        init_metadata(&config, 11).unwrap();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_handle = call_count.clone();
+        let result = run_backend_loop(&config, "test-backend", false, |_| {
+            call_count_handle.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("Failed to run bgworker thread"));
+        assert!(err.contains("Failed to build bgworker"));
+        assert!(err.contains("Source stripe count 4 exceeds metadata stripe count 1"));
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
     }
 }

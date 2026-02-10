@@ -59,8 +59,8 @@ class ThroughputDisplay:
 
     def __init__(self, poll_interval=1.0):
         self.poll_interval = poll_interval
-        self.max_throughput = 500 * 1024 * 1024  # Initial 500 MiB/s (per-queue)
-        self.total_max_throughput = 500 * 1024 * 1024  # Initial 500 MiB/s (ALL)
+        self.max_throughput = 50 * 1024 * 1024  # Initial 50 MiB/s (per-queue)
+        self.total_max_throughput = 50 * 1024 * 1024  # Initial 50 MiB/s (ALL)
 
     def format_bytes(self, bytes_val):
         """Format bytes into human-readable units."""
@@ -77,11 +77,11 @@ class ThroughputDisplay:
         return self.format_bytes(bytes_per_sec) + "/s"
 
     def update_max_throughput(self, queue_max, total_max):
-        """Auto-scale: if exceeded, scale to 1.2x the observed max."""
+        """Auto-scale: if exceeded, scale to 1.05x the observed max."""
         if queue_max > self.max_throughput:
-            self.max_throughput = queue_max * 1.2
+            self.max_throughput = queue_max * 1.05
         if total_max > self.total_max_throughput:
-            self.total_max_throughput = total_max * 1.2
+            self.total_max_throughput = total_max * 1.05
 
     def create_bar(self, value, max_value, width=30, color="blue"):
         """Create a visual throughput bar."""

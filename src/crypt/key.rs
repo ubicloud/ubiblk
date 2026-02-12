@@ -47,8 +47,8 @@ const GCM_TAG_SIZE: usize = 16;
 const GCM_NONCE_SIZE: usize = 12;
 
 impl KeyEncryptionCipher {
-    /// Initialize cipher and auth data for encryption or decryption.
-    fn init_context(&self) -> Result<(Aes256Gcm, &[u8])> {
+    /// Validate and return references to the key and authentication data.
+    fn init_context(&self) -> Result<(&[u8], &[u8])> {
         let key = self
             .key
             .as_ref()
@@ -59,12 +59,7 @@ impl KeyEncryptionCipher {
             .as_ref()
             .ok_or_else(|| param_err("Authentication data is required"))?;
 
-        let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| {
-            let msg = format!("Failed to initialize cipher: {e}");
-            error!("{}", msg);
-            param_err(msg)
-        })?;
-        Ok((cipher, auth_data))
+        Ok((key, auth_data))
     }
 
     pub fn load(path: Option<&PathBuf>, allow_regular_file: bool) -> Result<Self> {
@@ -96,10 +91,10 @@ impl KeyEncryptionCipher {
         match self.method {
             CipherMethod::None => Ok((key1.to_vec(), key2.to_vec())),
             CipherMethod::Aes256Gcm => {
-                let (cipher, auth) = self.init_context()?;
+                let (key, auth) = self.init_context()?;
 
-                let k1 = encrypt_bytes(&cipher, auth, key1)?;
-                let k2 = encrypt_bytes(&cipher, auth, key2)?;
+                let k1 = aes256gcm_encrypt(key, auth, key1)?;
+                let k2 = aes256gcm_encrypt(key, auth, key2)?;
 
                 Ok((k1, k2))
             }
@@ -113,10 +108,10 @@ impl KeyEncryptionCipher {
                 Ok((ensure_32_bytes(key1)?, ensure_32_bytes(key2)?))
             }
             CipherMethod::Aes256Gcm => {
-                let (cipher, auth) = self.init_context()?;
+                let (key, auth) = self.init_context()?;
 
-                let k1 = decrypt_bytes(&cipher, auth, &key1)?;
-                let k2 = decrypt_bytes(&cipher, auth, &key2)?;
+                let k1 = aes256gcm_decrypt(key, auth, &key1)?;
+                let k2 = aes256gcm_decrypt(key, auth, &key2)?;
 
                 Ok((ensure_32_bytes(k1)?, ensure_32_bytes(k2)?))
             }
@@ -127,8 +122,8 @@ impl KeyEncryptionCipher {
         match self.method {
             CipherMethod::None => Ok(secret),
             CipherMethod::Aes256Gcm => {
-                let (cipher, auth) = self.init_context()?;
-                decrypt_bytes(&cipher, auth, &secret)
+                let (key, auth) = self.init_context()?;
+                aes256gcm_decrypt(key, auth, &secret)
             }
         }
     }
@@ -137,8 +132,8 @@ impl KeyEncryptionCipher {
         let decrypted_bytes = match self.method {
             CipherMethod::None => cred,
             CipherMethod::Aes256Gcm => {
-                let (cipher, auth) = self.init_context()?;
-                decrypt_bytes(&cipher, auth, &cred)?
+                let (key, auth) = self.init_context()?;
+                aes256gcm_decrypt(key, auth, &cred)?
             }
         };
 
@@ -153,8 +148,8 @@ impl KeyEncryptionCipher {
         match self.method {
             CipherMethod::None => Ok(plaintext.to_vec()),
             CipherMethod::Aes256Gcm => {
-                let (cipher, auth) = self.init_context()?;
-                encrypt_bytes(&cipher, auth, plaintext)
+                let (key, auth) = self.init_context()?;
+                aes256gcm_encrypt(key, auth, plaintext)
             }
         }
     }
@@ -163,15 +158,25 @@ impl KeyEncryptionCipher {
         match self.method {
             CipherMethod::None => Ok(ciphertext.to_vec()),
             CipherMethod::Aes256Gcm => {
-                let (cipher, auth) = self.init_context()?;
-                decrypt_bytes(&cipher, auth, ciphertext)
+                let (key, auth) = self.init_context()?;
+                aes256gcm_decrypt(key, auth, ciphertext)
             }
         }
     }
 }
 
+fn new_cipher(key: &[u8]) -> Result<Aes256Gcm> {
+    Aes256Gcm::new_from_slice(key).map_err(|e| {
+        let msg = format!("Failed to initialize cipher: {e}");
+        error!("{}", msg);
+        param_err(msg)
+    })
+}
+
 /// Decrypt data in the format [12-byte nonce || ciphertext || 16-byte tag].
-fn decrypt_bytes(cipher: &Aes256Gcm, aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+pub fn aes256gcm_decrypt(key: &[u8], aad: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
+    let cipher = new_cipher(key)?;
+
     // Minimum new-format length: nonce (12) + tag (16) + at least 0 bytes of ciphertext = 28
     if ciphertext.len() < GCM_NONCE_SIZE + GCM_TAG_SIZE {
         let msg = "Failed to decrypt data: ciphertext is too short to include nonce and tag";
@@ -200,7 +205,9 @@ fn decrypt_bytes(cipher: &Aes256Gcm, aad: &[u8], ciphertext: &[u8]) -> Result<Ve
 
 /// Encrypt data with a per-call random nonce. Output format:
 /// [12-byte random nonce || ciphertext || 16-byte GCM tag]
-fn encrypt_bytes(cipher: &Aes256Gcm, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+pub fn aes256gcm_encrypt(key: &[u8], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    let cipher = new_cipher(key)?;
+
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(

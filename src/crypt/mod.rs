@@ -1,5 +1,5 @@
 mod key;
-pub use key::{CipherMethod, KeyEncryptionCipher};
+pub use key::{aes256gcm_decrypt, aes256gcm_encrypt, CipherMethod, KeyEncryptionCipher};
 
 mod block;
 pub use block::XtsBlockCipher;

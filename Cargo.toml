@@ -57,6 +57,8 @@ ctrlc = "3.5.1"
 ubiblk-macros = { path = "crates/ubiblk-macros" }
 zstd = "0.13.3"
 crc32fast = "1.4"
+toml = "1.0.1"
+zeroize = "1.8.2"
 
 [build-dependencies]
 bindgen = "0.72.1"

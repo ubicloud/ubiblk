@@ -1,5 +1,6 @@
 pub mod includes;
 pub mod secrets;
+pub mod stripe_source;
 
 use serde::Deserialize;
 

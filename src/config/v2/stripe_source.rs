@@ -2,7 +2,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::config::v2::{secrets::SecretRef, DangerZone};
+use super::{secrets::SecretRef, DangerZone};
 use crate::{ubiblk_error, Result};
 
 /// Stripe source configuration for TOML format.

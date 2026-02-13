@@ -1,9 +1,12 @@
-use std::path::{Component, Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Component, Path, PathBuf},
+};
 
 use serde::Deserialize;
 
 use super::{secrets::SecretRef, DangerZone};
-use crate::{ubiblk_error, Result};
+use crate::{config::v2::secrets::ResolvedSecret, ubiblk_error, Result};
 
 /// Stripe source configuration for TOML format.
 ///
@@ -72,6 +75,91 @@ impl StripeSourceConfig {
         }
         Ok(())
     }
+
+    pub fn validate_secrets(&self, secret_defs: &HashMap<String, ResolvedSecret>) -> Result<()> {
+        match self {
+            StripeSourceConfig::Remote { psk, .. } => {
+                if let Some(psk) = psk {
+                    validate_psk_secret(self.get_secret(&psk.psk_secret, secret_defs)?)?;
+                }
+            }
+            StripeSourceConfig::Archive(ArchiveStorageConfig::Filesystem {
+                archive_kek, ..
+            }) => {
+                validate_archive_kek(self.get_secret(archive_kek, secret_defs)?)?;
+            }
+            StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+                access_key_id,
+                secret_access_key,
+                archive_kek,
+                ..
+            }) => {
+                validate_archive_kek(self.get_secret(archive_kek, secret_defs)?)?;
+                validate_aws_access_key_id(self.get_secret(access_key_id, secret_defs)?)?;
+                validate_aws_secret_access_key(self.get_secret(secret_access_key, secret_defs)?)?;
+            }
+            StripeSourceConfig::Raw { .. } => (),
+        }
+        Ok(())
+    }
+
+    fn get_secret<'a>(
+        &'a self,
+        secret_ref: &SecretRef,
+        secret_defs: &'a HashMap<String, ResolvedSecret>,
+    ) -> Result<&'a ResolvedSecret> {
+        let secret_id = secret_ref.id();
+        secret_defs.get(secret_id).ok_or_else(|| {
+            ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "Secret reference '{}' not found in configuration",
+                    secret_id
+                ),
+            })
+        })
+    }
+}
+
+fn validate_psk_secret(secret: &ResolvedSecret) -> Result<()> {
+    if secret.as_bytes().len() < 16 {
+        return Err(ubiblk_error!(InvalidParameter {
+            description: format!(
+                "PSK secret must be at least 16 bytes (got {} bytes)",
+                secret.as_bytes().len()
+            ),
+        }));
+    }
+    Ok(())
+}
+
+fn validate_archive_kek(archive_kek_secret: &ResolvedSecret) -> Result<()> {
+    if archive_kek_secret.as_bytes().len() != 32 {
+        return Err(ubiblk_error!(InvalidParameter {
+            description: format!(
+                "Archive KEK secret must be exactly 32 bytes for AES-256-GCM (got {} bytes)",
+                archive_kek_secret.as_bytes().len()
+            ),
+        }));
+    }
+    Ok(())
+}
+
+fn validate_aws_secret_access_key(secret_key: &ResolvedSecret) -> Result<()> {
+    if secret_key.as_bytes().is_empty() {
+        return Err(ubiblk_error!(InvalidParameter {
+            description: "AWS secret_access_key cannot be empty".to_string(),
+        }));
+    }
+    Ok(())
+}
+
+fn validate_aws_access_key_id(access_key_id: &ResolvedSecret) -> Result<()> {
+    if access_key_id.as_bytes().is_empty() {
+        return Err(ubiblk_error!(InvalidParameter {
+            description: "AWS access_key_id cannot be empty".to_string(),
+        }));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

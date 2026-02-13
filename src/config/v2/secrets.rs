@@ -29,6 +29,14 @@ pub enum SecretRef {
     Ref(String),
 }
 
+impl SecretRef {
+    pub fn id(&self) -> &str {
+        match self {
+            SecretRef::Ref(id) => id,
+        }
+    }
+}
+
 /// A secret definition as parsed from a `[secrets.<name>]` TOML sub-table.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]

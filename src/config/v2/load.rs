@@ -5,8 +5,8 @@ use crate::{
     config::v2::{
         includes::resolve_includes,
         secrets::{parse_secrets, resolve_secrets, ResolvedSecret},
-        stripe_source::StripeSourceConfig,
-        DangerZone,
+        stripe_source::{ArchiveStorageConfig, StripeSourceConfig},
+        ArchiveTargetConfig, DangerZone,
     },
     ubiblk_error, Result, ResultExt,
 };
@@ -84,8 +84,7 @@ impl Config {
         let resolved_secrets = resolve_secrets(&secret_defs, &danger_zone)?;
 
         if let Some(stripe_source) = &stripe_source {
-            stripe_source.validate(&danger_zone)?;
-            stripe_source.validate_secrets(&resolved_secrets)?;
+            stripe_source.validate(&danger_zone, &resolved_secrets)?;
         }
 
         if let Some(encryption) = &encryption {
@@ -115,19 +114,66 @@ impl Config {
             "stripe_source",
             "secrets",
         ];
-        let table = root.as_table().ok_or_else(|| {
+        validate_top_level_keys(root, &allowed_keys)
+    }
+}
+
+impl ArchiveTargetConfig {
+    pub fn load(path: &Path) -> Result<Self> {
+        let content =
+            std::fs::read_to_string(path).context("Loading target config failed".to_string())?;
+
+        let root: toml::Value = toml::from_str(&content).map_err(|e| {
             ubiblk_error!(InvalidParameter {
-                description: "Top-level config must be a table".to_string(),
+                description: format!("Failed to parse TOML config: {}", e),
             })
         })?;
-        for key in table.keys() {
-            if !allowed_keys.contains(&key.as_str()) {
+
+        let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+        Self::load_from_value(root, config_dir)
+    }
+
+    fn load_from_value(value: toml::Value, config_dir: &Path) -> Result<Self> {
+        let merged = resolve_includes(value, config_dir)?;
+        Self::validate_top_level_keys(&merged)?;
+
+        let danger_zone: DangerZone = match merged.get("danger_zone") {
+            Some(value) => value.clone().try_into().map_err(|e| {
+                ubiblk_error!(InvalidParameter {
+                    description: format!("Failed to parse danger_zone section: {}", e),
+                })
+            })?,
+            None => DangerZone::default(),
+        };
+
+        let target: ArchiveStorageConfig = match merged.get("target") {
+            Some(value) => value.clone().try_into().map_err(|e| {
+                ubiblk_error!(InvalidParameter {
+                    description: format!("Failed to parse target section: {}", e),
+                })
+            })?,
+            None => {
                 return Err(ubiblk_error!(InvalidParameter {
-                    description: format!("Unknown top-level config key '{}'", key),
-                }));
+                    description: "Missing required [target] section".to_string(),
+                }))
             }
-        }
-        Ok(())
+        };
+
+        let secret_defs = parse_secrets(&merged)?;
+        let resolved_secrets = resolve_secrets(&secret_defs, &danger_zone)?;
+        target.validate(&resolved_secrets)?;
+
+        Ok(ArchiveTargetConfig {
+            target,
+            danger_zone,
+            secrets: resolved_secrets,
+        })
+    }
+
+    fn validate_top_level_keys(root: &toml::Value) -> Result<()> {
+        let allowed_keys = ["target", "danger_zone", "secrets"];
+        validate_top_level_keys(root, &allowed_keys)
     }
 }
 
@@ -153,6 +199,22 @@ impl EncryptionSection {
         }
         Ok(())
     }
+}
+
+fn validate_top_level_keys(root: &toml::Value, allowed_keys: &[&str]) -> Result<()> {
+    let table = root.as_table().ok_or_else(|| {
+        ubiblk_error!(InvalidParameter {
+            description: "Top-level config must be a table".to_string(),
+        })
+    })?;
+    for key in table.keys() {
+        if !allowed_keys.contains(&key.as_str()) {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: format!("Unknown top-level config key '{}'", key),
+            }));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -341,5 +403,29 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("num_queues 0 is out of range (must be 1..=63)"));
+    }
+
+    #[test]
+    fn loads_valid_target_config() {
+        std::env::set_var(
+            "LOADS_VALID_TARGET_CONFIG_ARCHIVE_KEK",
+            "0123456789abcdef0123456789abcdef",
+        );
+        let toml = r#"
+[target]
+storage = "filesystem"
+path = "/backups/archive1"
+archive_kek.ref = "my_archive_kek"
+[secrets.my_archive_kek]
+source.env = "LOADS_VALID_TARGET_CONFIG_ARCHIVE_KEK"
+        "#;
+        let value: toml::Value = toml::from_str(toml).unwrap();
+        let result = ArchiveTargetConfig::load_from_value(value, Path::new("."));
+        assert!(result.is_ok());
+        let config = result.unwrap();
+        assert!(matches!(config.target, ArchiveStorageConfig::Filesystem {
+            path, archive_kek, ..
+        } if path == Path::new("/backups/archive1") && archive_kek.id() == "my_archive_kek"));
+        assert_eq!(config.secrets.len(), 1);
     }
 }

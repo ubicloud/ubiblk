@@ -3,7 +3,7 @@ use std::{ops::Deref, sync::Mutex, time::Instant};
 use crate::{
     backends::{common::io_tracking::IoTracker, SECTOR_SIZE},
     block_device::BlockDevice,
-    config::DeviceConfig,
+    config::v2,
     utils::block::{features_to_str, VirtioBlockConfig},
     Result,
 };
@@ -28,7 +28,7 @@ pub struct UbiBlkBackend {
     config: VirtioBlockConfig,
     queues_per_thread: Vec<u64>,
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
-    device_config: DeviceConfig,
+    backend_config: v2::Config,
 }
 
 impl UbiBlkBackend {
@@ -37,72 +37,43 @@ impl UbiBlkBackend {
         &self.threads
     }
 
-    fn validate_config(device_config: &DeviceConfig) -> Result<()> {
-        if device_config.queue_size == 0 || !device_config.queue_size.is_power_of_two() {
-            return Err(crate::ubiblk_error!(InvalidParameter {
-                description: format!(
-                    "queue_size {} is not a non-zero power of two",
-                    device_config.queue_size
-                ),
-            }));
-        }
-
-        if let Some(ref cpus) = device_config.cpus {
-            if cpus.len() != device_config.num_queues {
-                return Err(crate::ubiblk_error!(InvalidParameter {
-                    description: "cpus length must equal num_queues".to_string(),
-                }));
-            }
-        }
-
-        Ok(())
-    }
-
     pub fn new(
-        device_config: &DeviceConfig,
+        config: &v2::Config,
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         block_device: Box<dyn BlockDevice>,
         alignment: usize,
         io_trackers: Vec<IoTracker>,
     ) -> Result<Self> {
-        Self::validate_config(device_config)?;
-
-        let writeback = if device_config.write_through { 0 } else { 1 };
+        let writeback = if config.tuning.write_through { 0 } else { 1 };
 
         let nsectors = block_device.sector_count();
         let virtio_config = VirtioBlockConfig {
             capacity: nsectors,           /* The capacity (in SECTOR_SIZE-byte sectors). */
             blk_size: SECTOR_SIZE as u32, /* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
-            size_max: device_config.seg_size_max, /* The maximum segment size (if VIRTIO_BLK_F_SIZE_MAX) */
-            seg_max: device_config.seg_count_max, /* The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX) */
+            size_max: config.tuning.seg_size_max, /* The maximum segment size (if VIRTIO_BLK_F_SIZE_MAX) */
+            seg_max: config.tuning.seg_count_max, /* The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX) */
             min_io_size: 1, /* minimum I/O size without performance penalty in logical blocks. */
             opt_io_size: 1, /* optimal sustained I/O size in logical blocks. */
-            num_queues: device_config.num_queues as u16,
+            num_queues: config.tuning.num_queues as u16,
             writeback,
             ..Default::default()
         };
 
         info!("virtio_config: {virtio_config:?}");
 
-        let threads = (0..device_config.num_queues)
+        let threads = (0..config.tuning.num_queues)
             .map(|idx| {
                 let io_channel = block_device.create_channel()?;
                 let io_tracker = io_trackers
                     .get(idx)
                     .cloned()
-                    .unwrap_or_else(|| IoTracker::new(device_config.queue_size));
-                UbiBlkBackendThread::new(
-                    mem.clone(),
-                    io_channel,
-                    device_config,
-                    alignment,
-                    io_tracker,
-                )
-                .map(Mutex::new)
+                    .unwrap_or_else(|| IoTracker::new(config.tuning.queue_size));
+                UbiBlkBackendThread::new(mem.clone(), io_channel, config, alignment, io_tracker)
+                    .map(Mutex::new)
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let queues_per_thread = (0..device_config.num_queues).map(|i| 1 << i).collect();
+        let queues_per_thread = (0..config.tuning.num_queues).map(|i| 1 << i).collect();
 
         debug!("queues_per_thread: {queues_per_thread:?}");
 
@@ -111,12 +82,12 @@ impl UbiBlkBackend {
             config: virtio_config,
             queues_per_thread,
             mem,
-            device_config: device_config.clone(),
+            backend_config: config.clone(),
         })
     }
 
     fn maybe_pin_cpu(&self, thread: &mut UbiBlkBackendThread, thread_index: usize) -> Result<bool> {
-        if let Some(ref cpus) = self.device_config.cpus {
+        if let Some(ref cpus) = self.backend_config.tuning.cpus {
             thread.pin_to_cpu(cpus[thread_index])
         } else {
             Ok(false)
@@ -150,7 +121,7 @@ impl VhostUserBackend for UbiBlkBackend {
     }
 
     fn max_queue_size(&self) -> usize {
-        self.device_config.queue_size
+        self.backend_config.tuning.queue_size
     }
 
     fn features(&self) -> u64 {
@@ -238,7 +209,9 @@ impl VhostUserBackend for UbiBlkBackend {
                 loop {
                     if thread.process_queue(&mut vring) {
                         now = Instant::now();
-                    } else if now.elapsed().as_micros() > self.device_config.poll_queue_timeout_us {
+                    } else if now.elapsed().as_micros()
+                        > self.backend_config.tuning.poll_timeout_us as u128
+                    {
                         break;
                     }
                 }
@@ -329,9 +302,10 @@ mod tests {
     use std::os::fd::AsRawFd;
 
     use super::*;
+    use crate::config::v2::{self, DeviceSection};
     use crate::{
         backends::init_metadata, block_device::bdev_test::TestBlockDevice,
-        utils::aligned_buffer::BUFFER_ALIGNMENT, UbiblkError,
+        utils::aligned_buffer::BUFFER_ALIGNMENT,
     };
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
     use virtio_bindings::virtio_blk::{VIRTIO_BLK_ID_BYTES, VIRTIO_BLK_S_OK, VIRTIO_BLK_T_GET_ID};
@@ -340,32 +314,39 @@ mod tests {
     use vm_memory::{Address, Bytes, GuestAddress};
 
     const DEFAULT_NUM_QUEUES: usize = 1;
-    const DEFAULT_QUEUE_SIZE: usize = 32;
-
-    fn default_config(path: String) -> DeviceConfig {
-        DeviceConfig {
-            path,
-            socket: Some("sock".to_string()),
-            num_queues: DEFAULT_NUM_QUEUES,
-            queue_size: DEFAULT_QUEUE_SIZE,
-            seg_size_max: 65536,
-            seg_count_max: 4,
-            write_through: true,
-            device_id: "ubiblk".to_string(),
-            io_engine: crate::config::IoEngine::IoUring,
-            ..Default::default()
+    fn default_config(path: String) -> v2::Config {
+        v2::Config {
+            device: DeviceSection {
+                data_path: path.into(),
+                vhost_socket: Some("/tmp/vhost.sock".into()),
+                rpc_socket: Some("/tmp/rpc.sock".into()),
+                device_id: "ubiblk-test".to_string(),
+                track_written: false,
+                metadata_path: None,
+            },
+            stripe_source: None,
+            secrets: std::collections::HashMap::new(),
+            tuning: v2::tuning::TuningSection::default(),
+            encryption: None,
+            danger_zone: v2::DangerZone {
+                enabled: true,
+                allow_unencrypted_disk: true,
+                allow_inline_plaintext_secrets: true,
+                allow_secret_over_regular_file: true,
+                allow_unencrypted_connection: true,
+            },
         }
     }
 
-    fn build_backend(config: DeviceConfig) -> Result<UbiBlkBackend> {
+    fn build_backend(config: &v2::Config) -> Result<UbiBlkBackend> {
         let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        UbiBlkBackend::new(&config, mem, block_device, BUFFER_ALIGNMENT, vec![])
+        UbiBlkBackend::new(config, mem, block_device, BUFFER_ALIGNMENT, vec![])
     }
 
     fn default_backend() -> UbiBlkBackend {
         let config = default_config("img".to_string());
-        build_backend(config).unwrap()
+        build_backend(&config).unwrap()
     }
 
     fn setup_mem() -> (GuestMemoryAtomic<GuestMemoryMmap>, GuestMemoryMmap) {
@@ -374,23 +355,12 @@ mod tests {
         (gm, mem)
     }
 
-    /// Building the backend with a queue size that is not a power of two should fail.
-    #[test]
-    fn invalid_queue_size() {
-        let mut config = default_config("test.img".to_string());
-        config.queue_size = 30;
-        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
-        let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
-        let result = UbiBlkBackend::new(&config, mem, block_device, BUFFER_ALIGNMENT, vec![]);
-        assert!(matches!(result, Err(UbiblkError::InvalidParameter { .. })));
-    }
-
     /// Ensure a backend can be created with valid parameters and exposes expected features.
     #[test]
     fn backend_features_and_protocol() {
         let backend = default_backend();
         assert_eq!(backend.num_queues(), 1);
-        assert_eq!(backend.max_queue_size(), 32);
+        assert_eq!(backend.max_queue_size(), 64);
 
         let features = backend.features();
         assert!(features & (1 << VIRTIO_BLK_F_FLUSH) != 0);
@@ -429,13 +399,13 @@ mod tests {
     fn handle_event_processes_get_id() {
         let (gm, mem) = setup_mem();
         let mut config = default_config("img".to_string());
-        config.queue_size = 8;
-        config.device_id = "ubiblk-test".to_string();
+        config.tuning.queue_size = 8;
+        config.device.device_id = "ubiblk-test".to_string();
         let block_device = Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8));
         let backend =
             UbiBlkBackend::new(&config, gm, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
 
-        let queue = MockSplitQueue::new(&mem, config.queue_size as u16);
+        let queue = MockSplitQueue::new(&mem, config.tuning.queue_size as u16);
         let header_addr = GuestAddress(0x1000);
         let data_addr = GuestAddress(0x2000);
         let status_addr = GuestAddress(0x3000);
@@ -470,10 +440,10 @@ mod tests {
 
         let vring = VringRwLock::new(
             GuestMemoryAtomic::new(mem.clone()),
-            config.queue_size as u16,
+            config.tuning.queue_size as u16,
         )
         .expect("vring new failed");
-        vring.set_queue_size(config.queue_size as u16);
+        vring.set_queue_size(config.tuning.queue_size as u16);
         vring
             .set_queue_info(
                 queue.desc_table_addr().0,
@@ -492,7 +462,10 @@ mod tests {
 
         let mut buf = [0u8; VIRTIO_BLK_ID_BYTES as usize];
         mem.read_slice(&mut buf, data_addr).unwrap();
-        assert_eq!(&buf[..config.device_id.len()], config.device_id.as_bytes());
+        assert_eq!(
+            &buf[..config.device.device_id.len()],
+            config.device.device_id.as_bytes()
+        );
     }
 
     /// init_metadata should fail when metadata_path is missing.
@@ -553,20 +526,11 @@ mod tests {
     #[test]
     fn queues_per_thread_multiple() {
         let mut config = default_config("img".to_string());
-        config.num_queues = 3;
-        config.cpus = None;
-        let backend = build_backend(config).unwrap();
+        config.tuning.num_queues = 3;
+        config.tuning.cpus = None;
+        let backend = build_backend(&config).unwrap();
 
         assert_eq!(backend.queues_per_thread(), vec![1, 2, 4]);
-    }
-
-    #[test]
-    fn cpus_mismatch() {
-        let mut config = default_config("img".to_string());
-        config.num_queues = 2;
-        config.cpus = Some(vec![0]);
-        let res = build_backend(config);
-        assert!(res.is_err());
     }
 
     /// update_memory is currently a no-op and should succeed.
@@ -600,8 +564,8 @@ mod tests {
     #[test]
     fn maybe_pin_cpu_success() {
         let mut config = default_config("img".to_string());
-        config.cpus = Some(vec![0]);
-        let backend = build_backend(config).unwrap();
+        config.tuning.cpus = Some(vec![0]);
+        let backend = build_backend(&config).unwrap();
         let mut thread = backend.threads()[0].lock().unwrap();
         let res = backend.maybe_pin_cpu(&mut thread, 0).unwrap();
         assert!(res);
@@ -612,8 +576,8 @@ mod tests {
     fn maybe_pin_cpu_failure() {
         let mut config = default_config("img".to_string());
         // Assuming CPU 9999 does not exist on the system.
-        config.cpus = Some(vec![9999]);
-        let backend = build_backend(config).unwrap();
+        config.tuning.cpus = Some(vec![9999]);
+        let backend = build_backend(&config).unwrap();
         let mut thread = backend.threads()[0].lock().unwrap();
         let res = backend.maybe_pin_cpu(&mut thread, 0);
         assert!(res.is_err());

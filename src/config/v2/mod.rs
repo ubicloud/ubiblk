@@ -39,7 +39,7 @@ pub struct DangerZone {
     #[serde(default)]
     pub allow_unencrypted_disk: bool,
     #[serde(default)]
-    pub allow_inline_plaintext_secret: bool,
+    pub allow_inline_plaintext_secrets: bool,
     #[serde(default)]
     pub allow_secret_over_regular_file: bool,
     #[serde(default)]

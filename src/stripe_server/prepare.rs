@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     backends::build_block_device,
     block_device::{metadata_flags, UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT},
-    config::DeviceConfig,
+    config::v2,
     stripe_server::StripeServer,
     Result,
 };
@@ -17,9 +17,11 @@ fn error_if_incomplete_metadata(metadata: &UbiMetadata) -> Result<()> {
     Ok(())
 }
 
-pub fn prepare_stripe_server(config: &DeviceConfig) -> Result<Arc<StripeServer>> {
-    let stripe_device = build_block_device(&config.path, config, false)?;
-    let metadata: Arc<UbiMetadata> = if let Some(metadata_path) = config.metadata_path.as_deref() {
+pub fn prepare_stripe_server(config: &v2::Config) -> Result<Arc<StripeServer>> {
+    let stripe_device = build_block_device(&config.device.data_path, config, false)?;
+    let metadata: Arc<UbiMetadata> = if let Some(metadata_path) =
+        config.device.metadata_path.as_deref()
+    {
         let metadata_device = build_block_device(metadata_path, config, false)?;
         let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
         error_if_incomplete_metadata(&metadata)?;
@@ -51,12 +53,30 @@ mod tests {
 
     const STRIPE_SIZE: u64 = (1 << DEFAULT_STRIPE_SECTOR_COUNT_SHIFT) * SECTOR_SIZE as u64;
 
-    fn config(path: String, metadata_path: Option<String>) -> DeviceConfig {
-        DeviceConfig {
-            path,
-            metadata_path,
-            queue_size: 128,
-            ..Default::default()
+    fn config(path: String, metadata_path: Option<String>) -> v2::Config {
+        v2::Config {
+            device: v2::DeviceSection {
+                data_path: path.into(),
+                metadata_path: metadata_path.map(Into::into),
+                vhost_socket: None,
+                rpc_socket: None,
+                device_id: "ubiblk".to_string(),
+                track_written: false,
+            },
+            tuning: v2::tuning::TuningSection {
+                queue_size: 128,
+                ..Default::default()
+            },
+            encryption: None,
+            danger_zone: v2::DangerZone {
+                enabled: true,
+                allow_unencrypted_disk: true,
+                allow_inline_plaintext_secrets: true,
+                allow_secret_over_regular_file: true,
+                allow_unencrypted_connection: true,
+            },
+            stripe_source: None,
+            secrets: std::collections::HashMap::new(),
         }
     }
 

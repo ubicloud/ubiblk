@@ -4,8 +4,8 @@ use clap::Parser;
 use log::{error, info, warn};
 
 use ubiblk::{
-    cli::{load_config_and_kek, CommonArgs},
-    config::RemoteStripeSourceConfig,
+    cli::{load_config, CommonArgs},
+    config::v2,
     stripe_server::{prepare_stripe_server, wrap_psk_server_stream, DynStream, PskCredentials},
     utils::security::disable_core_dumps,
     Result,
@@ -43,22 +43,42 @@ fn run(args: Args) -> Result<()> {
         listen_config_path,
     } = args;
 
-    let (config, kek) = load_config_and_kek(&common)?;
+    let config = load_config(&common)?;
 
-    let listen_config =
-        RemoteStripeSourceConfig::load_from_file_with_kek(&listen_config_path, &kek)?;
+    // TODO: Fix listen config loading.
+    let listen_config = v2::Config::load(&listen_config_path)?;
+    let remote = match listen_config.stripe_source.as_ref() {
+        Some(v2::stripe_source::StripeSourceConfig::Remote { address, psk, .. }) => (address, psk),
+        _ => {
+            return Err(ubiblk::ubiblk_error!(InvalidParameter {
+                description: "listen config must define stripe_source.type = 'remote'".to_string(),
+            }))
+        }
+    };
     let stripe_server = prepare_stripe_server(&config)?;
-    let psk = listen_config
-        .psk_identity
-        .zip(listen_config.psk_secret)
-        .map(|(identity, secret)| PskCredentials::new(identity, secret))
+    let psk = remote
+        .1
+        .as_ref()
+        .map(|psk| {
+            let secret = listen_config
+                .secrets
+                .get(psk.psk_secret.id())
+                .ok_or_else(|| {
+                    ubiblk::ubiblk_error!(InvalidParameter {
+                        description: format!("PSK secret '{}' not found", psk.psk_secret.id()),
+                    })
+                })?
+                .as_bytes()
+                .to_vec();
+            PskCredentials::new(psk.psk_identity.clone(), secret)
+        })
         .transpose()?;
 
     if psk.is_none() {
         warn!("No PSK credentials configured — stripe server running WITHOUT transport encryption. All data will be transmitted in plaintext.");
     }
 
-    let listener = TcpListener::bind(&listen_config.address)?;
+    let listener = TcpListener::bind(remote.0)?;
     info!("listening on {}", listener.local_addr()?);
 
     loop {

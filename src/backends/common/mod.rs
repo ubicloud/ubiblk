@@ -13,7 +13,7 @@ use crate::{
         self, BgWorker, BgWorkerRequest, BlockDevice, SharedMetadataState, StatusReporter,
         SyncBlockDevice, UbiMetadata, UringBlockDevice,
     },
-    config::{DeviceConfig, IoEngine},
+    config::v2,
     stripe_source::StripeSourceBuilder,
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     Result, ResultExt,
@@ -40,19 +40,20 @@ pub struct BackendEnv {
     bgworker_sender: Option<Sender<BgWorkerRequest>>,
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
-    config: DeviceConfig,
+    config: v2::Config,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<io_tracking::IoTracker>,
 }
 
 impl BackendEnv {
     #[error_context("Failed to build backend environment")]
-    pub fn build(config: &DeviceConfig) -> Result<Self> {
-        let alignment = Self::determine_alignment(&config.path)?;
+    pub fn build(config: &v2::Config) -> Result<Self> {
+        let alignment = Self::determine_alignment(&config.device.data_path)?;
 
-        let disk_device = build_block_device(&config.path, config, false)
+        let disk_device = build_block_device(&config.device.data_path, config, false)
             .context("Failed to build disk device")?;
         let metadata_device = config
+            .device
             .metadata_path
             .as_ref()
             .map(|path| {
@@ -116,7 +117,7 @@ impl BackendEnv {
         &self.io_trackers
     }
 
-    pub fn config(&self) -> &DeviceConfig {
+    pub fn config(&self) -> &v2::Config {
         &self.config
     }
 
@@ -131,7 +132,7 @@ impl BackendEnv {
     fn build_with_bgworker(
         disk_device: Box<dyn BlockDevice>,
         metadata_device: Box<dyn BlockDevice>,
-        config: &DeviceConfig,
+        config: &v2::Config,
         alignment: usize,
     ) -> Result<Self> {
         let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
@@ -158,7 +159,10 @@ impl BackendEnv {
             stripe_source_builder,
             metadata_dev: metadata_device,
             alignment,
-            autofetch: config.autofetch,
+            autofetch: config
+                .stripe_source
+                .as_ref()
+                .is_some_and(|stripe_source| stripe_source.autofetch()),
             shared_state,
             receiver: bgworker_receiver,
         };
@@ -175,11 +179,11 @@ impl BackendEnv {
         })
     }
 
-    #[error_context("Failed to determine filesystem alignment for path: {}", path)]
-    fn determine_alignment(path: &str) -> Result<usize> {
-        let stat = statfs(Path::new(path)).map_err(|e| {
+    #[error_context("Failed to determine filesystem alignment for path: {:?}", path)]
+    fn determine_alignment(path: &Path) -> Result<usize> {
+        let stat = statfs(path).map_err(|e| {
             crate::ubiblk_error!(InvalidParameter {
-                description: format!("Failed to statfs {path}: {e}"),
+                description: format!("Failed to statfs {}: {e}", path.display()),
             })
         })?;
 
@@ -189,11 +193,15 @@ impl BackendEnv {
     #[error_context("Failed to build lazy block device")]
     fn build_bdev_lazy(
         disk_device: Box<dyn BlockDevice>,
-        config: &DeviceConfig,
+        config: &v2::Config,
         bgworker_sender: Sender<BgWorkerRequest>,
         shared_state: SharedMetadataState,
     ) -> Result<Box<dyn BlockDevice>> {
-        let raw_image_device = if config.copy_on_read {
+        let raw_image_device = if config
+            .stripe_source
+            .as_ref()
+            .is_none_or(|stripe_source| stripe_source.copy_on_read())
+        {
             None
         } else {
             build_raw_image_device(config)?
@@ -204,15 +212,15 @@ impl BackendEnv {
             raw_image_device,
             bgworker_sender,
             shared_state,
-            config.track_written,
+            config.device.track_written,
         )?;
 
         Ok(lazy_bdev)
     }
 
-    fn build_io_trackers(config: &DeviceConfig) -> Vec<io_tracking::IoTracker> {
-        (0..config.num_queues)
-            .map(|_| io_tracking::IoTracker::new(config.queue_size))
+    fn build_io_trackers(config: &v2::Config) -> Vec<io_tracking::IoTracker> {
+        (0..config.tuning.num_queues)
+            .map(|_| io_tracking::IoTracker::new(config.tuning.queue_size))
             .collect()
     }
 
@@ -282,7 +290,7 @@ impl Drop for BackendEnv {
 }
 
 pub fn run_backend_loop<F>(
-    config: &DeviceConfig,
+    config: &v2::Config,
     backend_name: &str,
     loop_forever: bool,
     mut serve: F,
@@ -298,7 +306,7 @@ where
     let mut backend_env = BackendEnv::build(config)?;
     backend_env.run_bgworker_thread()?;
 
-    let _rpc_handle = if let Some(path) = config.rpc_socket_path.as_ref() {
+    let _rpc_handle = if let Some(path) = config.device.rpc_socket.as_ref() {
         let status_reporter = backend_env.status_reporter();
         let io_trackers = backend_env.io_trackers().clone();
         Some(rpc::start_rpc_server(path, status_reporter, io_trackers)?)
@@ -317,19 +325,19 @@ where
     Ok(())
 }
 
-pub fn init_metadata(config: &DeviceConfig, stripe_sector_count_shift: u8) -> Result<()> {
-    let metadata_path = config.metadata_path.as_ref().ok_or_else(|| {
+pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Result<()> {
+    let metadata_path = config.device.metadata_path.as_ref().ok_or_else(|| {
         crate::ubiblk_error!(InvalidParameter {
             description: "metadata_path is none".to_string(),
         })
     })?;
 
-    let disk_bdev = build_block_device(&config.path, config, false)
+    let disk_bdev = build_block_device(&config.device.data_path, config, false)
         .context("Failed to build disk block device")?;
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;
     let base_stripe_count = disk_bdev.stripe_count(stripe_sector_count);
 
-    let metadata = if !config.has_stripe_source() {
+    let metadata = if config.stripe_source.is_none() {
         // No image source
         UbiMetadata::new(stripe_sector_count_shift, base_stripe_count, 0)
     } else {
@@ -350,7 +358,7 @@ pub fn init_metadata(config: &DeviceConfig, stripe_sector_count_shift: u8) -> Re
 
 #[error_context("Failed to create I/O engine device")]
 fn create_io_engine_device(
-    engine: IoEngine,
+    engine: v2::tuning::IoEngine,
     path: PathBuf,
     queue_size: usize,
     readonly: bool,
@@ -358,15 +366,15 @@ fn create_io_engine_device(
     write_through: bool,
 ) -> Result<Box<dyn BlockDevice>> {
     match engine {
-        IoEngine::IoUring => Ok(UringBlockDevice::new(
-            path,
+        v2::tuning::IoEngine::IoUring => Ok(UringBlockDevice::new(
+            path.to_path_buf(),
             queue_size,
             readonly,
             direct_io,
             write_through,
         )?),
-        IoEngine::Sync => Ok(SyncBlockDevice::new(
-            path,
+        v2::tuning::IoEngine::Sync => Ok(SyncBlockDevice::new(
+            path.to_path_buf(),
             readonly,
             direct_io,
             write_through,
@@ -374,16 +382,20 @@ fn create_io_engine_device(
     }
 }
 
-pub fn build_raw_image_device(config: &DeviceConfig) -> Result<Option<Box<dyn BlockDevice>>> {
-    if let Some(path) = config.raw_image_path() {
+pub fn build_raw_image_device(config: &v2::Config) -> Result<Option<Box<dyn BlockDevice>>> {
+    if let Some(path) = config
+        .stripe_source
+        .as_ref()
+        .and_then(|stripe_source| stripe_source.raw_image_path())
+    {
         let readonly = true;
         Ok(Some(create_io_engine_device(
-            config.io_engine.clone(),
-            path,
+            config.tuning.io_engine.clone(),
+            path.to_path_buf(),
             64,
             readonly,
             true,
-            config.write_through,
+            config.tuning.write_through,
         )?))
     } else {
         Ok(None)
@@ -391,22 +403,35 @@ pub fn build_raw_image_device(config: &DeviceConfig) -> Result<Option<Box<dyn Bl
 }
 
 pub fn build_block_device(
-    path: &str,
-    config: &DeviceConfig,
+    path: &Path,
+    config: &v2::Config,
     readonly: bool,
 ) -> Result<Box<dyn BlockDevice>> {
     let mut block_device: Box<dyn BlockDevice> = create_io_engine_device(
-        config.io_engine.clone(),
+        config.tuning.io_engine.clone(),
         PathBuf::from(path),
-        config.queue_size,
+        config.tuning.queue_size,
         readonly,
         true,
-        config.write_through,
+        config.tuning.write_through,
     )?;
 
-    if let Some((key1, key2)) = &config.encryption_key {
+    if let Some(encryption) = &config.encryption {
+        let xts_key = config
+            .secrets
+            .get(encryption.xts_key.id())
+            .ok_or_else(|| {
+                crate::ubiblk_error!(InvalidParameter {
+                    description: format!(
+                        "Encryption secret '{}' is missing",
+                        encryption.xts_key.id()
+                    ),
+                })
+            })?
+            .as_bytes();
+        let (key1, key2) = xts_key.split_at(32);
         block_device =
-            block_device::CryptBlockDevice::new(block_device, key1.clone(), key2.clone())?;
+            block_device::CryptBlockDevice::new(block_device, key1.to_vec(), key2.to_vec())?;
     }
 
     Ok(block_device)
@@ -416,21 +441,48 @@ pub fn build_block_device(
 mod tests {
     use super::*;
     use crate::block_device::bdev_test::TestBlockDevice;
-    use crate::config::{RawStripeSourceConfig, StripeSourceConfig};
+    use crate::config::v2::stripe_source::StripeSourceConfig;
+    use crate::config::v2::{self, DeviceSection};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+
+    fn test_config(
+        data_path: &Path,
+        metadata_path: Option<&Path>,
+        stripe_source: Option<StripeSourceConfig>,
+    ) -> v2::Config {
+        v2::Config {
+            device: DeviceSection {
+                data_path: data_path.to_path_buf(),
+                metadata_path: metadata_path.map(|path| path.to_path_buf()),
+                vhost_socket: None,
+                rpc_socket: None,
+                device_id: "ubiblk".to_string(),
+                track_written: false,
+            },
+            tuning: v2::tuning::TuningSection {
+                queue_size: 128,
+                ..Default::default()
+            },
+            encryption: None,
+            danger_zone: v2::DangerZone {
+                enabled: true,
+                allow_unencrypted_disk: true,
+                allow_inline_plaintext_secrets: true,
+                allow_secret_over_regular_file: true,
+                allow_unencrypted_connection: true,
+            },
+            stripe_source,
+            secrets: std::collections::HashMap::new(),
+        }
+    }
 
     #[test]
     fn build_backend_env_no_metadata() {
         let disk_file = tempfile::NamedTempFile::new().unwrap();
         disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
 
-        let config = DeviceConfig {
-            path: disk_file.path().to_str().unwrap().to_string(),
-            socket: Some("/tmp/ubiblk-test.sock".to_string()),
-            queue_size: 128,
-            ..Default::default()
-        };
+        let config = test_config(disk_file.path(), None, None);
 
         let result = BackendEnv::build(&config);
         assert!(result.is_ok());
@@ -445,7 +497,7 @@ mod tests {
         let loaded_metadata = UbiMetadata::load_from_bdev(&metadata_dev).unwrap();
         let shared_state = SharedMetadataState::new(&loaded_metadata);
         let stripe_source_builder = Box::new(StripeSourceBuilder::new(
-            DeviceConfig::default(),
+            test_config(Path::new("/tmp/ubiblk-test-disk"), None, None),
             shared_state.stripe_sector_count(),
             loaded_metadata.has_fetched_all_stripes(),
         ));
@@ -488,11 +540,7 @@ mod tests {
         let disk_file = tempfile::NamedTempFile::new().unwrap();
         disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
 
-        let config = DeviceConfig {
-            path: disk_file.path().to_str().unwrap().to_string(),
-            queue_size: 128,
-            ..Default::default()
-        };
+        let config = test_config(disk_file.path(), None, None);
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_handle = call_count.clone();
@@ -507,12 +555,7 @@ mod tests {
 
     #[test]
     fn build_backend_env_with_invalid_path() {
-        let config = DeviceConfig {
-            path: "/non/existent/path".to_string(),
-            socket: Some("/tmp/ubiblk-test.sock".to_string()),
-            queue_size: 128,
-            ..Default::default()
-        };
+        let config = test_config(Path::new("/non/existent/path"), None, None);
 
         let result = BackendEnv::build(&config);
         assert!(result.is_err());
@@ -529,18 +572,15 @@ mod tests {
         let metadata_path = tempfile::NamedTempFile::new().unwrap();
         metadata_path.as_file().set_len(1024 * 1024).unwrap();
 
-        let config = DeviceConfig {
-            path: disk_file.path().to_str().unwrap().to_string(),
-            stripe_source: Some(StripeSourceConfig::Raw {
-                config: RawStripeSourceConfig {
-                    path: image_file.path().to_path_buf(),
-                },
+        let config = test_config(
+            disk_file.path(),
+            Some(metadata_path.path()),
+            Some(StripeSourceConfig::Raw {
+                image_path: image_file.path().to_path_buf(),
+                autofetch: false,
+                copy_on_read: false,
             }),
-            metadata_path: Some(metadata_path.path().to_str().unwrap().to_string()),
-            socket: Some("/tmp/ubiblk-test.sock".to_string()),
-            queue_size: 128,
-            ..Default::default()
-        };
+        );
 
         init_metadata(&config, 11).unwrap();
 
@@ -559,18 +599,15 @@ mod tests {
         let metadata_path = tempfile::NamedTempFile::new().unwrap();
         metadata_path.as_file().set_len(1024 * 1024).unwrap();
 
-        let config = DeviceConfig {
-            path: disk_file.path().to_str().unwrap().to_string(),
-            stripe_source: Some(StripeSourceConfig::Raw {
-                config: RawStripeSourceConfig {
-                    path: image_file.path().to_path_buf(),
-                },
+        let config = test_config(
+            disk_file.path(),
+            Some(metadata_path.path()),
+            Some(StripeSourceConfig::Raw {
+                image_path: image_file.path().to_path_buf(),
+                autofetch: false,
+                copy_on_read: true,
             }),
-            metadata_path: Some(metadata_path.path().to_str().unwrap().to_string()),
-            copy_on_read: true,
-            queue_size: 128,
-            ..Default::default()
-        };
+        );
 
         init_metadata(&config, 11).unwrap();
 

@@ -10,7 +10,7 @@ use ubiblk_macros::error_context;
 use crate::{
     backends::common::{io_tracking::IoTracker, run_backend_loop, BackendEnv, SECTOR_SIZE},
     block_device::BlockDevice,
-    config::DeviceConfig,
+    config::v2,
     Result, ResultExt,
 };
 
@@ -46,7 +46,7 @@ struct UblkIoRequest {
     bytes: usize,
 }
 
-pub fn ublk_backend_loop(config: &DeviceConfig, device_symlink: Option<PathBuf>) -> Result<()> {
+pub fn ublk_backend_loop(config: &v2::Config, device_symlink: Option<PathBuf>) -> Result<()> {
     run_backend_loop(config, "ublk", false, move |backend_env| {
         serve_ublk(backend_env, device_symlink.clone())
     })
@@ -58,13 +58,13 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
 
     let bdev = backend_env.bdev();
     let device_size = bdev.sector_count() * SECTOR_SIZE as u64;
-    let device_name = format!("ubiblk-{}", backend_env.config().device_id);
+    let device_name = format!("ubiblk-{}", backend_env.config().device.device_id);
     let backend_alignment = backend_env.alignment();
 
     let config = backend_env.config();
-    let num_queues = config.num_queues as u16;
-    let queue_size = config.queue_size as u16;
-    let io_buf_bytes = config.seg_size_max;
+    let num_queues = config.tuning.num_queues as u16;
+    let queue_size = config.tuning.queue_size as u16;
+    let io_buf_bytes = config.tuning.seg_size_max;
 
     let ctrl = std::sync::Arc::new(
         UblkCtrlBuilder::default()

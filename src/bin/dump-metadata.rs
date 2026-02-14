@@ -3,7 +3,7 @@ use log::error;
 use ubiblk::backends::{build_block_device, SECTOR_SIZE};
 use ubiblk::block_device::{self, metadata_flags, BlockDevice, UbiMetadata};
 use ubiblk::cli::{load_config, CommonArgs};
-use ubiblk::config::{ArchiveStripeSourceConfig, DeviceConfig, StripeSourceConfig};
+use ubiblk::config::v2;
 use ubiblk::Result;
 
 #[derive(Parser)]
@@ -54,51 +54,43 @@ fn push_range(output: &mut Vec<String>, start: usize, end: usize) {
     }
 }
 
-fn format_optional(value: Option<&str>) -> &str {
-    value.unwrap_or("None")
-}
-
-fn format_source_info(config: &DeviceConfig) -> Result<String> {
-    #[allow(deprecated)]
-    match config.resolved_stripe_source() {
-        Some(StripeSourceConfig::Raw { config: raw_config }) => {
+fn format_source_info(config: &v2::Config) -> Result<String> {
+    match config.stripe_source.as_ref() {
+        Some(v2::stripe_source::StripeSourceConfig::Raw { image_path, .. }) => {
             let dev = block_device::UringBlockDevice::new(
-                raw_config.path.clone(),
-                config.queue_size,
+                image_path.clone(),
+                config.tuning.queue_size,
                 true,
                 true,
-                config.write_through,
+                config.tuning.write_through,
             )?;
             let image_size = dev.sector_count() * SECTOR_SIZE as u64;
             Ok(format!(
                 "raw (path: {}, size: {} bytes)",
-                raw_config.path.display(),
+                image_path.display(),
                 image_size
             ))
         }
-        Some(StripeSourceConfig::Remote { config }) => Ok(format!(
+        Some(v2::stripe_source::StripeSourceConfig::Remote { address, psk, .. }) => Ok(format!(
             "remote (address: {}, psk_identity: {})",
-            config.address,
-            format_optional(config.psk_identity.as_deref())
+            address,
+            psk.as_ref()
+                .map(|psk| psk.psk_identity.as_str())
+                .unwrap_or("None")
         )),
-        Some(StripeSourceConfig::Archive { config }) => match config {
-            ArchiveStripeSourceConfig::Filesystem { path, .. } => {
-                Ok(format!("archive filesystem (path: {path})"))
+        Some(v2::stripe_source::StripeSourceConfig::Archive(config)) => match config {
+            v2::stripe_source::ArchiveStorageConfig::Filesystem { path, .. } => {
+                Ok(format!("archive filesystem (path: {})", path.display()))
             }
-            ArchiveStripeSourceConfig::S3 {
+            v2::stripe_source::ArchiveStorageConfig::S3 {
                 bucket,
                 prefix,
-                endpoint,
                 region,
-                profile,
-                connections,
                 ..
             } => Ok(format!(
-                "archive s3 (bucket: {bucket}, prefix: {}, endpoint: {}, region: {}, profile: {}, connections: {connections})",
-                format_optional(prefix.as_deref()),
-                format_optional(endpoint.as_deref()),
-                format_optional(region.as_deref()),
-                format_optional(profile.as_deref()),
+                "archive s3 (bucket: {bucket}, prefix: {}, region: {})",
+                prefix.as_deref().unwrap_or("None"),
+                region.as_deref().unwrap_or("None")
             )),
         },
         None => Ok(String::from("None")),
@@ -120,13 +112,13 @@ fn run() -> Result<()> {
     let config = load_config(&args.common)?;
 
     // base data device
-    let base_dev = build_block_device(&config.path, &config, true)?;
+    let base_dev = build_block_device(&config.device.data_path, &config, true)?;
     let data_size = base_dev.sector_count() * SECTOR_SIZE as u64;
 
     let source_info = format_source_info(&config)?;
 
     // metadata device
-    let metadata_path = config.metadata_path.as_ref().ok_or_else(|| {
+    let metadata_path = config.device.metadata_path.as_ref().ok_or_else(|| {
         ubiblk::ubiblk_error!(InvalidParameter {
             description: "metadata_path is none".to_string(),
         })
@@ -159,7 +151,11 @@ fn run() -> Result<()> {
         .filter_map(|(i, h)| (h & metadata_flags::HAS_SOURCE != 0).then_some(i))
         .collect();
 
-    println!("data file: {} ({} bytes)", config.path, data_size);
+    println!(
+        "data file: {} ({} bytes)",
+        config.device.data_path.display(),
+        data_size
+    );
     println!("source: {source_info}");
     println!("metadata version: {metadata_version}");
     println!("stripe size: {stripe_size} bytes");

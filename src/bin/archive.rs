@@ -7,8 +7,8 @@ use ubiblk::{
     archive::{ArchiveCompressionAlgorithm, StripeArchiver},
     backends::build_block_device,
     block_device::UbiMetadata,
-    cli::{load_config_and_kek, CommonArgs},
-    config::ArchiveStripeSourceConfig,
+    cli::{load_config, CommonArgs},
+    config::v2,
     stripe_source::StripeSourceBuilder,
     Result,
 };
@@ -23,10 +23,10 @@ use ubiblk::{
 
 Examples:
   # Archive to a local folder
-  archive -f config.yaml --target-config archive_target.yaml
+  archive -f config.toml --target-config archive_target.toml
 
   # Archive to S3 with an optional prefix
-  archive -f config.yaml --target-config archive_target.yaml"#
+  archive -f config.toml --target-config archive_target.toml"#
 )]
 struct Args {
     #[command(flatten)]
@@ -74,18 +74,18 @@ fn main() {
 fn run() -> Result<()> {
     let args = Args::parse();
 
-    let (config, config_kek) = load_config_and_kek(&args.common)?;
-    let metadata_path =
-        config
-            .metadata_path
-            .as_ref()
-            .ok_or(ubiblk::ubiblk_error!(InvalidParameter {
-                description: "Metadata path is missing".to_string(),
-            }))?;
+    let config = load_config(&args.common)?;
+    let metadata_path = config
+        .device
+        .metadata_path
+        .as_ref()
+        .ok_or(ubiblk::ubiblk_error!(InvalidParameter {
+            description: "Metadata path is missing".to_string(),
+        }))?;
     let metadata_dev = build_block_device(metadata_path, &config, true)?;
     let metadata = UbiMetadata::load_from_bdev(metadata_dev.as_ref())?;
 
-    let disk_dev = build_block_device(&config.path, &config, true)?;
+    let disk_dev = build_block_device(&config.device.data_path, &config, true)?;
 
     let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
 
@@ -96,9 +96,17 @@ fn run() -> Result<()> {
     )
     .build()?;
 
-    let target_config =
-        ArchiveStripeSourceConfig::load_from_file_with_kek(&args.target_config_path, &config_kek)?;
-    let store = StripeSourceBuilder::build_archive_store(&target_config)?;
+    // TODO: Fix archive target config loading.
+    let target_config = v2::Config::load(&args.target_config_path)?;
+    let target_archive = match target_config.stripe_source.as_ref() {
+        Some(v2::stripe_source::StripeSourceConfig::Archive(archive)) => archive,
+        _ => {
+            return Err(ubiblk::ubiblk_error!(InvalidParameter {
+                description: "target config must define stripe_source.type = 'archive'".to_string(),
+            }));
+        }
+    };
+    let store = StripeSourceBuilder::build_archive_store(target_archive, &target_config.secrets)?;
 
     let compression = match args.compression {
         CompressionChoice::None => ArchiveCompressionAlgorithm::None,
@@ -114,8 +122,8 @@ fn run() -> Result<()> {
         store,
         args.encrypt,
         compression,
-        target_config.archive_kek().clone(),
-        target_config.connections(),
+        StripeSourceBuilder::build_archive_kek(target_archive, &target_config.secrets)?,
+        4,
     )?;
 
     archiver.archive_all()?;

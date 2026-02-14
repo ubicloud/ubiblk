@@ -4,7 +4,7 @@ use log::{info, warn};
 use ubiblk_macros::error_context;
 
 use crate::backends::SECTOR_SIZE;
-use crate::config::RemoteStripeSourceConfig;
+use crate::config::v2;
 
 use super::*;
 
@@ -146,21 +146,42 @@ impl RemoteStripeProvider for StripeServerClient {
     }
 }
 
-#[error_context("Failed to connect to stripe server at {}", conf.address)]
-pub fn connect_to_stripe_server(conf: &RemoteStripeSourceConfig) -> Result<StripeServerClient> {
-    let psk = if let (Some(identity), Some(secret)) = (&conf.psk_identity, &conf.psk_secret) {
-        Some(PskCredentials::new(identity.clone(), secret.clone())?)
+#[error_context("Failed to connect to stripe server")]
+pub fn connect_to_stripe_server(
+    conf: &v2::stripe_source::StripeSourceConfig,
+    secrets: &std::collections::HashMap<String, v2::secrets::ResolvedSecret>,
+) -> Result<StripeServerClient> {
+    let (address, psk) = if let v2::stripe_source::StripeSourceConfig::Remote {
+        address, psk, ..
+    } = conf
+    {
+        let psk = if let Some(psk_config) = psk {
+            let secret = secrets.get(psk_config.psk_secret.id()).ok_or_else(|| {
+                crate::ubiblk_error!(InvalidParameter {
+                    description: format!("PSK secret '{}' not found", psk_config.psk_secret.id()),
+                })
+            })?;
+            Some(PskCredentials::new(
+                psk_config.psk_identity.clone(),
+                secret.as_bytes().to_vec(),
+            )?)
+        } else {
+            None
+        };
+        (address, psk)
     } else {
-        None
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "stripe_source must be type remote".to_string(),
+        }));
     };
 
     if psk.is_none() {
         warn!("No PSK credentials configured — connecting to stripe server WITHOUT transport encryption.");
     }
 
-    let server_addr: SocketAddr = conf.address.parse().map_err(|err| {
+    let server_addr: SocketAddr = address.parse().map_err(|err| {
         crate::ubiblk_error!(InvalidParameter {
-            description: format!("invalid server address {}: {}", conf.address, err),
+            description: format!("invalid server address {}: {}", address, err),
         })
     })?;
 
@@ -427,15 +448,14 @@ mod tests {
 
     #[test]
     fn test_connection_failure() {
-        let conf = RemoteStripeSourceConfig {
+        let conf = v2::stripe_source::StripeSourceConfig::Remote {
             address: "127.0.0.1:9999".to_string(),
-            psk_identity: None,
-            psk_secret: None,
-            allow_insecure: true,
+            psk: None,
+            autofetch: false,
         };
-        let result = connect_to_stripe_server(&conf);
+        let result = connect_to_stripe_server(&conf, &std::collections::HashMap::new());
         assert!(result.is_err());
         let error_message = result.err().unwrap().to_string();
-        assert!(error_message.contains("Failed to connect to stripe server at 127.0.0.1:9999"));
+        assert!(error_message.contains("Failed to connect to stripe server"));
     }
 }

@@ -11,8 +11,8 @@ use log::error;
 use ubiblk::{
     backends::SECTOR_SIZE,
     block_device::{self, shared_buffer, wait_for_completion, BlockDevice},
-    config::DeviceConfig,
-    KeyEncryptionCipher, Result,
+    config::v2,
+    Result,
 };
 
 const MAX_CHUNK_SECTORS: u32 = 1024;
@@ -34,14 +34,6 @@ struct Args {
     /// Path to the configuration YAML file
     #[arg(short = 'f', long = "config")]
     config: String,
-
-    /// Path to the key encryption key file
-    #[arg(short = 'k', long = "kek")]
-    kek: Option<String>,
-
-    /// Allow reading the key encryption key from a regular file.
-    #[arg(long = "allow-regular-file-as-kek", default_value_t = false)]
-    allow_regular_file_as_kek: bool,
 
     /// Starting sector offset
     #[arg(long = "start")]
@@ -225,15 +217,23 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    let kek_path = args.kek.as_ref().map(PathBuf::from);
-    let kek = KeyEncryptionCipher::load(kek_path.as_ref(), args.allow_regular_file_as_kek)?;
-    let config = DeviceConfig::load_from_file_with_kek(&PathBuf::from(&args.config), &kek)?;
+    let config = v2::Config::load(&PathBuf::from(&args.config))?;
 
-    let (key1, key2) = config.encryption_key.clone().ok_or_else(|| {
+    let encryption = config.encryption.as_ref().ok_or_else(|| {
         ubiblk::ubiblk_error!(InvalidParameter {
             description: "Configuration does not contain encryption keys".to_string(),
         })
     })?;
+    let xts_key = config
+        .secrets
+        .get(encryption.xts_key.id())
+        .ok_or_else(|| {
+            ubiblk::ubiblk_error!(InvalidParameter {
+                description: format!("Encryption secret '{}' not found", encryption.xts_key.id()),
+            })
+        })?
+        .as_bytes();
+    let (key1, key2) = (xts_key[..32].to_vec(), xts_key[32..].to_vec());
 
     match args.action {
         Action::Decode => decode(&args, key1, key2),

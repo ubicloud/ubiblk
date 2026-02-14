@@ -1,10 +1,13 @@
 use std::{
     cmp,
+    fs::{File, OpenOptions},
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::mpsc::{channel, Receiver, Sender},
 };
 
 use log::{error, info};
+use nix::fcntl::OFlag;
 use nix::sys::statfs::statfs;
 use ubiblk_macros::error_context;
 
@@ -350,9 +353,87 @@ pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Resu
         )
     };
 
+    ensure_metadata_file(metadata_path, metadata.metadata_size())?;
+
     let metadata_bdev = build_block_device(metadata_path, config, false)
         .context("Failed to build metadata block device")?;
     metadata.save_to_bdev(metadata_bdev.as_ref())?;
+    Ok(())
+}
+
+#[error_context("Failed to ensure metadata file exists with secure permissions")]
+fn ensure_metadata_file(path: &Path, minimum_size: usize) -> Result<()> {
+    let mut created = false;
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .custom_flags(OFlag::O_NOFOLLOW.bits())
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => {
+            created = true;
+            file
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(OFlag::O_NOFOLLOW.bits())
+            .open(path)
+            .context(format!("Failed to open metadata file {}", path.display()))?,
+        Err(e) => return Err(crate::ubiblk_error!(IoError { source: e })),
+    };
+
+    let stat_result = file
+        .metadata()
+        .context(format!("Failed to stat metadata file {}", path.display()))?;
+    if !stat_result.file_type().is_file() {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: format!("Metadata path {} is not a regular file", path.display()),
+        }));
+    }
+
+    let mut permissions = stat_result.permissions();
+    if permissions.mode() & 0o7777 != 0o600 {
+        permissions.set_mode(0o600);
+        file.set_permissions(permissions).context(format!(
+            "Failed to set metadata file permissions on {}",
+            path.display()
+        ))?;
+    }
+
+    let minimum_size_u64 = minimum_size as u64;
+    if stat_result.len() < minimum_size_u64 {
+        file.set_len(minimum_size_u64).context(format!(
+            "Failed to resize metadata file {} to {} bytes",
+            path.display(),
+            minimum_size
+        ))?;
+    }
+
+    file.sync_all()
+        .context(format!("Failed to sync metadata file {}", path.display()))?;
+
+    if created {
+        let parent = path.parent().ok_or_else(|| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: format!("Metadata file path {} has no parent", path.display()),
+            })
+        })?;
+
+        File::open(parent)
+            .context(format!(
+                "Failed to open metadata parent dir {}",
+                parent.display()
+            ))?
+            .sync_all()
+            .context(format!(
+                "Failed to sync metadata parent dir {}",
+                parent.display()
+            ))?;
+    }
+
     Ok(())
 }
 
@@ -443,6 +524,9 @@ mod tests {
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::config::v2::stripe_source::StripeSourceConfig;
     use crate::config::v2::{self, DeviceSection};
+    use crate::utils::umask_guard::UMASK_LOCK;
+    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
@@ -486,6 +570,99 @@ mod tests {
 
         let result = BackendEnv::build(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn ensure_metadata_file_creates_with_mode_0600() {
+        let _umask_guard = UMASK_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_path = dir.path().join("metadata.bin");
+
+        ensure_metadata_file(&metadata_path, SECTOR_SIZE).unwrap();
+
+        assert!(metadata_path.exists());
+        let mode = std::fs::metadata(&metadata_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            std::fs::metadata(&metadata_path).unwrap().len(),
+            SECTOR_SIZE as u64
+        );
+    }
+
+    #[test]
+    fn ensure_metadata_file_fixes_existing_mode() {
+        let _umask_guard = UMASK_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_path = dir.path().join("metadata.bin");
+        std::fs::write(&metadata_path, []).unwrap();
+        std::fs::set_permissions(&metadata_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        ensure_metadata_file(&metadata_path, SECTOR_SIZE * 4).unwrap();
+
+        let mode = std::fs::metadata(&metadata_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            std::fs::metadata(&metadata_path).unwrap().len(),
+            (SECTOR_SIZE * 4) as u64
+        );
+    }
+
+    #[test]
+    fn ensure_metadata_file_clears_special_mode_bits() {
+        let _umask_guard = UMASK_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_path = dir.path().join("metadata.bin");
+        std::fs::write(&metadata_path, []).unwrap();
+        std::fs::set_permissions(&metadata_path, std::fs::Permissions::from_mode(0o4600)).unwrap();
+
+        ensure_metadata_file(&metadata_path, SECTOR_SIZE * 6).unwrap();
+
+        let mode = std::fs::metadata(&metadata_path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            std::fs::metadata(&metadata_path).unwrap().len(),
+            (SECTOR_SIZE * 6) as u64
+        );
+    }
+
+    #[test]
+    fn ensure_metadata_file_rejects_symlink_path() {
+        let _umask_guard = UMASK_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target_path = dir.path().join("target.bin");
+        let metadata_path = dir.path().join("metadata.bin");
+        std::fs::write(&target_path, []).unwrap();
+        symlink(&target_path, &metadata_path).unwrap();
+
+        let result = ensure_metadata_file(&metadata_path, SECTOR_SIZE);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ensure_metadata_file_expands_existing_file_when_too_small() {
+        let _umask_guard = UMASK_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_path = dir.path().join("metadata.bin");
+        std::fs::write(&metadata_path, [0u8; 1]).unwrap();
+
+        ensure_metadata_file(&metadata_path, SECTOR_SIZE * 3).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&metadata_path).unwrap().len(),
+            (SECTOR_SIZE * 3) as u64
+        );
     }
 
     fn build_test_bgworker_config() -> (BgWorkerConfig, Sender<BgWorkerRequest>) {

@@ -253,6 +253,21 @@ fn load_env_source(name: &str, var: &str) -> Result<Vec<u8>> {
     Ok(value.into_bytes())
 }
 
+pub fn get_resolved_secret<'a>(
+    secret_ref: &SecretRef,
+    resolved_secrets: &'a HashMap<String, ResolvedSecret>,
+) -> Result<&'a ResolvedSecret> {
+    let secret_id = secret_ref.id();
+    resolved_secrets.get(secret_id).ok_or_else(|| {
+        ubiblk_error!(InvalidParameter {
+            description: format!(
+                "Secret reference '{}' not found in configuration",
+                secret_id
+            ),
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;

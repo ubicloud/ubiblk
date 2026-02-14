@@ -6,7 +6,10 @@ use std::{
 use serde::Deserialize;
 
 use super::{secrets::SecretRef, DangerZone};
-use crate::{config::v2::secrets::ResolvedSecret, ubiblk_error, Result};
+use crate::{
+    config::v2::secrets::{get_resolved_secret, ResolvedSecret},
+    ubiblk_error, Result,
+};
 
 /// Stripe source configuration for TOML format.
 ///
@@ -57,7 +60,11 @@ impl StripeSourceConfig {
         }
     }
 
-    pub fn validate(&self, danger_zone: &DangerZone) -> Result<()> {
+    pub fn validate(
+        &self,
+        danger_zone: &DangerZone,
+        resolved_secrets: &HashMap<String, ResolvedSecret>,
+    ) -> Result<()> {
         match self {
             StripeSourceConfig::Remote { psk, .. } => {
                 if psk.is_none()
@@ -68,54 +75,14 @@ impl StripeSourceConfig {
                                    description: "Remote stripe source requires PSK unless danger_zone.allow_unencrypted_connection is enabled".to_string()
                            }));
                 }
-            }
-            StripeSourceConfig::Archive(storage) => storage.validate()?,
-            StripeSourceConfig::Raw { .. } => (),
-        }
-        Ok(())
-    }
-
-    pub fn validate_secrets(&self, secret_defs: &HashMap<String, ResolvedSecret>) -> Result<()> {
-        match self {
-            StripeSourceConfig::Remote { psk, .. } => {
                 if let Some(psk) = psk {
-                    validate_psk_secret(self.get_secret(&psk.secret, secret_defs)?)?;
+                    validate_psk_secret(get_resolved_secret(&psk.secret, resolved_secrets)?)?;
                 }
             }
-            StripeSourceConfig::Archive(ArchiveStorageConfig::Filesystem {
-                archive_kek, ..
-            }) => {
-                validate_archive_kek(self.get_secret(archive_kek, secret_defs)?)?;
-            }
-            StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
-                access_key_id,
-                secret_access_key,
-                archive_kek,
-                ..
-            }) => {
-                validate_archive_kek(self.get_secret(archive_kek, secret_defs)?)?;
-                validate_aws_access_key_id(self.get_secret(access_key_id, secret_defs)?)?;
-                validate_aws_secret_access_key(self.get_secret(secret_access_key, secret_defs)?)?;
-            }
+            StripeSourceConfig::Archive(storage) => storage.validate(resolved_secrets)?,
             StripeSourceConfig::Raw { .. } => (),
         }
         Ok(())
-    }
-
-    fn get_secret<'a>(
-        &'a self,
-        secret_ref: &SecretRef,
-        secret_defs: &'a HashMap<String, ResolvedSecret>,
-    ) -> Result<&'a ResolvedSecret> {
-        let secret_id = secret_ref.id();
-        secret_defs.get(secret_id).ok_or_else(|| {
-            ubiblk_error!(InvalidParameter {
-                description: format!(
-                    "Secret reference '{}' not found in configuration",
-                    secret_id
-                ),
-            })
-        })
     }
 }
 
@@ -126,36 +93,6 @@ fn validate_psk_secret(secret: &ResolvedSecret) -> Result<()> {
                 "PSK secret must be at least 16 bytes (got {} bytes)",
                 secret.as_bytes().len()
             ),
-        }));
-    }
-    Ok(())
-}
-
-fn validate_archive_kek(archive_kek_secret: &ResolvedSecret) -> Result<()> {
-    if archive_kek_secret.as_bytes().len() != 32 {
-        return Err(ubiblk_error!(InvalidParameter {
-            description: format!(
-                "Archive KEK secret must be exactly 32 bytes for AES-256-GCM (got {} bytes)",
-                archive_kek_secret.as_bytes().len()
-            ),
-        }));
-    }
-    Ok(())
-}
-
-fn validate_aws_secret_access_key(secret_key: &ResolvedSecret) -> Result<()> {
-    if secret_key.as_bytes().is_empty() {
-        return Err(ubiblk_error!(InvalidParameter {
-            description: "AWS secret_access_key cannot be empty".to_string(),
-        }));
-    }
-    Ok(())
-}
-
-fn validate_aws_access_key_id(access_key_id: &ResolvedSecret) -> Result<()> {
-    if access_key_id.as_bytes().is_empty() {
-        return Err(ubiblk_error!(InvalidParameter {
-            description: "AWS access_key_id cannot be empty".to_string(),
         }));
     }
     Ok(())
@@ -191,14 +128,28 @@ fn default_connections() -> usize {
 }
 
 impl ArchiveStorageConfig {
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, resolved_secrets: &HashMap<String, ResolvedSecret>) -> Result<()> {
         match self {
-            ArchiveStorageConfig::Filesystem { .. } => Ok(()),
+            ArchiveStorageConfig::Filesystem { archive_kek, .. } => {
+                Self::validate_archive_kek(get_resolved_secret(archive_kek, resolved_secrets)?)
+            }
             ArchiveStorageConfig::S3 {
                 prefix,
                 connections,
+                access_key_id,
+                secret_access_key,
+                archive_kek,
                 ..
             } => {
+                Self::validate_archive_kek(get_resolved_secret(archive_kek, resolved_secrets)?)?;
+                Self::validate_aws_access_key_id(get_resolved_secret(
+                    access_key_id,
+                    resolved_secrets,
+                )?)?;
+                Self::validate_aws_secret_access_key(get_resolved_secret(
+                    secret_access_key,
+                    resolved_secrets,
+                )?)?;
                 Self::validate_prefix(prefix)?;
                 Self::validate_connections(connections)
             }
@@ -227,6 +178,36 @@ impl ArchiveStorageConfig {
         }
         Ok(())
     }
+
+    fn validate_archive_kek(archive_kek_secret: &ResolvedSecret) -> Result<()> {
+        if archive_kek_secret.as_bytes().len() != 32 {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "Archive KEK secret must be exactly 32 bytes for AES-256-GCM (got {} bytes)",
+                    archive_kek_secret.as_bytes().len()
+                ),
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_aws_secret_access_key(secret_key: &ResolvedSecret) -> Result<()> {
+        if secret_key.as_bytes().is_empty() {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: "AWS secret_access_key cannot be empty".to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_aws_access_key_id(access_key_id: &ResolvedSecret) -> Result<()> {
+        if access_key_id.as_bytes().is_empty() {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: "AWS access_key_id cannot be empty".to_string(),
+            }));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -239,6 +220,7 @@ pub struct PskConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     #[test]
     fn raw_stripe_source() {
@@ -557,7 +539,7 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        let result = config.validate(&danger_zone);
+        let result = config.validate(&danger_zone, &HashMap::new());
         assert!(result.is_err());
         let error_msg = result.err().unwrap().to_string();
         assert!(error_msg.contains("Remote stripe source requires PSK unless danger_zone.allow_unencrypted_connection is enabled"));
@@ -567,8 +549,51 @@ mod tests {
             allow_unencrypted_connection: true,
             ..Default::default()
         };
-        let result_enabled = config.validate(&danger_zone_enabled);
+        let result_enabled = config.validate(&danger_zone_enabled, &HashMap::new());
         assert!(result_enabled.is_ok());
+    }
+
+    fn valid_s3_secrets() -> HashMap<String, ResolvedSecret> {
+        let secret_defs = HashMap::from([
+            (
+                "key".to_string(),
+                crate::config::v2::secrets::SecretDef {
+                    source: crate::config::v2::secrets::SecretSource::Base64(
+                        base64::engine::general_purpose::STANDARD.encode("AKIA1234567890123456"),
+                    ),
+                    kek: None,
+                },
+            ),
+            (
+                "secret".to_string(),
+                crate::config::v2::secrets::SecretDef {
+                    source: crate::config::v2::secrets::SecretSource::Base64(
+                        base64::engine::general_purpose::STANDARD.encode("super-secret-key"),
+                    ),
+                    kek: None,
+                },
+            ),
+            (
+                "kek".to_string(),
+                crate::config::v2::secrets::SecretDef {
+                    source: crate::config::v2::secrets::SecretSource::Base64(
+                        base64::engine::general_purpose::STANDARD
+                            .encode("0123456789abcdef0123456789abcdef"),
+                    ),
+                    kek: None,
+                },
+            ),
+        ]);
+
+        crate::config::v2::secrets::resolve_secrets(
+            &secret_defs,
+            &DangerZone {
+                enabled: true,
+                allow_inline_plaintext_secrets: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
     }
 
     #[test]
@@ -585,7 +610,7 @@ mod tests {
             endpoint: None,
         });
         let danger_zone = DangerZone::default();
-        let result = config.validate(&danger_zone);
+        let result = config.validate(&danger_zone, &valid_s3_secrets());
         assert!(result.is_err());
         let error_msg = result.err().unwrap().to_string();
         assert!(error_msg.contains("Invalid S3 prefix (contains . or .. components)"));
@@ -605,7 +630,7 @@ mod tests {
             endpoint: None,
         });
         let danger_zone = DangerZone::default();
-        let result = config.validate(&danger_zone);
+        let result = config.validate(&danger_zone, &valid_s3_secrets());
         assert!(result.is_err());
         let error_msg = result.err().unwrap().to_string();
         assert!(error_msg.contains("S3 connections must be greater than 0"));

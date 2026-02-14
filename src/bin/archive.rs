@@ -96,17 +96,9 @@ fn run() -> Result<()> {
     )
     .build()?;
 
-    // TODO: Fix archive target config loading.
-    let target_config = v2::Config::load(&args.target_config_path)?;
-    let target_archive = match target_config.stripe_source.as_ref() {
-        Some(v2::stripe_source::StripeSourceConfig::Archive(archive)) => archive,
-        _ => {
-            return Err(ubiblk::ubiblk_error!(InvalidParameter {
-                description: "target config must define stripe_source.type = 'archive'".to_string(),
-            }));
-        }
-    };
-    let store = StripeSourceBuilder::build_archive_store(target_archive, &target_config.secrets)?;
+    let target_config = v2::ArchiveTargetConfig::load(&args.target_config_path)?;
+    let store =
+        StripeSourceBuilder::build_archive_store(&target_config.target, &target_config.secrets)?;
 
     let compression = match args.compression {
         CompressionChoice::None => ArchiveCompressionAlgorithm::None,
@@ -122,7 +114,7 @@ fn run() -> Result<()> {
         store,
         args.encrypt,
         compression,
-        StripeSourceBuilder::build_archive_kek(target_archive, &target_config.secrets)?,
+        StripeSourceBuilder::build_archive_kek(&target_config.target, &target_config.secrets)?,
         4,
     )?;
 

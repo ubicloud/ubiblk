@@ -7,7 +7,7 @@ pub mod tuning;
 use serde::Deserialize;
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::config::v2::secrets::SecretRef;
+use crate::config::v2::{secrets::SecretRef, stripe_source::ArchiveStorageConfig};
 
 pub const MAX_NUM_QUEUES: usize = 63;
 
@@ -24,6 +24,15 @@ pub struct Config {
     pub stripe_source: Option<stripe_source::StripeSourceConfig>,
 
     /// Resolved secret values keyed by name.
+    pub secrets: HashMap<String, secrets::ResolvedSecret>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArchiveTargetConfig {
+    pub target: ArchiveStorageConfig,
+    pub danger_zone: DangerZone,
+
+    // Resolved secret values keyed by name.
     pub secrets: HashMap<String, secrets::ResolvedSecret>,
 }
 

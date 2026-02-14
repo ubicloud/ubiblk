@@ -340,6 +340,6 @@ mod tests {
         let result = parse_config(toml);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("num_queues 0 is out of range (must be 1..=256)"));
+        assert!(err_msg.contains("num_queues 0 is out of range (must be 1..=63)"));
     }
 }

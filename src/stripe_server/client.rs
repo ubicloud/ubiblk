@@ -151,29 +151,27 @@ pub fn connect_to_stripe_server(
     conf: &v2::stripe_source::StripeSourceConfig,
     secrets: &std::collections::HashMap<String, v2::secrets::ResolvedSecret>,
 ) -> Result<StripeServerClient> {
-    let (address, psk) = if let v2::stripe_source::StripeSourceConfig::Remote {
-        address, psk, ..
-    } = conf
-    {
-        let psk = if let Some(psk_config) = psk {
-            let secret = secrets.get(psk_config.psk_secret.id()).ok_or_else(|| {
-                crate::ubiblk_error!(InvalidParameter {
-                    description: format!("PSK secret '{}' not found", psk_config.psk_secret.id()),
-                })
-            })?;
-            Some(PskCredentials::new(
-                psk_config.psk_identity.clone(),
-                secret.as_bytes().to_vec(),
-            )?)
+    let (address, psk) =
+        if let v2::stripe_source::StripeSourceConfig::Remote { address, psk, .. } = conf {
+            let psk = if let Some(psk_config) = psk {
+                let secret = secrets.get(psk_config.secret.id()).ok_or_else(|| {
+                    crate::ubiblk_error!(InvalidParameter {
+                        description: format!("PSK secret '{}' not found", psk_config.secret.id()),
+                    })
+                })?;
+                Some(PskCredentials::new(
+                    psk_config.identity.clone(),
+                    secret.as_bytes().to_vec(),
+                )?)
+            } else {
+                None
+            };
+            (address, psk)
         } else {
-            None
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "stripe_source must be type remote".to_string(),
+            }));
         };
-        (address, psk)
-    } else {
-        return Err(crate::ubiblk_error!(InvalidParameter {
-            description: "stripe_source must be type remote".to_string(),
-        }));
-    };
 
     if psk.is_none() {
         warn!("No PSK credentials configured — connecting to stripe server WITHOUT transport encryption.");

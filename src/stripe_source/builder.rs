@@ -5,23 +5,23 @@ use crate::{
     archive::{ArchiveStore, FileSystemStore, S3Store},
     backends::build_raw_image_device,
     block_device::NullBlockDevice,
-    config::{ArchiveStripeSourceConfig, AwsCredentials, DeviceConfig, StripeSourceConfig},
+    config::v2::{self, stripe_source::ArchiveStorageConfig},
     stripe_server::connect_to_stripe_server,
     utils::s3::{build_s3_client, create_runtime},
-    Result,
+    CipherMethod, KeyEncryptionCipher, Result,
 };
 
 use super::*;
 
 pub struct StripeSourceBuilder {
-    device_config: DeviceConfig,
+    device_config: v2::Config,
     stripe_sector_count: u64,
     has_fetched_all_stripes: bool,
 }
 
 impl StripeSourceBuilder {
     pub fn new(
-        device_config: DeviceConfig,
+        device_config: v2::Config,
         stripe_sector_count: u64,
         has_fetched_all_stripes: bool,
     ) -> Self {
@@ -43,21 +43,24 @@ impl StripeSourceBuilder {
             )?));
         }
 
-        if let Some(stripe_source) = self.device_config.resolved_stripe_source() {
+        if let Some(stripe_source) = self.device_config.stripe_source.as_ref() {
             match stripe_source {
-                StripeSourceConfig::Archive { config } => {
-                    let store = Self::build_archive_store(&config)?;
-                    let stripe_source =
-                        ArchiveStripeSource::new(store, config.archive_kek().clone())?;
+                v2::stripe_source::StripeSourceConfig::Archive(config) => {
+                    let store = Self::build_archive_store(config, &self.device_config.secrets)?;
+                    let stripe_source = ArchiveStripeSource::new(
+                        store,
+                        Self::build_archive_kek(config, &self.device_config.secrets)?,
+                    )?;
                     return Ok(Box::new(stripe_source));
                 }
-                StripeSourceConfig::Remote { config } => {
-                    let client = connect_to_stripe_server(&config)?;
+                v2::stripe_source::StripeSourceConfig::Remote { .. } => {
+                    let client =
+                        connect_to_stripe_server(stripe_source, &self.device_config.secrets)?;
                     let stripe_source =
                         RemoteStripeSource::new(Box::new(client), self.stripe_sector_count)?;
                     return Ok(Box::new(stripe_source));
                 }
-                StripeSourceConfig::Raw { .. } => {}
+                v2::stripe_source::StripeSourceConfig::Raw { .. } => {}
             }
         }
 
@@ -71,55 +74,106 @@ impl StripeSourceBuilder {
     }
 
     fn build_aws_credentials(
-        credentials: &Option<AwsCredentials>,
+        access_key_id: &v2::secrets::SecretRef,
+        secret_access_key: &v2::secrets::SecretRef,
+        secrets: &std::collections::HashMap<String, v2::secrets::ResolvedSecret>,
     ) -> Result<Option<aws_sdk_s3::config::Credentials>> {
-        if let Some(creds) = credentials {
-            let access_key_id = String::from_utf8(creds.access_key_id.clone()).map_err(|e| {
-                crate::ubiblk_error!(InvalidParameter {
-                    description: format!("AWS access_key_id is not valid UTF-8: {e}"),
-                })
-            })?;
-            let secret_access_key =
-                String::from_utf8(creds.secret_access_key.clone()).map_err(|e| {
+        let access_key_id = String::from_utf8(
+            secrets
+                .get(access_key_id.id())
+                .ok_or_else(|| {
                     crate::ubiblk_error!(InvalidParameter {
-                        description: format!("AWS secret_access_key is not valid UTF-8: {e}"),
+                        description: format!(
+                            "AWS access_key_id secret '{}' not found",
+                            access_key_id.id()
+                        ),
                     })
-                })?;
-            Ok(Some(
-                aws_sdk_s3::config::Credentials::builder()
-                    .access_key_id(access_key_id)
-                    .secret_access_key(secret_access_key)
-                    .provider_name("ubiblk_archive")
-                    .build(),
-            ))
-        } else {
-            Ok(None)
-        }
+                })?
+                .as_bytes()
+                .to_vec(),
+        )
+        .map_err(|e| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: format!("AWS access_key_id is not valid UTF-8: {e}"),
+            })
+        })?;
+        let secret_access_key = String::from_utf8(
+            secrets
+                .get(secret_access_key.id())
+                .ok_or_else(|| {
+                    crate::ubiblk_error!(InvalidParameter {
+                        description: format!(
+                            "AWS secret_access_key secret '{}' not found",
+                            secret_access_key.id()
+                        ),
+                    })
+                })?
+                .as_bytes()
+                .to_vec(),
+        )
+        .map_err(|e| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: format!("AWS secret_access_key is not valid UTF-8: {e}"),
+            })
+        })?;
+
+        Ok(Some(
+            aws_sdk_s3::config::Credentials::builder()
+                .access_key_id(access_key_id)
+                .secret_access_key(secret_access_key)
+                .provider_name("ubiblk_archive")
+                .build(),
+        ))
+    }
+
+    pub fn build_archive_kek(
+        config: &ArchiveStorageConfig,
+        secrets: &std::collections::HashMap<String, v2::secrets::ResolvedSecret>,
+    ) -> Result<KeyEncryptionCipher> {
+        let archive_kek = match config {
+            ArchiveStorageConfig::Filesystem { archive_kek, .. } => archive_kek,
+            ArchiveStorageConfig::S3 { archive_kek, .. } => archive_kek,
+        };
+        let key = secrets
+            .get(archive_kek.id())
+            .ok_or_else(|| {
+                crate::ubiblk_error!(InvalidParameter {
+                    description: format!("Archive KEK secret '{}' not found", archive_kek.id()),
+                })
+            })?
+            .as_bytes()
+            .to_vec();
+        Ok(KeyEncryptionCipher {
+            method: CipherMethod::Aes256Gcm,
+            key: Some(key),
+            auth_data: Some(b"ubiblk_archive".to_vec()),
+        })
     }
 
     pub fn build_archive_store(
-        config: &ArchiveStripeSourceConfig,
+        config: &ArchiveStorageConfig,
+        secrets: &std::collections::HashMap<String, v2::secrets::ResolvedSecret>,
     ) -> Result<Box<dyn ArchiveStore>> {
         match config {
-            ArchiveStripeSourceConfig::Filesystem {
-                path,
-                archive_kek: _,
-            } => Ok(Box::new(FileSystemStore::new(path.into())?)),
-            ArchiveStripeSourceConfig::S3 {
+            ArchiveStorageConfig::Filesystem { path, .. } => {
+                Ok(Box::new(FileSystemStore::new(path.into())?))
+            }
+            ArchiveStorageConfig::S3 {
                 bucket,
                 prefix,
                 region,
-                endpoint,
-                profile,
-                credentials,
+                access_key_id,
+                secret_access_key,
                 connections,
-                archive_kek: _,
+                endpoint,
+                ..
             } => {
-                let decrypted_credentials = Self::build_aws_credentials(credentials)?;
+                let decrypted_credentials =
+                    Self::build_aws_credentials(access_key_id, secret_access_key, secrets)?;
                 let runtime = create_runtime()?;
                 let client = build_s3_client(
                     &runtime,
-                    profile.as_deref(),
+                    None,
                     endpoint.as_deref(),
                     region.as_deref(),
                     decrypted_credentials,
@@ -139,32 +193,50 @@ impl StripeSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{RawStripeSourceConfig, RemoteStripeSourceConfig};
-    use crate::KeyEncryptionCipher;
+    use crate::config::v2::stripe_source::StripeSourceConfig;
+    use crate::config::v2::DeviceSection;
     use std::fs::File;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
-    fn create_test_config(remote: Option<String>, path: Option<PathBuf>) -> DeviceConfig {
-        let stripe_source = if let Some(path) = path {
-            Some(StripeSourceConfig::Raw {
-                config: RawStripeSourceConfig { path },
+    fn create_test_config(remote: Option<String>, path: Option<PathBuf>) -> v2::Config {
+        let stripe_source = path
+            .map(|path| StripeSourceConfig::Raw {
+                image_path: path,
+                autofetch: false,
+                copy_on_read: false,
             })
-        } else {
-            remote.map(|remote| StripeSourceConfig::Remote {
-                config: RemoteStripeSourceConfig {
+            .or_else(|| {
+                remote.map(|remote| StripeSourceConfig::Remote {
                     address: remote,
-                    psk_identity: None,
-                    psk_secret: None,
-                    allow_insecure: true,
-                },
-            })
-        };
+                    psk: None,
+                    autofetch: false,
+                })
+            });
 
-        DeviceConfig {
+        v2::Config {
+            device: DeviceSection {
+                data_path: "/tmp/non-existent-disk".into(),
+                metadata_path: None,
+                vhost_socket: None,
+                rpc_socket: None,
+                device_id: "ubiblk".to_string(),
+                track_written: false,
+            },
+            tuning: v2::tuning::TuningSection {
+                queue_size: 64,
+                ..Default::default()
+            },
+            encryption: None,
+            danger_zone: v2::DangerZone {
+                enabled: true,
+                allow_unencrypted_disk: true,
+                allow_inline_plaintext_secrets: true,
+                allow_secret_over_regular_file: true,
+                allow_unencrypted_connection: true,
+            },
             stripe_source,
-            queue_size: 64,
-            ..Default::default()
+            secrets: std::collections::HashMap::new(),
         }
     }
 
@@ -229,64 +301,6 @@ mod tests {
             result.is_err(),
             "Should fail to connect to invalid remote server"
         );
-    }
-
-    #[test]
-    fn test_build_aws_credentials_none() {
-        let result = StripeSourceBuilder::build_aws_credentials(&None).unwrap();
-        assert!(
-            result.is_none(),
-            "Credentials should be None when input is None"
-        );
-    }
-
-    #[test]
-    fn test_build_aws_credentials_no_encryption() {
-        let encrypted_access_key = "test_access_key".as_bytes().to_vec();
-        let encrypted_secret_key = "test_secret_key".as_bytes().to_vec();
-        let aws_creds = AwsCredentials {
-            access_key_id: encrypted_access_key,
-            secret_access_key: encrypted_secret_key,
-        };
-        let result = StripeSourceBuilder::build_aws_credentials(&Some(aws_creds)).unwrap();
-        assert!(
-            result.is_some(),
-            "Credentials should be Some when input is Some"
-        );
-        let creds = result.unwrap();
-        assert_eq!(creds.access_key_id(), "test_access_key");
-        assert_eq!(creds.secret_access_key(), "test_secret_key");
-    }
-
-    #[test]
-    fn test_build_archive_store_filesystem() {
-        let temp_dir = tempdir().unwrap();
-        let store =
-            StripeSourceBuilder::build_archive_store(&ArchiveStripeSourceConfig::Filesystem {
-                path: temp_dir.path().to_str().unwrap().to_string(),
-                archive_kek: KeyEncryptionCipher::default(),
-            });
-        assert!(store.is_ok());
-    }
-
-    #[test]
-    fn test_build_archive_store_s3() {
-        let aws_creds = AwsCredentials {
-            access_key_id: b"test_access_key".to_vec(),
-            secret_access_key: b"test_secret_key".to_vec(),
-        };
-        let config = ArchiveStripeSourceConfig::S3 {
-            bucket: "test-bucket".to_string(),
-            prefix: Some("test-prefix".to_string()),
-            endpoint: Some("http://localhost:9000".to_string()),
-            region: Some("auto".to_string()),
-            profile: Some("profile1".to_string()),
-            credentials: Some(aws_creds),
-            connections: 4,
-            archive_kek: KeyEncryptionCipher::default(),
-        };
-        let store = StripeSourceBuilder::build_archive_store(&config);
-        assert!(store.is_ok());
     }
 
     #[test]

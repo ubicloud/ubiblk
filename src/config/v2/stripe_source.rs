@@ -179,11 +179,16 @@ pub enum ArchiveStorageConfig {
         access_key_id: SecretRef,
         secret_access_key: SecretRef,
         endpoint: Option<String>,
-        connections: Option<usize>,
+        #[serde(default = "default_connections")]
+        connections: usize,
         archive_kek: SecretRef,
         #[serde(default)]
         autofetch: bool,
     },
+}
+
+fn default_connections() -> usize {
+    16
 }
 
 impl ArchiveStorageConfig {
@@ -215,13 +220,11 @@ impl ArchiveStorageConfig {
         Ok(())
     }
 
-    fn validate_connections(connections: &Option<usize>) -> crate::Result<()> {
-        if let Some(c) = connections {
-            if *c == 0 {
-                return Err(crate::ubiblk_error!(InvalidParameter {
-                    description: "S3 connections must be greater than 0".to_string(),
-                }));
-            }
+    fn validate_connections(connections: &usize) -> crate::Result<()> {
+        if *connections == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "S3 connections must be greater than 0".to_string(),
+            }));
         }
         Ok(())
     }
@@ -317,7 +320,7 @@ mod tests {
                 secret_access_key: SecretRef::Ref("aws-secret-access-key".to_string()),
                 archive_kek: SecretRef::Ref("archive-kek".to_string()),
                 autofetch: false,
-                connections: None,
+                connections: 16,
                 endpoint: None,
             })
         );
@@ -345,7 +348,7 @@ mod tests {
                 secret_access_key: SecretRef::Ref("aws-secret-access-key".to_string()),
                 archive_kek: SecretRef::Ref("archive-kek".to_string()),
                 autofetch: false,
-                connections: None,
+                connections: 16,
                 endpoint: None,
             })
         );
@@ -564,7 +567,7 @@ mod tests {
             secret_access_key: SecretRef::Ref("secret".to_string()),
             archive_kek: SecretRef::Ref("kek".to_string()),
             autofetch: false,
-            connections: None,
+            connections: 16,
             endpoint: None,
         });
         let danger_zone = DangerZone::default();
@@ -584,7 +587,7 @@ mod tests {
             secret_access_key: SecretRef::Ref("secret".to_string()),
             archive_kek: SecretRef::Ref("kek".to_string()),
             autofetch: false,
-            connections: Some(0),
+            connections: 0,
             endpoint: None,
         });
         let danger_zone = DangerZone::default();

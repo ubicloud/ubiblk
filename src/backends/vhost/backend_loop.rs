@@ -8,14 +8,14 @@ use vm_memory::GuestMemoryAtomic;
 use super::backend::UbiBlkBackend;
 use crate::{
     backends::common::{run_backend_loop, BackendEnv},
-    config::DeviceConfig,
+    config::v2,
     utils::umask_guard::UmaskGuard,
     Result,
 };
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
 
-pub fn block_backend_loop(config: &DeviceConfig) -> Result<()> {
+pub fn block_backend_loop(config: &v2::Config) -> Result<()> {
     run_backend_loop(config, "vhost-user-blk", true, serve_vhost)
 }
 
@@ -38,11 +38,16 @@ fn serve_vhost(backend_env: &BackendEnv) -> Result<()> {
 
     info!("Daemon is created!");
 
-    let socket = backend_env.config().socket.as_ref().ok_or_else(|| {
-        crate::ubiblk_error!(InvalidParameter {
-            description: "socket must be specified for the vhost backend".to_string(),
-        })
-    })?;
+    let socket = backend_env
+        .config()
+        .device
+        .vhost_socket
+        .as_ref()
+        .ok_or_else(|| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: "socket must be specified for the vhost backend".to_string(),
+            })
+        })?;
 
     let listener = {
         let _um = UmaskGuard::set(0o117); // ensures 0660 max on creation
@@ -86,11 +91,28 @@ mod tests {
         let disk_file = tempfile::NamedTempFile::new().unwrap();
         disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
 
-        let config = DeviceConfig {
-            path: disk_file.path().to_str().unwrap().to_string(),
-            socket: None,
-            queue_size: 128,
-            ..Default::default()
+        let danger_zone = v2::DangerZone {
+            enabled: true,
+            allow_unencrypted_disk: true,
+            allow_inline_plaintext_secrets: true,
+            allow_secret_over_regular_file: true,
+            allow_unencrypted_connection: true,
+        };
+
+        let config = v2::Config {
+            device: v2::DeviceSection {
+                data_path: disk_file.path().to_path_buf(),
+                vhost_socket: None,
+                metadata_path: None,
+                rpc_socket: None,
+                device_id: "test-device".to_string(),
+                track_written: false,
+            },
+            tuning: v2::tuning::TuningSection::default(),
+            encryption: None,
+            danger_zone,
+            stripe_source: None,
+            secrets: std::collections::HashMap::new(),
         };
 
         let err = block_backend_loop(&config).unwrap_err();

@@ -9,7 +9,7 @@ use crate::backends::common::io_tracking::IoTracker;
 use crate::backends::SECTOR_SIZE;
 use crate::block_device::IoChannel;
 use crate::block_device::SharedBuffer;
-use crate::config::DeviceConfig;
+use crate::config::v2;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::Result;
 
@@ -71,12 +71,12 @@ impl UbiBlkBackendThread {
     pub fn new(
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         io_channel: Box<dyn IoChannel>,
-        config: &DeviceConfig,
+        config: &v2::Config,
         alignment: usize,
         io_tracker: IoTracker,
     ) -> Result<Self> {
-        let buf_size = config.seg_count_max * config.seg_size_max;
-        let request_slots: Vec<RequestSlot> = (0..config.queue_size)
+        let buf_size = config.tuning.seg_count_max * config.tuning.seg_size_max;
+        let request_slots: Vec<RequestSlot> = (0..config.tuning.queue_size)
             .map(|_| RequestSlot {
                 used: false,
                 request_type: RequestType::Unsupported(0),
@@ -104,7 +104,7 @@ impl UbiBlkBackendThread {
             mem,
             io_channel,
             request_slots,
-            device_id: config.device_id.clone(),
+            device_id: config.device.device_id.clone(),
             alignment,
             pin_attempted: false,
             ios_pending_signal: false,

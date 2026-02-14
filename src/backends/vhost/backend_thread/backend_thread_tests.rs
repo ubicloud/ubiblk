@@ -26,7 +26,7 @@ mod tests {
             SECTOR_SIZE,
         },
         block_device::{bdev_test::TestBlockDevice, BlockDevice},
-        config::DeviceConfig,
+        config::v2,
         utils::aligned_buffer::BUFFER_ALIGNMENT,
     };
 
@@ -141,18 +141,35 @@ mod tests {
         QueueRequestAddrs { data, status }
     }
 
-    fn default_config(path: &str) -> DeviceConfig {
-        DeviceConfig {
-            path: path.to_string(),
-            socket: Some("sock".to_string()),
-            num_queues: 1,
-            queue_size: 2,
-            seg_size_max: SECTOR_SIZE as u32,
-            seg_count_max: 1,
-            write_through: true,
-            device_id: "ubiblk".to_string(),
-            io_engine: crate::config::IoEngine::IoUring,
-            ..Default::default()
+    fn default_config(path: &str) -> v2::Config {
+        v2::Config {
+            device: v2::DeviceSection {
+                data_path: path.into(),
+                metadata_path: None,
+                vhost_socket: Some("sock".into()),
+                rpc_socket: None,
+                device_id: "ubiblk".to_string(),
+                track_written: false,
+            },
+            tuning: v2::tuning::TuningSection {
+                num_queues: 1,
+                queue_size: 2,
+                seg_size_max: SECTOR_SIZE as u32,
+                seg_count_max: 1,
+                write_through: true,
+                io_engine: v2::tuning::IoEngine::IoUring,
+                ..Default::default()
+            },
+            encryption: None,
+            danger_zone: v2::DangerZone {
+                enabled: true,
+                allow_unencrypted_disk: true,
+                allow_inline_plaintext_secrets: true,
+                allow_secret_over_regular_file: true,
+                allow_unencrypted_connection: true,
+            },
+            stripe_source: None,
+            secrets: std::collections::HashMap::new(),
         }
     }
 

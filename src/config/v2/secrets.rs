@@ -225,10 +225,10 @@ fn load_base64_source(
     encrypted: bool,
     danger_zone: &DangerZone,
 ) -> Result<Vec<u8>> {
-    if !(encrypted || danger_zone.enabled && danger_zone.allow_inline_plaintext_secret) {
+    if !(encrypted || danger_zone.enabled && danger_zone.allow_inline_plaintext_secrets) {
         return Err(ubiblk_error!(InvalidParameter {
             description: format!(
-                "secrets.{name}: base64 secret source requires a KEK unless danger_zone.allow_inline_plaintext_secret is enabled"
+                "secrets.{name}: base64 secret source requires a KEK unless danger_zone.allow_inline_plaintext_secrets is enabled"
             )
         }));
     }
@@ -502,7 +502,7 @@ mod tests {
         )]);
         let danger_zone = DangerZone {
             enabled: true,
-            allow_inline_plaintext_secret: true,
+            allow_inline_plaintext_secrets: true,
             ..DangerZone::default()
         };
         let error = resolve_secrets(&defs, &danger_zone).unwrap_err();

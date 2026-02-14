@@ -5,9 +5,9 @@ use std::{collections::HashMap, io, path::PathBuf};
 
 use ubiblk::{
     block_device::metadata_flags,
-    config::RemoteStripeSourceConfig,
+    config::v2,
     stripe_server::{connect_to_stripe_server, RemoteStripeProvider},
-    KeyEncryptionCipher, Result,
+    Result,
 };
 
 #[derive(Parser)]
@@ -19,14 +19,6 @@ struct Args {
     /// Config YAML file containing remote stripe server connection details.
     #[arg(long = "server-config", value_name = "CONFIG_YAML")]
     server_config_path: PathBuf,
-
-    /// Path to the key encryption key file.
-    #[arg(short = 'k', long = "kek")]
-    kek: Option<PathBuf>,
-
-    /// Allow reading the key encryption key from a regular file.
-    #[arg(long = "allow-regular-file-as-kek", default_value_t = false)]
-    allow_regular_file_as_kek: bool,
 }
 
 fn main() {
@@ -39,20 +31,26 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let Args {
-        server_config_path,
-        kek,
-        allow_regular_file_as_kek,
-    } = Args::parse();
+    let Args { server_config_path } = Args::parse();
 
-    let kek = KeyEncryptionCipher::load(kek.as_ref(), allow_regular_file_as_kek)?;
-    let server_config =
-        RemoteStripeSourceConfig::load_from_file_with_kek(&server_config_path, &kek)?;
-    if server_config.psk_identity.is_none() || server_config.psk_secret.is_none() {
+    // TODO: Fix server config loading.
+    let server_config = v2::Config::load(&server_config_path)?;
+    let remote = match server_config.stripe_source.as_ref() {
+        Some(v2::stripe_source::StripeSourceConfig::Remote { psk, .. }) => psk,
+        _ => {
+            return Err(ubiblk::ubiblk_error!(InvalidParameter {
+                description: "server config must define stripe_source.type = 'remote'".to_string(),
+            }))
+        }
+    };
+    if remote.is_none() {
         warn!("No PSK credentials configured — connecting to stripe server WITHOUT transport encryption.");
     }
 
-    let mut client = connect_to_stripe_server(&server_config)?;
+    let mut client = connect_to_stripe_server(
+        server_config.stripe_source.as_ref().unwrap(),
+        &server_config.secrets,
+    )?;
 
     let metadata = client
         .metadata

@@ -25,26 +25,32 @@ make -C $PROJECT_ROOT populate-base-image
 
 # Generate AES-XTS keys for disk encryption
 echo "Generating AES-XTS keys for disk encryption..."
-raw_key=$(openssl rand 64)
-key1=$(echo -n "$raw_key" | head -c 32 | base64 -w 0)
-key2=$(echo -n "$raw_key" | tail -c 32 | base64 -w 0)
+xts_key=$(openssl rand -base64 64 | tr -d "\n")
 
-CONFIG_FILE="ubiblk-config.yaml"
+CONFIG_FILE="ubiblk-config.toml"
 echo "Creating $CONFIG_FILE..."
 cat > "$CONFIG_FILE" << EOF
-path: "disk.raw"
-image_path: "base.raw"
-metadata_path: "disk.metadata"
-socket: "vhost.sock"
-num_queues: 4
-queue_size: 256
-seg_size_max: 4096
-seg_count_max: 1
-poll_queue_timeout_us: 500
-device_id: "vm123456"
-encryption_key:
-- $key1
-- $key2
+[device]
+data_path = "disk.raw"
+metadata_path = "disk.metadata"
+vhost_socket = "vhost.sock"
+device_id = "vm123456"
+[tuning]
+num_queues = 4
+queue_size = 256
+seg_size_max = 4096
+seg_count_max = 1
+poll_timeout_us = 500
+[stripe_source]
+type = "raw"
+image_path = "base.raw"
+[encryption]
+xts_key.ref = "xts_key"
+[secrets.xts_key]
+source.base64 = "$xts_key"
+[danger_zone]
+enabled = true
+allow_inline_plaintext_secrets = true
 EOF
 
 STRIPE_SECTOR_COUNT_SHIFT=${STRIPE_SECTOR_COUNT_SHIFT:-11}

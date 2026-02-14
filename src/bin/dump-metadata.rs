@@ -75,7 +75,7 @@ fn format_source_info(config: &v2::Config) -> Result<String> {
             "remote (address: {}, psk_identity: {})",
             address,
             psk.as_ref()
-                .map(|psk| psk.psk_identity.as_str())
+                .map(|psk| psk.identity.as_str())
                 .unwrap_or("None")
         )),
         Some(v2::stripe_source::StripeSourceConfig::Archive(config)) => match config {

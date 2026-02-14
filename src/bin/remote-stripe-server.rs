@@ -62,15 +62,15 @@ fn run(args: Args) -> Result<()> {
         .map(|psk| {
             let secret = listen_config
                 .secrets
-                .get(psk.psk_secret.id())
+                .get(psk.secret.id())
                 .ok_or_else(|| {
                     ubiblk::ubiblk_error!(InvalidParameter {
-                        description: format!("PSK secret '{}' not found", psk.psk_secret.id()),
+                        description: format!("PSK secret '{}' not found", psk.secret.id()),
                     })
                 })?
                 .as_bytes()
                 .to_vec();
-            PskCredentials::new(psk.psk_identity.clone(), secret)
+            PskCredentials::new(psk.identity.clone(), secret)
         })
         .transpose()?;
 

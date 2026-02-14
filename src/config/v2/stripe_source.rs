@@ -25,7 +25,6 @@ pub enum StripeSourceConfig {
     Archive(ArchiveStorageConfig),
     Remote {
         address: String,
-        #[serde(flatten)]
         psk: Option<PskConfig>,
         #[serde(default)]
         autofetch: bool,
@@ -80,7 +79,7 @@ impl StripeSourceConfig {
         match self {
             StripeSourceConfig::Remote { psk, .. } => {
                 if let Some(psk) = psk {
-                    validate_psk_secret(self.get_secret(&psk.psk_secret, secret_defs)?)?;
+                    validate_psk_secret(self.get_secret(&psk.secret, secret_defs)?)?;
                 }
             }
             StripeSourceConfig::Archive(ArchiveStorageConfig::Filesystem {
@@ -231,9 +230,10 @@ impl ArchiveStorageConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct PskConfig {
-    pub psk_identity: String,
-    pub psk_secret: SecretRef,
+    pub identity: String,
+    pub secret: SecretRef,
 }
 
 #[cfg(test)]
@@ -359,8 +359,8 @@ mod tests {
         let toml = r#"
             type = "remote"
             address = "1.2.3.4:4555"
-            psk_identity = "client1"
-            psk_secret.ref = "psk-secret"
+            psk.identity = "client1"
+            psk.secret.ref = "psk-secret"
             autofetch = false
         "#;
         let config: StripeSourceConfig = toml::from_str(toml).unwrap();
@@ -369,8 +369,8 @@ mod tests {
             StripeSourceConfig::Remote {
                 address: "1.2.3.4:4555".to_string(),
                 psk: Some(PskConfig {
-                    psk_identity: "client1".to_string(),
-                    psk_secret: SecretRef::Ref("psk-secret".to_string()),
+                    identity: "client1".to_string(),
+                    secret: SecretRef::Ref("psk-secret".to_string()),
                 }),
                 autofetch: false,
             }
@@ -382,8 +382,8 @@ mod tests {
         let toml = r#"
             type = "remote"
             address = "1.2.3.4:4555"
-            psk_identity = "client1"
-            psk_secret.ref = "psk-secret"
+            psk.identity = "client1"
+            psk.secret.ref = "psk-secret"
         "#;
         let config: StripeSourceConfig = toml::from_str(toml).unwrap();
         assert_eq!(
@@ -391,8 +391,8 @@ mod tests {
             StripeSourceConfig::Remote {
                 address: "1.2.3.4:4555".to_string(),
                 psk: Some(PskConfig {
-                    psk_identity: "client1".to_string(),
-                    psk_secret: SecretRef::Ref("psk-secret".to_string()),
+                    identity: "client1".to_string(),
+                    secret: SecretRef::Ref("psk-secret".to_string()),
                 }),
                 autofetch: false,
             }
@@ -476,11 +476,25 @@ mod tests {
     fn remote_missing_address_rejected() {
         let toml = r#"
             type = "remote"
-            psk_identity = "client1"
-            psk_secret.ref = "psk"
+            psk.identity = "client1"
+            psk.secret.ref = "psk"
         "#;
         let result = toml::from_str::<StripeSourceConfig>(toml);
         assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("missing field `address`"));
+    }
+
+    #[test]
+    fn remote_partial_psk_rejected() {
+        let toml_identity_only = r#"
+            type = "remote"
+            address = "127.0.0.1:1234"
+            psk.identity = "client1"
+        "#;
+        let result = toml::from_str::<StripeSourceConfig>(toml_identity_only);
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("missing field `secret`"));
     }
 
     #[test]

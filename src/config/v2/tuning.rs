@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::ubiblk_error;
+use crate::{config::v2::MAX_NUM_QUEUES, ubiblk_error};
 
 /// I/O engine selection.
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
@@ -50,11 +50,11 @@ impl Default for TuningSection {
 
 impl TuningSection {
     pub fn validate(&self) -> crate::Result<()> {
-        if self.num_queues == 0 || self.num_queues > 256 {
+        if self.num_queues == 0 || self.num_queues > MAX_NUM_QUEUES {
             return Err(ubiblk_error!(InvalidParameter {
                 description: format!(
-                    "num_queues {} is out of range (must be 1..=256)",
-                    self.num_queues
+                    "num_queues {} is out of range (must be 1..={})",
+                    self.num_queues, MAX_NUM_QUEUES
                 ),
             }));
         }

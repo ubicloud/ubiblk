@@ -175,9 +175,11 @@ pub enum ArchiveStorageConfig {
         bucket: String,
         #[serde(default)]
         prefix: Option<String>,
-        region: String,
+        region: Option<String>,
         access_key_id: SecretRef,
         secret_access_key: SecretRef,
+        endpoint: Option<String>,
+        connections: Option<usize>,
         archive_kek: SecretRef,
         #[serde(default)]
         autofetch: bool,
@@ -188,7 +190,14 @@ impl ArchiveStorageConfig {
     pub fn validate(&self) -> Result<()> {
         match self {
             ArchiveStorageConfig::Filesystem { .. } => Ok(()),
-            ArchiveStorageConfig::S3 { prefix, .. } => Self::validate_prefix(prefix),
+            ArchiveStorageConfig::S3 {
+                prefix,
+                connections,
+                ..
+            } => {
+                Self::validate_prefix(prefix)?;
+                Self::validate_connections(connections)
+            }
         }
     }
 
@@ -200,6 +209,17 @@ impl ArchiveStorageConfig {
             {
                 return Err(crate::ubiblk_error!(InvalidParameter {
                     description: format!("Invalid S3 prefix (contains . or .. components): {}", p),
+                }));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_connections(connections: &Option<usize>) -> crate::Result<()> {
+        if let Some(c) = connections {
+            if *c == 0 {
+                return Err(crate::ubiblk_error!(InvalidParameter {
+                    description: "S3 connections must be greater than 0".to_string(),
                 }));
             }
         }
@@ -292,11 +312,13 @@ mod tests {
             StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
                 bucket: "encrypted-stripes".to_string(),
                 prefix: Some("v1/".to_string()),
-                region: "eu-west-1".to_string(),
+                region: Some("eu-west-1".to_string()),
                 access_key_id: SecretRef::Ref("aws-access-key-id".to_string()),
                 secret_access_key: SecretRef::Ref("aws-secret-access-key".to_string()),
                 archive_kek: SecretRef::Ref("archive-kek".to_string()),
                 autofetch: false,
+                connections: None,
+                endpoint: None,
             })
         );
     }
@@ -318,11 +340,13 @@ mod tests {
             StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
                 bucket: "encrypted-stripes".to_string(),
                 prefix: None,
-                region: "eu-west-1".to_string(),
+                region: Some("eu-west-1".to_string()),
                 access_key_id: SecretRef::Ref("aws-access-key-id".to_string()),
                 secret_access_key: SecretRef::Ref("aws-secret-access-key".to_string()),
                 archive_kek: SecretRef::Ref("archive-kek".to_string()),
                 autofetch: false,
+                connections: None,
+                endpoint: None,
             })
         );
     }
@@ -535,16 +559,38 @@ mod tests {
         let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
             bucket: "bucket".to_string(),
             prefix: Some("valid/../invalid/.".to_string()),
-            region: "us-east-1".to_string(),
+            region: Some("us-east-1".to_string()),
             access_key_id: SecretRef::Ref("key".to_string()),
             secret_access_key: SecretRef::Ref("secret".to_string()),
             archive_kek: SecretRef::Ref("kek".to_string()),
             autofetch: false,
+            connections: None,
+            endpoint: None,
         });
         let danger_zone = DangerZone::default();
         let result = config.validate(&danger_zone);
         assert!(result.is_err());
         let error_msg = result.err().unwrap().to_string();
         assert!(error_msg.contains("Invalid S3 prefix (contains . or .. components)"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_s3_connections() {
+        let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("key".to_string()),
+            secret_access_key: SecretRef::Ref("secret".to_string()),
+            archive_kek: SecretRef::Ref("kek".to_string()),
+            autofetch: false,
+            connections: Some(0),
+            endpoint: None,
+        });
+        let danger_zone = DangerZone::default();
+        let result = config.validate(&danger_zone);
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("S3 connections must be greater than 0"));
     }
 }

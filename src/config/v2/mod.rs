@@ -9,6 +9,8 @@ use std::{collections::HashMap, path::PathBuf};
 
 use crate::config::v2::secrets::SecretRef;
 
+pub const MAX_NUM_QUEUES: usize = 63;
+
 /// Fully resolved configuration loaded from TOML files.
 ///
 /// All secret references have been resolved to byte values, and all

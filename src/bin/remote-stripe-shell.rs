@@ -1,5 +1,5 @@
 use clap::Parser;
-use log::{error, warn};
+use log::error;
 use rustyline::{error::ReadlineError, DefaultEditor};
 use std::{collections::HashMap, io, path::PathBuf};
 
@@ -16,8 +16,8 @@ use ubiblk::{
     about = "Interactive shell for remote-stripe-server"
 )]
 struct Args {
-    /// Config YAML file containing remote stripe server connection details.
-    #[arg(long = "server-config", value_name = "CONFIG_YAML")]
+    /// Config TOML file containing remote stripe server connection details.
+    #[arg(long = "server-config", value_name = "CONFIG_TOML")]
     server_config_path: PathBuf,
 }
 
@@ -33,24 +33,8 @@ fn main() {
 fn run() -> Result<()> {
     let Args { server_config_path } = Args::parse();
 
-    // TODO: Fix server config loading.
-    let server_config = v2::Config::load(&server_config_path)?;
-    let remote = match server_config.stripe_source.as_ref() {
-        Some(v2::stripe_source::StripeSourceConfig::Remote { psk, .. }) => psk,
-        _ => {
-            return Err(ubiblk::ubiblk_error!(InvalidParameter {
-                description: "server config must define stripe_source.type = 'remote'".to_string(),
-            }))
-        }
-    };
-    if remote.is_none() {
-        warn!("No PSK credentials configured — connecting to stripe server WITHOUT transport encryption.");
-    }
-
-    let mut client = connect_to_stripe_server(
-        server_config.stripe_source.as_ref().unwrap(),
-        &server_config.secrets,
-    )?;
+    let server_config = v2::RemoteStripeServerConfig::load(&server_config_path)?;
+    let mut client = connect_to_stripe_server(&server_config.server, &server_config.secrets)?;
 
     let metadata = client
         .metadata

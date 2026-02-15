@@ -53,9 +53,8 @@ impl StripeSourceBuilder {
                     )?;
                     return Ok(Box::new(stripe_source));
                 }
-                v2::stripe_source::StripeSourceConfig::Remote { .. } => {
-                    let client =
-                        connect_to_stripe_server(stripe_source, &self.device_config.secrets)?;
+                v2::stripe_source::StripeSourceConfig::Remote(config) => {
+                    let client = connect_to_stripe_server(config, &self.device_config.secrets)?;
                     let stripe_source =
                         RemoteStripeSource::new(Box::new(client), self.stripe_sector_count)?;
                     return Ok(Box::new(stripe_source));
@@ -207,10 +206,12 @@ mod tests {
                 copy_on_read: false,
             })
             .or_else(|| {
-                remote.map(|remote| StripeSourceConfig::Remote {
-                    address: remote,
-                    psk: None,
-                    autofetch: false,
+                remote.map(|remote| {
+                    StripeSourceConfig::Remote(v2::stripe_source::RemoteStripeConfig {
+                        address: remote,
+                        psk: None,
+                        autofetch: false,
+                    })
                 })
             });
 

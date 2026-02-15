@@ -1,3 +1,4 @@
+use serde::de::DeserializeOwned;
 use std::{collections::HashMap, path::Path};
 
 use super::{tuning::TuningSection, Config, DeviceSection, EncryptionSection};
@@ -5,91 +6,39 @@ use crate::{
     config::v2::{
         includes::resolve_includes,
         secrets::{parse_secrets, resolve_secrets, ResolvedSecret},
-        stripe_source::{ArchiveStorageConfig, StripeSourceConfig},
-        ArchiveTargetConfig, DangerZone,
+        stripe_source::{ArchiveStorageConfig, RemoteStripeConfig, StripeSourceConfig},
+        ArchiveTargetConfig, DangerZone, RemoteStripeServerConfig,
     },
     ubiblk_error, Result, ResultExt,
 };
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        let content = std::fs::read_to_string(path).context("Loading config failed".to_string())?;
-
-        let root: toml::Value = toml::from_str(&content).map_err(|e| {
-            ubiblk_error!(InvalidParameter {
-                description: format!("Failed to parse TOML config: {}", e),
-            })
-        })?;
-
+        let root = load_root_toml(path, "Loading config failed")?;
         let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
-
         Self::load_from_value(root, config_dir)
     }
 
     fn load_from_value(root: toml::Value, config_dir: &Path) -> Result<Self> {
-        let merged = resolve_includes(root, config_dir)?;
-        Self::validate_top_level_keys(&merged)?;
+        let merged = load_merged(root, config_dir, &Self::allowed_top_level_keys())?;
+        let common = load_common(&merged)?;
 
-        let danger_zone: DangerZone = match merged.get("danger_zone") {
-            Some(value) => value.clone().try_into().map_err(|e| {
-                ubiblk_error!(InvalidParameter {
-                    description: format!("Failed to parse danger_zone section: {}", e),
-                })
-            })?,
-            None => DangerZone::default(),
-        };
+        let device: DeviceSection = parse_required_section(&merged, "device")?;
 
-        let device: DeviceSection = match merged.get("device") {
-            Some(value) => value.clone().try_into().map_err(|e| {
-                ubiblk_error!(InvalidParameter {
-                    description: format!("Failed to parse device section: {}", e),
-                })
-            })?,
-            None => {
-                return Err(ubiblk_error!(InvalidParameter {
-                    description: "Missing required [device] section".to_string(),
-                }))
-            }
-        };
-
-        let tuning: TuningSection = match merged.get("tuning") {
-            Some(value) => value.clone().try_into().map_err(|e| {
-                ubiblk_error!(InvalidParameter {
-                    description: format!("Failed to parse tuning section: {}", e),
-                })
-            })?,
-            None => TuningSection::default(),
-        };
+        let tuning: TuningSection = parse_optional_section(&merged, "tuning")?.unwrap_or_default();
         tuning.validate()?;
 
-        let encryption: Option<EncryptionSection> = match merged.get("encryption") {
-            Some(value) => Some(value.clone().try_into().map_err(|e| {
-                ubiblk_error!(InvalidParameter {
-                    description: format!("Failed to parse encryption section: {}", e),
-                })
-            })?),
-            None => None,
-        };
-
-        let stripe_source: Option<StripeSourceConfig> = match merged.get("stripe_source") {
-            Some(value) => Some(value.clone().try_into().map_err(|e| {
-                ubiblk_error!(InvalidParameter {
-                    description: format!("Failed to parse stripe_source section: {}", e),
-                })
-            })?),
-            None => None,
-        };
-
-        let secret_defs = parse_secrets(&merged)?;
-        let resolved_secrets = resolve_secrets(&secret_defs, &danger_zone)?;
+        let encryption: Option<EncryptionSection> = parse_optional_section(&merged, "encryption")?;
+        let stripe_source: Option<StripeSourceConfig> =
+            parse_optional_section(&merged, "stripe_source")?;
 
         if let Some(stripe_source) = &stripe_source {
-            stripe_source.validate(&danger_zone, &resolved_secrets)?;
+            stripe_source.validate(&common.danger_zone, &common.secrets)?;
         }
 
         if let Some(encryption) = &encryption {
-            encryption.validate_secrets(&resolved_secrets)?;
-        } else if !(danger_zone.enabled && danger_zone.allow_unencrypted_disk) {
+            encryption.validate_secrets(&common.secrets)?;
+        } else if !(common.danger_zone.enabled && common.danger_zone.allow_unencrypted_disk) {
             return Err(ubiblk_error!(InvalidParameter {
                 description: "Disk encryption is required unless danger_zone.allow_unencrypted_disk is enabled".to_string(),
             }));
@@ -99,81 +48,73 @@ impl Config {
             device,
             tuning,
             encryption,
-            danger_zone,
+            danger_zone: common.danger_zone,
             stripe_source,
-            secrets: resolved_secrets,
+            secrets: common.secrets,
         })
     }
 
-    fn validate_top_level_keys(root: &toml::Value) -> Result<()> {
-        let allowed_keys = [
+    fn allowed_top_level_keys() -> [&'static str; 6] {
+        [
             "device",
             "tuning",
             "encryption",
             "danger_zone",
             "stripe_source",
             "secrets",
-        ];
-        validate_top_level_keys(root, &allowed_keys)
+        ]
     }
 }
 
 impl ArchiveTargetConfig {
     pub fn load(path: &Path) -> Result<Self> {
-        let content =
-            std::fs::read_to_string(path).context("Loading target config failed".to_string())?;
-
-        let root: toml::Value = toml::from_str(&content).map_err(|e| {
-            ubiblk_error!(InvalidParameter {
-                description: format!("Failed to parse TOML config: {}", e),
-            })
-        })?;
-
+        let root = load_root_toml(path, "Loading target config failed")?;
         let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
-
         Self::load_from_value(root, config_dir)
     }
 
     fn load_from_value(value: toml::Value, config_dir: &Path) -> Result<Self> {
-        let merged = resolve_includes(value, config_dir)?;
-        Self::validate_top_level_keys(&merged)?;
+        let merged = load_merged(value, config_dir, &Self::allowed_top_level_keys())?;
+        let common = load_common(&merged)?;
 
-        let danger_zone: DangerZone = match merged.get("danger_zone") {
-            Some(value) => value.clone().try_into().map_err(|e| {
-                ubiblk_error!(InvalidParameter {
-                    description: format!("Failed to parse danger_zone section: {}", e),
-                })
-            })?,
-            None => DangerZone::default(),
-        };
-
-        let target: ArchiveStorageConfig = match merged.get("target") {
-            Some(value) => value.clone().try_into().map_err(|e| {
-                ubiblk_error!(InvalidParameter {
-                    description: format!("Failed to parse target section: {}", e),
-                })
-            })?,
-            None => {
-                return Err(ubiblk_error!(InvalidParameter {
-                    description: "Missing required [target] section".to_string(),
-                }))
-            }
-        };
-
-        let secret_defs = parse_secrets(&merged)?;
-        let resolved_secrets = resolve_secrets(&secret_defs, &danger_zone)?;
-        target.validate(&resolved_secrets)?;
+        let target: ArchiveStorageConfig = parse_required_section(&merged, "target")?;
+        target.validate(&common.secrets)?;
 
         Ok(ArchiveTargetConfig {
             target,
-            danger_zone,
-            secrets: resolved_secrets,
+            danger_zone: common.danger_zone,
+            secrets: common.secrets,
         })
     }
 
-    fn validate_top_level_keys(root: &toml::Value) -> Result<()> {
-        let allowed_keys = ["target", "danger_zone", "secrets"];
-        validate_top_level_keys(root, &allowed_keys)
+    fn allowed_top_level_keys() -> [&'static str; 3] {
+        ["target", "danger_zone", "secrets"]
+    }
+}
+
+impl RemoteStripeServerConfig {
+    pub fn load(path: &Path) -> Result<Self> {
+        let root = load_root_toml(path, "Loading listen config failed")?;
+        let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::load_from_value(root, config_dir)
+    }
+
+    fn load_from_value(value: toml::Value, config_dir: &Path) -> Result<Self> {
+        let merged = load_merged(value, config_dir, &Self::allowed_top_level_keys())?;
+        let common = load_common(&merged)?;
+
+        let server: RemoteStripeConfig = parse_required_section(&merged, "server")?;
+        server.validate(&common.danger_zone, &common.secrets)?;
+
+        Ok(RemoteStripeServerConfig {
+            server,
+            danger_zone: common.danger_zone,
+            secrets: common.secrets,
+        })
+    }
+
+    fn allowed_top_level_keys() -> [&'static str; 3] {
+        ["server", "danger_zone", "secrets"]
     }
 }
 
@@ -199,6 +140,65 @@ impl EncryptionSection {
         }
         Ok(())
     }
+}
+
+struct CommonResolvedConfig {
+    danger_zone: DangerZone,
+    secrets: HashMap<String, ResolvedSecret>,
+}
+
+fn load_root_toml(path: &Path, error_context: &str) -> Result<toml::Value> {
+    let content = std::fs::read_to_string(path).context(error_context.to_string())?;
+    toml::from_str(&content).map_err(|e| {
+        ubiblk_error!(InvalidParameter {
+            description: format!("Failed to parse TOML config: {}", e),
+        })
+    })
+}
+
+fn load_merged(root: toml::Value, config_dir: &Path, allowed_keys: &[&str]) -> Result<toml::Value> {
+    let merged = resolve_includes(root, config_dir)?;
+    validate_top_level_keys(&merged, allowed_keys)?;
+    Ok(merged)
+}
+
+fn load_common(merged: &toml::Value) -> Result<CommonResolvedConfig> {
+    let danger_zone = parse_optional_section(merged, "danger_zone")?.unwrap_or_default();
+    let secret_defs = parse_secrets(merged)?;
+    let secrets = resolve_secrets(&secret_defs, &danger_zone)?;
+    Ok(CommonResolvedConfig {
+        danger_zone,
+        secrets,
+    })
+}
+
+fn parse_required_section<T: DeserializeOwned>(merged: &toml::Value, key: &str) -> Result<T> {
+    let value = merged.get(key).ok_or_else(|| {
+        ubiblk_error!(InvalidParameter {
+            description: format!("Missing required [{}] section", key),
+        })
+    })?;
+    value.clone().try_into().map_err(|e| {
+        ubiblk_error!(InvalidParameter {
+            description: format!("Failed to parse {} section: {}", key, e),
+        })
+    })
+}
+
+fn parse_optional_section<T: DeserializeOwned>(
+    merged: &toml::Value,
+    key: &str,
+) -> Result<Option<T>> {
+    merged
+        .get(key)
+        .map(|value| {
+            value.clone().try_into().map_err(|e| {
+                ubiblk_error!(InvalidParameter {
+                    description: format!("Failed to parse {} section: {}", key, e),
+                })
+            })
+        })
+        .transpose()
 }
 
 fn validate_top_level_keys(root: &toml::Value, allowed_keys: &[&str]) -> Result<()> {
@@ -382,7 +382,6 @@ mod tests {
             allow_unencrypted_disk = true
         "#;
         let result = parse_config(toml);
-        println!("result: {:?}", result);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Unknown top-level config key 'unknown_section'"));
@@ -427,5 +426,43 @@ source.env = "LOADS_VALID_TARGET_CONFIG_ARCHIVE_KEK"
             path, archive_kek, ..
         } if path == Path::new("/backups/archive1") && archive_kek.id() == "my_archive_kek"));
         assert_eq!(config.secrets.len(), 1);
+    }
+
+    #[test]
+    fn loads_valid_remote_stripe_server_config() {
+        std::env::set_var(
+            "LOADS_VALID_REMOTE_SERVER_CONFIG_PSK",
+            "0123456789abcdef0123456789abcdef",
+        );
+
+        let toml = r#"
+[server]
+address = "127.0.0.1:3322"
+psk.identity = "node-a"
+psk.secret.ref = "my_psk"
+[secrets.my_psk]
+source.env = "LOADS_VALID_REMOTE_SERVER_CONFIG_PSK"
+        "#;
+
+        let value: toml::Value = toml::from_str(toml).unwrap();
+        let config = RemoteStripeServerConfig::load_from_value(value, Path::new("."))
+            .expect("remote stripe server config should load");
+
+        assert_eq!(config.server.address, "127.0.0.1:3322");
+        assert_eq!(config.server.psk.as_ref().unwrap().identity, "node-a");
+        assert_eq!(config.secrets.len(), 1);
+    }
+
+    #[test]
+    fn rejects_remote_stripe_server_config_without_psk() {
+        let toml = r#"
+[server]
+address = "127.0.0.1:3322"
+        "#;
+        let value: toml::Value = toml::from_str(toml).unwrap();
+        let result = RemoteStripeServerConfig::load_from_value(value, Path::new("."));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("Remote stripe source requires PSK unless danger_zone.allow_unencrypted_connection is enabled"));
     }
 }

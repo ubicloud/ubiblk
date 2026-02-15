@@ -121,7 +121,7 @@ allow_unencrypted_connection = true
 |------|---------|---------------------|
 | `enabled` | false | Master switch — all other flags are ignored unless this is true |
 | `allow_unencrypted_disk` | false | Allow omitting the `[encryption]` section |
-| `allow_inline_plaintext_secrets` | false | Allow `source.base64` secrets without a KEK |
+| `allow_inline_plaintext_secrets` | false | Allow `source.inline` secrets without a KEK |
 | `allow_secret_over_regular_file` | false | Allow reading `source.file` secrets from regular files (not just pipes) |
 | `allow_unencrypted_connection` | false | Allow remote connections without PSK |
 
@@ -135,7 +135,8 @@ Secrets are declared as sub-tables under `[secrets]`. Each secret has a
 source.file = "/run/secrets/kek.pipe"
 
 [secrets.xts-key]
-source.base64 = "TmVjZXNzYXJ5IGJ5dGVzIGhlcmU..."
+source.inline = "TmVjZXNzYXJ5IGJ5dGVzIGhlcmU..."
+encoding = "base64"
 kek.ref = "config-kek"
 ```
 
@@ -145,11 +146,20 @@ Each source is specified as a sub-key of `source`:
 
 | Sub-key | Format | Description |
 |---------|--------|-------------|
-| `source.file` | path | Read bytes from a file. Regular files are rejected unless `allow_secret_over_regular_file` is set; prefer named pipes. |
-| `source.base64` | string | Decode base64 data. Without a `kek`, requires `allow_inline_plaintext_secrets`. |
-| `source.env` | string | Read from an environment variable (as UTF-8 bytes). |
+| `source.file` | path | Read secret from a file. Regular files are rejected unless `allow_secret_over_regular_file` is set; prefer named pipes. |
+| `source.inline` | string | Inline secret data. Without a `kek`, requires `allow_inline_plaintext_secrets`. |
+| `source.env` | string | Read secret from an environment variable. |
 
-Secret data must not exceed 8192 bytes.
+Secret data must not exceed 8192 bytes after decoding.
+
+### Secret encoding
+
+Each secret can set an `encoding` field (defaults to `plaintext` when omitted):
+
+| Value | Description |
+|-------|-------------|
+| `plaintext` | Use the loaded bytes as-is. |
+| `base64` | Decode the loaded bytes as base64 to obtain the final secret bytes. |
 
 ### KEK encryption
 
@@ -304,7 +314,8 @@ xts_key.ref = "xts-key"
 source.file = "/run/secrets/kek.pipe"
 
 [secrets.xts-key]
-source.base64 = "<AES-256-GCM encrypted XTS key>"
+source.inline = "<AES-256-GCM encrypted XTS key>"
+encoding = "base64"
 kek.ref = "config-kek"
 ```
 
@@ -330,11 +341,13 @@ xts_key.ref = "xts-key"
 source.file = "/run/secrets/kek.pipe"
 
 [secrets.xts-key]
-source.base64 = "<encrypted XTS key>"
+source.inline = "<encrypted XTS key>"
+encoding = "base64"
 kek.ref = "config-kek"
 
 [secrets.archive-kek]
-source.base64 = "<encrypted archive KEK>"
+source.inline = "<encrypted archive KEK>"
+encoding = "base64"
 kek.ref = "config-kek"
 
 [secrets.aws-access-key]

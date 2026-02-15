@@ -234,8 +234,10 @@ pub struct PskConfig {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::v2::secrets::{resolve_secrets, SecretDef, SecretEncoding, SecretSource};
+
     use super::*;
-    use base64::Engine;
+    use base64::{engine::general_purpose::STANDARD as b64_engine, Engine};
 
     #[test]
     fn raw_stripe_source() {
@@ -572,35 +574,35 @@ mod tests {
         let secret_defs = HashMap::from([
             (
                 "key".to_string(),
-                crate::config::v2::secrets::SecretDef {
-                    source: crate::config::v2::secrets::SecretSource::Base64(
-                        base64::engine::general_purpose::STANDARD.encode("AKIA1234567890123456"),
+                SecretDef {
+                    source: SecretSource::Inline(
+                        b64_engine.encode("AKIA1234567890123456".as_bytes()),
                     ),
                     kek: None,
+                    encoding: SecretEncoding::Base64,
                 },
             ),
             (
                 "secret".to_string(),
-                crate::config::v2::secrets::SecretDef {
-                    source: crate::config::v2::secrets::SecretSource::Base64(
-                        base64::engine::general_purpose::STANDARD.encode("super-secret-key"),
-                    ),
+                SecretDef {
+                    source: SecretSource::Inline(b64_engine.encode("super-secret-key")),
                     kek: None,
+                    encoding: SecretEncoding::Base64,
                 },
             ),
             (
                 "kek".to_string(),
-                crate::config::v2::secrets::SecretDef {
-                    source: crate::config::v2::secrets::SecretSource::Base64(
-                        base64::engine::general_purpose::STANDARD
-                            .encode("0123456789abcdef0123456789abcdef"),
+                SecretDef {
+                    source: SecretSource::Inline(
+                        b64_engine.encode("0123456789abcdef0123456789abcdef"),
                     ),
                     kek: None,
+                    encoding: SecretEncoding::Base64,
                 },
             ),
         ]);
 
-        crate::config::v2::secrets::resolve_secrets(
+        resolve_secrets(
             &secret_defs,
             &DangerZone {
                 enabled: true,

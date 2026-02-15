@@ -19,8 +19,16 @@ const MAX_SECRET_BYTES: usize = 8192;
 #[serde(rename_all = "snake_case")]
 pub enum SecretSource {
     File(PathBuf),
-    Base64(String),
+    Inline(String),
     Env(String),
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretEncoding {
+    #[default]
+    Plaintext,
+    Base64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -41,8 +49,11 @@ impl SecretRef {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SecretDef {
-    /// Source descriptor from TOML, using one of `source.file`, `source.base64`, or `source.env`.
+    /// Source descriptor from TOML, using one of `source.file`, `source.inline`, or `source.env`.
     pub source: SecretSource,
+    /// Encoding of the secret data. Defaults to plaintext when omitted.
+    #[serde(default)]
+    pub encoding: SecretEncoding,
     /// Optional KEK reference from the `kek.ref` TOML field.
     pub kek: Option<SecretRef>,
 }
@@ -149,8 +160,11 @@ pub fn maybe_resolve_secret(
         let Some(kek_secret) = resolved.get(kek_ref) else {
             return Ok(None);
         };
+        let ciphertext_encoded = load_source(name, &def.source, true, danger_zone)?;
+        let ciphertext = decode(&ciphertext_encoded, &def.encoding)?;
+        validate_secret_length(name, &ciphertext)?;
+
         let kek_bytes = kek_secret.as_bytes();
-        let ciphertext = load_source(name, &def.source, true, danger_zone)?;
         // Secret name is used as AAD to bind ciphertext to its config slot.
         let decrypted = aes256gcm_decrypt(kek_bytes, name.as_bytes(), &ciphertext).context(
             format!("secrets.{name}: failed to decrypt using KEK '{kek_ref}'"),
@@ -158,7 +172,10 @@ pub fn maybe_resolve_secret(
         Ok(Some(ResolvedSecret { bytes: decrypted }))
     } else {
         // No KEK; just load the source directly.
-        let bytes = load_source(name, &def.source, false, danger_zone)?;
+        let bytes_encoded = load_source(name, &def.source, false, danger_zone)?;
+        let bytes = decode(&bytes_encoded, &def.encoding)
+            .context(format!("secrets.{name}: failed to decode"))?;
+        validate_secret_length(name, &bytes)?;
         Ok(Some(ResolvedSecret { bytes }))
     }
 }
@@ -171,12 +188,23 @@ fn load_source(
 ) -> Result<Vec<u8>> {
     match source {
         SecretSource::File(path) => load_file_source(name, path, danger_zone),
-        SecretSource::Base64(data) => load_base64_source(name, data, encrypted, danger_zone),
+        SecretSource::Inline(data) => load_inline_source(name, data, encrypted, danger_zone),
         SecretSource::Env(var) => load_env_source(name, var),
     }
 }
 
-fn validate_secret_bytes(name: &str, bytes: &[u8]) -> Result<()> {
+fn decode(bytes: &[u8], encoding: &SecretEncoding) -> Result<Vec<u8>> {
+    match encoding {
+        SecretEncoding::Plaintext => Ok(bytes.to_vec()),
+        SecretEncoding::Base64 => b64_engine.decode(bytes).map_err(|e| {
+            ubiblk_error!(InvalidParameter {
+                description: format!("invalid base64: {e}")
+            })
+        }),
+    }
+}
+
+fn validate_secret_length(name: &str, bytes: &[u8]) -> Result<()> {
     if bytes.len() > MAX_SECRET_BYTES {
         return Err(ubiblk_error!(InvalidParameter {
             description: format!(
@@ -209,17 +237,17 @@ fn load_file_source(name: &str, path: &Path, danger_zone: &DangerZone) -> Result
         }));
     }
 
+    let max_bytes = MAX_SECRET_BYTES.div_ceil(3) * 4 + 4; // Account for base64 expansion and potential padding
+
     let mut buf = Vec::new();
-    file.take((MAX_SECRET_BYTES + 1) as u64)
+    file.take((max_bytes + 1) as u64)
         .read_to_end(&mut buf)
         .context(format!("secrets.{name}: failed to read '{path:?}'"))?;
-
-    validate_secret_bytes(name, &buf)?;
 
     Ok(buf)
 }
 
-fn load_base64_source(
+fn load_inline_source(
     name: &str,
     data: &str,
     encrypted: bool,
@@ -228,16 +256,11 @@ fn load_base64_source(
     if !(encrypted || danger_zone.enabled && danger_zone.allow_inline_plaintext_secrets) {
         return Err(ubiblk_error!(InvalidParameter {
             description: format!(
-                "secrets.{name}: base64 secret source requires a KEK unless danger_zone.allow_inline_plaintext_secrets is enabled"
+                "secrets.{name}: inline secret source requires a KEK unless danger_zone.allow_inline_plaintext_secrets is enabled"
             )
         }));
     }
-    let bytes = b64_engine.decode(data).map_err(|e| {
-        ubiblk_error!(InvalidParameter {
-            description: format!("secrets.{name}: invalid base64: {e}")
-        })
-    })?;
-    validate_secret_bytes(name, &bytes)?;
+    let bytes = data.as_bytes().to_vec();
     Ok(bytes)
 }
 
@@ -249,7 +272,6 @@ fn load_env_source(name: &str, var: &str) -> Result<Vec<u8>> {
             )
         })
     })?;
-    validate_secret_bytes(name, value.as_bytes())?;
     Ok(value.into_bytes())
 }
 
@@ -300,7 +322,8 @@ mod tests {
         let value = toml::from_str::<toml::Value>(
             r#"
             [secrets.kek]
-            source.base64 = 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
+            source.inline = 'MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY='
+            encoding = 'base64'
             [secrets.api]
             source.env = 'API_TOKEN'
             kek.ref = 'kek'
@@ -314,10 +337,11 @@ mod tests {
         assert_eq!(
             parsed["kek"],
             SecretDef {
-                source: SecretSource::Base64(
+                source: SecretSource::Inline(
                     "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=".to_string()
                 ),
                 kek: None,
+                encoding: SecretEncoding::Base64,
             }
         );
         assert_eq!(
@@ -325,8 +349,45 @@ mod tests {
             SecretDef {
                 source: SecretSource::Env("API_TOKEN".to_string()),
                 kek: Some(SecretRef::Ref("kek".to_string())),
+                encoding: SecretEncoding::Plaintext,
             }
         );
+    }
+
+    #[test]
+    fn parse_secrets_defaults_to_plaintext_encoding_when_omitted() {
+        let value = toml::from_str::<toml::Value>(
+            r#"
+            [secrets.api]
+            source.env = 'API_TOKEN'
+        "#,
+        )
+        .unwrap();
+
+        let parsed = parse_secrets(&value).unwrap();
+
+        assert_eq!(parsed["api"].encoding, SecretEncoding::Plaintext);
+    }
+
+    #[test]
+    fn resolve_secrets_rejects_invalid_base64_encoding() {
+        let value = toml::from_str::<toml::Value>(
+            r#"
+            [secrets.bad_b64]
+            source.inline = 'not-valid-base64!!!'
+            encoding = 'base64'
+        "#,
+        )
+        .unwrap();
+        let danger_zone = DangerZone {
+            enabled: true,
+            allow_inline_plaintext_secrets: true,
+            ..DangerZone::default()
+        };
+        let result = resolve_secrets(&parse_secrets(&value).unwrap(), &danger_zone);
+        assert!(result.is_err());
+        let error_message = result.unwrap_err().to_string();
+        assert!(error_message.contains("invalid base64"));
     }
 
     #[test]
@@ -365,15 +426,16 @@ mod tests {
         let defs = HashMap::from([(
             "plain".to_string(),
             SecretDef {
-                source: SecretSource::Base64("aGVsbG8=".to_string()),
+                source: SecretSource::Inline("aGVsbG8=".to_string()),
                 kek: None,
+                encoding: SecretEncoding::Base64,
             },
         )]);
 
         let result = resolve_secrets(&defs, &default_danger_zone());
         assert!(result.is_err());
         let error_message = format!("{}", result.unwrap_err());
-        assert!(error_message.contains("base64 secret source requires a KEK"));
+        assert!(error_message.contains("inline secret source requires a KEK"));
     }
 
     #[test]
@@ -386,6 +448,7 @@ mod tests {
             SecretDef {
                 source: SecretSource::File(file.path().to_path_buf()),
                 kek: None,
+                encoding: SecretEncoding::Plaintext,
             },
         )]);
 
@@ -405,6 +468,7 @@ mod tests {
             SecretDef {
                 source: SecretSource::File(file.path().to_path_buf()),
                 kek: None,
+                encoding: SecretEncoding::Plaintext,
             },
         )]);
 
@@ -445,13 +509,15 @@ mod tests {
                 SecretDef {
                     source: SecretSource::File(fifo_path_for_config),
                     kek: None,
+                    encoding: SecretEncoding::Plaintext,
                 },
             ),
             (
                 secret_name.to_string(),
                 SecretDef {
-                    source: SecretSource::Base64(b64_engine.encode(encrypted)),
+                    source: SecretSource::Inline(b64_engine.encode(encrypted)),
                     kek: Some(SecretRef::Ref("kek".to_string())),
+                    encoding: SecretEncoding::Base64,
                 },
             ),
         ]);
@@ -469,15 +535,17 @@ mod tests {
             (
                 "a".to_string(),
                 SecretDef {
-                    source: SecretSource::Base64("YQ==".to_string()),
+                    source: SecretSource::Inline("YQ==".to_string()),
                     kek: Some(SecretRef::Ref("b".to_string())),
+                    encoding: SecretEncoding::Base64,
                 },
             ),
             (
                 "b".to_string(),
                 SecretDef {
-                    source: SecretSource::Base64("Yg==".to_string()),
+                    source: SecretSource::Inline("Yg==".to_string()),
                     kek: Some(SecretRef::Ref("a".to_string())),
+                    encoding: SecretEncoding::Base64,
                 },
             ),
         ]);
@@ -493,8 +561,9 @@ mod tests {
         let defs = HashMap::from([(
             "api".to_string(),
             SecretDef {
-                source: SecretSource::Base64("aGVsbG8=".to_string()),
+                source: SecretSource::Inline("aGVsbG8=".to_string()),
                 kek: Some(SecretRef::Ref("missing".to_string())),
+                encoding: SecretEncoding::Base64,
             },
         )]);
 
@@ -511,8 +580,9 @@ mod tests {
         let defs = HashMap::from([(
             "big".to_string(),
             SecretDef {
-                source: SecretSource::Base64(large_data_b64),
+                source: SecretSource::Inline(large_data_b64),
                 kek: None,
+                encoding: SecretEncoding::Base64,
             },
         )]);
         let danger_zone = DangerZone {
@@ -530,8 +600,9 @@ mod tests {
         let defs = HashMap::from([(
             "self".to_string(),
             SecretDef {
-                source: SecretSource::Base64("aGVsbG8=".to_string()),
+                source: SecretSource::Inline("aGVsbG8=".to_string()),
                 kek: Some(SecretRef::Ref("self".to_string())),
+                encoding: SecretEncoding::Base64,
             },
         )]);
         let error = resolve_secrets(&defs, &default_danger_zone()).unwrap_err();

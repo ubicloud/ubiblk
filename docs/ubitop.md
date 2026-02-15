@@ -9,14 +9,14 @@ Real-time per-queue throughput monitor for ubiblk devices.
 
 ## Usage
 
-```
-scripts/ubitop --socket /path/to/rpc.sock [--interval 1]
+```bash
+scripts/ubitop --socket <SOCKET_PATH> [--interval <SECONDS>]
 ```
 
-| Flag | Description |
-|------|-------------|
-| `--socket PATH` | Path to the ubiblk RPC Unix socket (required) |
-| `--interval SECS` | Poll interval in seconds (default: 1) |
+| Flag | Short | Required | Description |
+|------|-------|----------|-------------|
+| `--socket` | — | yes | Path to the ubiblk RPC Unix socket |
+| `--interval` | — | no | Poll interval in seconds (default: 1) |
 
 ## Enabling the RPC socket
 

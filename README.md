@@ -42,15 +42,15 @@ cargo test
 The `vhost-backend` binary launches a vhost-user-blk backend based on a TOML
 configuration file.
 
-**Usage:**
 ```bash
 vhost-backend --config <CONFIG_TOML>
 ```
 
-**Arguments:**
-- `-f, --config <CONFIG_TOML>`  Path to the backend TOML configuration file.
+| Flag | Short | Required | Description |
+|------|-------|----------|-------------|
+| `--config` | `-f` | yes | Path to the backend TOML configuration file |
 
-**Examples:**
+**Example:**
 ```bash
 vhost-backend --config config.toml
 ```
@@ -62,10 +62,14 @@ The `ublk-backend` binary exposes the backend through the Linux ublk driver.
 **Note:** Treat this backend as experimental. It hasn't been tested as
 extensively as `vhost-backend`.
 
-**Usage:**
 ```bash
 ublk-backend --config <CONFIG_TOML> [--device-symlink <PATH>]
 ```
+
+| Flag | Short | Required | Description |
+|------|-------|----------|-------------|
+| `--config` | `-f` | yes | Path to the backend TOML configuration file |
+| `--device-symlink` | — | no | Create a symlink pointing to the created `/dev/ublkbN` device |
 
 **Notes:**
 - Requires a Linux kernel with `CONFIG_BLK_DEV_UBLK` enabled and access to
@@ -172,36 +176,46 @@ byte per stripe containing fetched, written, and has-source flags. This file
 is loaded by the backend on startup.
 
 ```bash
-init-metadata --config <CONFIG_TOML> \
-             [--stripe-sector-count-shift <SHIFT>]
+init-metadata --config <CONFIG_TOML> [--stripe-sector-count-shift <SHIFT>]
 ```
 
-- `-f, --config <CONFIG_TOML>`: Path to the backend configuration file.
-- `-s, --stripe-sector-count-shift`: (Optional) Stripe size as a power of two
-  sectors (default: `11`).
-
+| Flag | Short | Required | Description |
+|------|-------|----------|-------------|
+| `--config` | `-f` | yes | Path to the backend configuration file |
+| `--stripe-sector-count-shift` | `-s` | no | Stripe size as a power of two sectors (default: 11) |
 
 ## Developer Tools
 
 #### dump-metadata
 
 `dump-metadata` inspects the metadata file referenced by a backend configuration
-and prints a summary of fetched, written, and has-source stripes. Provide the same configuration file that the backend uses.
+and prints a summary of fetched, written, and has-source stripes. Provide the
+same configuration file that the backend uses.
 
 ```bash
-dump-metadata --config config.toml
+dump-metadata --config <CONFIG_TOML>
 ```
+
+| Flag | Short | Required | Description |
+|------|-------|----------|-------------|
+| `--config` | `-f` | yes | Path to the backend configuration file |
 
 #### xts
 
 `xts` encodes or decodes AES-XTS encrypted data files using the same
-configuration format as the backend. The tool reads keys from the configuration file and processes sectors from an input file into an
-output file.
+configuration format as the backend. The tool reads keys from the configuration
+file and processes sectors from an input file into an output file.
 
 ```bash
-xts --config config.toml \
-    [--start <SECTOR>] [--len <SECTORS>] [--action encode|decode] <INPUT> <OUTPUT>
+xts --config <CONFIG_TOML> [options] <INPUT> <OUTPUT>
 ```
+
+| Flag | Short | Required | Description |
+|------|-------|----------|-------------|
+| `--config` | `-f` | yes | Path to the configuration TOML file |
+| `--start` | — | no | Starting sector offset |
+| `--len` | — | no | Number of sectors to process |
+| `--action` | — | no | `encode` or `decode` (default: `decode`) |
 
 ## License
 

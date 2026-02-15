@@ -32,55 +32,27 @@ cargo test
 
 ## Documentation
 
+- [Config format](docs/config.md)
 - [Remote stripe server, shell, and protocol](docs/remote-stripe.md)
 - [Archive binary and archive format](docs/archive.md)
 - [ubitop: realtime throughput monitoring tool](docs/ubitop.md)
 
-## Security Notes
-
-In all tools, it is recommended to provide `<KEK_PATH>` via a named pipe or
-`/dev/stdin`. Regular files are disallowed by default to prevent accidental
-exposure of KEK material. Use `--allow-regular-file-as-kek` to explicitly permit
-reading the KEK from a regular file.
-
 ## vhost-backend
 
-The `vhost-backend` binary launches a vhost-user-blk backend based on a YAML
+The `vhost-backend` binary launches a vhost-user-blk backend based on a TOML
 configuration file.
 
 **Usage:**
 ```bash
-vhost-backend --config <CONFIG_YAML> [--kek <KEK_PATH>] [--allow-regular-file-as-kek]
+vhost-backend --config <CONFIG_TOML>
 ```
 
 **Arguments:**
-- `-f, --config <CONFIG_YAML>`  Path to the backend YAML configuration file.
-- `-k, --kek <KEK_PATH>`   (Optional) Path to the key encryption file for encrypted block device support.
-- `--allow-regular-file-as-kek`  (Optional) Allow reading the KEK from a regular file.
-
-**Configuration:**
-The configuration YAML must define:
-- `path`: Base device path.
-- `stripe_source`: (Optional) Stripe source configuration (local raw image, remote server, or archive).
-- `image_path`: (Optional, deprecated) Image path for lazy stripe fetch.
-- `metadata_path`: Metadata file path. **Required** whenever `stripe_source` or legacy `image_path` is set.
-- `rpc_socket_path`: (Optional) Path to a Unix domain socket for runtime RPC commands.
-- `socket`: (Optional) vhost-user socket path (required when running `vhost-backend`).
-- `num_queues`, `queue_size`, `seg_size_max`, `seg_count_max`, `poll_queue_timeout_us` (optional): Virtqueue and I/O tuning parameters.
-- `copy_on_read`: (Optional) Copy stripes from the stripe source only when accessed.
-  **Required** to be set to true for `remote` and `archive` stripe sources.
-- `track_written`: (Optional) Track stripes that have been written.
-- `write_through`: (Optional) Enable the write-through mode.
-- `autofetch`: (Optional) Automatically fetch stripes from the stripe source in the background.
-- `encryption_key`: (Optional) AES-XTS keys provided as base64 encoded strings.
-- `device_id`: (Optional) Identifier returned to the guest for GET_ID.
-- `io_engine`: (Optional) I/O engine to use for file operations. Allowed values: `io_uring` (default), `sync`.
-- `cpus`: (Optional) List of CPU indices to pin backend threads to. When
-  provided, the length must match `num_queues`.
+- `-f, --config <CONFIG_TOML>`  Path to the backend TOML configuration file.
 
 **Examples:**
 ```bash
-vhost-backend --config config.yaml
+vhost-backend --config config.toml
 ```
 
 ## ublk-backend
@@ -92,14 +64,14 @@ extensively as `vhost-backend`.
 
 **Usage:**
 ```bash
-ublk-backend --config <CONFIG_YAML> [--kek <KEK_PATH>] [--allow-regular-file-as-kek] [--device-symlink <PATH>]
+ublk-backend --config <CONFIG_TOML> [--device-symlink <PATH>]
 ```
 
 **Notes:**
 - Requires a Linux kernel with `CONFIG_BLK_DEV_UBLK` enabled and access to
   `/dev/ublk-control` (typically root or a udev rule).
-- Uses the same configuration file as `vhost-backend`. The `socket` value is
-  ignored for ublk since it does not create a vhost-user socket.
+- Uses the same configuration file as `vhost-backend`. The `vhost_socket` value
+  is ignored for ublk since it does not create a vhost-user socket.
 
 After startup, a block device such as `/dev/ublkb0` is created and can be used
 with standard tools.
@@ -136,7 +108,7 @@ echo "ublk_drv" | sudo tee /etc/modules-load.d/ublk.conf
 
 ## RPC Interface
 
-When `rpc_socket_path` is provided, the backend listens for newline-delimited
+When `rpc_socket` is provided, the backend listens for newline-delimited
 JSON commands on the specified Unix socket. The following commands are
 supported:
 
@@ -162,82 +134,6 @@ $ echo '{"command": "status"}' | socat - UNIX-CONNECT:/tmp/ubiblk-rpc.sock | jq 
   }
 }
 ```
-
-## Configuration File Format
-
-The backend configuration YAML must match the `Options` struct fields:
-
-```yaml
-path: "/path/to/block-device.raw"        # String: base device path
-stripe_source:                           # Optional: stripe source configuration
-  source: raw                            # raw | remote | archive
-  path: "/path/to/ubi-image.raw"         # Local stripe source path
-metadata_path: "/path/to/metadata"       # Required when stripe_source or image_path is set
-rpc_socket_path: "/tmp/ubiblk-rpc.sock"  # Optional: RPC Unix socket path
-socket: "/tmp/vhost.sock"                # Optional: vhost‐user socket path (required for vhost-backend)
-num_queues: 1                            # Integer: number of virtqueues
-cpus: [0]                                # Optional: CPU list matching num_queues
-queue_size: 64                           # Integer: size of each virtqueue
-seg_size_max: 65536                      # Integer: max IO segment size (bytes)
-seg_count_max: 4                         # Integer: max segments per IO
-poll_queue_timeout_us: 1000              # Integer: poll timeout in microseconds
-copy_on_read: false                      # Optional: copy stripes on first read (must be true for remote/archive sources)
-track_written: false                     # Optional: track written stripes
-write_through: false                     # Optional: enable write-through mode
-autofetch: false                         # Optional: fetch stripes automatically
-device_id: "ubiblk"                      # Optional: device identifier
-io_engine: "io_uring"                    # Optional: io_uring (default) or sync
-encryption_key:                          # Optional: AES‐XTS keys (base64 encoded)
-  - "x74Yhe/ovgxY4BrBaM6Wm/9firf9k/N+ayvGsskBo+hjQtrL+nslCDC5oR/HpSDL"
-  - "TJn65Jb//AYqu/a8zlpb0IlXC4vwFQ5DtbQkMTeliEAwafr0DEH+5hNro8FuVzQ+"
-```
-
-To use a remote stripe server:
-
-```yaml
-stripe_source:
-  source: remote
-  address: "1.2.3.4:4555"
-  psk_identity: "client1"               # Optional: must be set together with psk_secret
-  psk_secret: "BASE64-ENCODED-SECRET"   # Optional: KEK-encrypted PSK secret
-  allow_insecure: false                 # Required to be true for unencrypted connections (default: false)
-```
-
-To use an archive stripe source from the local filesystem:
-
-```yaml
-stripe_source:
-  source: archive
-  type: filesystem
-  path: "/path/to/archive"
-  archive_kek:                       # Optional: KEK for archive encryption keys
-    method: "aes256-gcm"
-    key: "BASE64-ENCODED-KEY"
-    auth_data: "BASE64-ENCODED-AAD"
-```
-
-To use an archive stripe source from an S3-compatible object store:
-
-```yaml
-stripe_source:
-  source: archive
-  type: s3
-  bucket: "my-bucket"
-  prefix: "path/inside/bucket"        # Optional: prefix inside the bucket
-  endpoint: "https://s3.example.com"  # Optional: custom S3 endpoint
-  region: "auto"                      # Optional: AWS region
-  profile: "r2"                       # Optional: aws-cli profile name
-  credentials:                        # Optional: KEK-encrypted credentials
-    access_key_id: "BASE64-ENCODED-ACCESS-KEY-ID"
-    secret_access_key: "BASE64-ENCODED-SECRET-ACCESS-KEY"
-  connections: 16                     # Optional: number of connections
-  archive_kek:                        # Optional: KEK for archive encryption keys
-    method: "aes256-gcm"
-    key: "BASE64-ENCODED-KEY"
-    auth_data: "BASE64-ENCODED-AAD"
-```
-
-The legacy `image_path` option is still accepted for backward compatibility, but it is deprecated.
 
 ## Lazy Stripe Fetching
 
@@ -267,19 +163,6 @@ the background whenever no manual fetch requests are pending. This can be used
 to progressively catch up with the stripe source even if the guest only accesses
 a small portion of the device.
 
-## Key Encryption Key (KEK) File
-The keys in the configuration file can be encrypted using a KEK file. The KEK file should contain the encryption key in base64 format. The backend will use this key to decrypt the block device keys at runtime.
-
-```yaml
-method: "aes256-gcm"                # Encryption method (aes256-gcm or none)
-key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60=" # Base64 encoded key
-auth_data: "dm0zamdlejhfMA=="       # Base64 encoded auth data
-```
-
-> **Note:** KEK-encrypted values must use the current format:
-> `[12-byte nonce || ciphertext || 16-byte tag]`. Older ciphertexts that omit
-> the nonce prefix are not supported.
-
 ## init-metadata
 
 Initialises the metadata file required when running the backend in lazy stripe
@@ -289,13 +172,11 @@ byte per stripe containing fetched, written, and has-source flags. This file
 is loaded by the backend on startup.
 
 ```bash
-init-metadata --config <CONFIG_YAML> [--kek <KEK_PATH>] [--allow-regular-file-as-kek] \
+init-metadata --config <CONFIG_TOML> \
              [--stripe-sector-count-shift <SHIFT>]
 ```
 
-- `-f, --config <CONFIG_YAML>`: Path to the backend configuration file.
-- `-k, --kek <KEK_PATH>`: (Optional) Path to the key encryption key file.
-- `--allow-regular-file-as-kek`: (Optional) Allow reading the KEK from a regular file.
+- `-f, --config <CONFIG_TOML>`: Path to the backend configuration file.
 - `-s, --stripe-sector-count-shift`: (Optional) Stripe size as a power of two
   sectors (default: `11`).
 
@@ -305,23 +186,20 @@ init-metadata --config <CONFIG_YAML> [--kek <KEK_PATH>] [--allow-regular-file-as
 #### dump-metadata
 
 `dump-metadata` inspects the metadata file referenced by a backend configuration
-and prints a summary of fetched, written, and has-source stripes. Provide the
-same configuration file that the backend uses, plus an optional KEK file when
-working with encrypted metadata.
+and prints a summary of fetched, written, and has-source stripes. Provide the same configuration file that the backend uses.
 
 ```bash
-dump-metadata --config config.yaml [--kek kek.yaml] [--allow-regular-file-as-kek]
+dump-metadata --config config.toml
 ```
 
 #### xts
 
 `xts` encodes or decodes AES-XTS encrypted data files using the same
-configuration format as the backend. The tool reads keys from the configuration
-file (and optional KEK file) and processes sectors from an input file into an
+configuration format as the backend. The tool reads keys from the configuration file and processes sectors from an input file into an
 output file.
 
 ```bash
-xts --config config.yaml [--kek kek.yaml] [--allow-regular-file-as-kek] \
+xts --config config.toml \
     [--start <SECTOR>] [--len <SECTORS>] [--action encode|decode] <INPUT> <OUTPUT>
 ```
 

@@ -20,10 +20,11 @@ scripts/ubitop --socket /path/to/rpc.sock [--interval 1]
 
 ## Enabling the RPC socket
 
-Set `rpc_socket_path` in the device configuration:
+Set `rpc_socket` in the device configuration:
 
-```yaml
-rpc_socket_path: "/run/ubiblk/mydev.sock"
+```toml
+[device]
+rpc_socket = "/run/ubiblk/mydev.sock"
 ```
 
 ## RPC protocol

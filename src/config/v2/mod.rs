@@ -85,8 +85,8 @@ fn default_device_id() -> String {
     "ubiblk".to_string()
 }
 
-/// Encryption settings. The `xts_key` field holds a `ref:<key-name>` reference
-/// that is resolved later by the secret module.
+/// Encryption settings. The `xts_key` field uses a `ref` sub-key
+/// (e.g. `xts_key.ref = "key-name"`) that is resolved by the secret module.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct EncryptionSection {

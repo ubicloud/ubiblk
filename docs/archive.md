@@ -1,70 +1,122 @@
-# Archive tooling and format
+# Archive
 
 The `archive` binary captures stripes from a ubiblk block device and stores them
 in either a local directory or an S3-compatible object store.
 
-**Usage:**
+## Usage
+
 ```bash
-archive --config <CONFIG_YAML> --target-config <TARGET_CONFIG_YAML> [options]
+archive --config <CONFIG_TOML> --target-config <TARGET_CONFIG_TOML> [options]
 ```
 
-**Required inputs:**
-- `--config` (`-f`): ubiblk configuration YAML.
-- `--target-config`: Archive target configuration YAML (filesystem or S3).
+| Flag | Short | Required | Description |
+|------|-------|----------|-------------|
+| `--config` | `-f` | yes | Path to the ubiblk config TOML (see [config.md](config.md)) |
+| `--target-config` | — | yes | Path to the archive target config TOML |
+| `--encrypt` | `-e` | no | Encrypt archived stripes with a random AES-XTS key |
+| `--compression` | — | no | Compression algorithm: `none` (default) or `zstd` |
+| `--zstd-level` | — | no | Zstd compression level, 1–22 (default: 3) |
 
-**Options:**
-- `--kek` (`-k`): Path to the key encryption key file. It's recommended to use a
-  named pipe or `/dev/stdin` for this. Regular files are disallowed by default
-  to prevent accidental exposure of KEK material.
-- `--allow-regular-file-as-kek`: Allow reading the KEK from a regular file.
-- `--encrypt` (`-e`): Encrypt archived stripes with a random AES-XTS key.
-- `--compression`: Compression algorithm (`none` or `zstd`). Defaults to `none`.
-- `--zstd-level`: Zstd compression level. Defaults to `3`.
-
-**Target config format:**
-```yaml
-type: filesystem
-path: "/var/ubiblk/archive"
-archive_kek:
-  method: "aes256-gcm"
-  key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60="
-  auth_data: "dm0zamdlejhfMA=="
-```
-
-```yaml
-type: s3
-bucket: "my-bucket"
-prefix: "ubiblk"                       # Optional: prefix inside the bucket
-endpoint: "https://s3.example.com"     # Optional: custom S3 endpoint
-region: "auto"                         # Optional: AWS region
-profile: "r2"                          # Optional: aws-cli profile name
-credentials:                           # Optional: KEK-encrypted credentials
-  access_key_id: "BASE64-ENCODED-ACCESS-KEY-ID"
-  secret_access_key: "BASE64-ENCODED-SECRET-ACCESS-KEY"
-connections: 16                        # Optional: number of connections
-archive_kek:
-  method: "aes256-gcm"
-  key: "wHKSFBsRXW/VPLsJKl/mnsMs7X3Pt8NWjzZkch8Ku60="
-  auth_data: "dm0zamdlejhfMA=="
-```
-
-> **Note:** KEK-encrypted values must use the current format:
-> `[12-byte nonce || ciphertext || 16-byte tag]`. Older ciphertexts that omit
-> the nonce prefix are not supported.
+The ubiblk config (`--config`) must include a `metadata_path` in `[device]`.
 
 **Examples:**
 ```bash
 # Archive to a local directory
-archive -f config.yaml --target-config archive_target.yaml
+archive -f config.toml --target-config archive_target.toml
 
-# Archive to S3 with a prefix
-archive -f config.yaml --target-config archive_target.yaml
+# Archive with encryption
+archive -f config.toml --target-config archive_target.toml --encrypt
 
-# Archive with zstd compression (level 3)
-archive -f config.yaml --target-config archive_target.yaml --compression zstd --zstd-level 3
+# Archive with zstd compression (level 5)
+archive -f config.toml --target-config archive_target.toml --compression zstd --zstd-level 5
 ```
 
-## Archive format
+## Target Config Reference
+
+The target config is a standalone Config v2 TOML file loaded by
+`ArchiveTargetConfig::load`. It supports the include system (see
+[config.md](config.md#include-system)).
+
+### Sections
+
+| Section | Required | Description |
+|---------|----------|-------------|
+| `[target]` | yes | Archive storage backend |
+| `[secrets.*]` | no | Named secret definitions |
+| `[danger_zone]` | no | Safety overrides |
+
+No other top-level keys are allowed.
+
+### `[target]` — Filesystem
+
+A local directory as the archive backend. Discriminated by `storage = "filesystem"`.
+
+```toml
+[target]
+storage = "filesystem"
+path = "/var/ubiblk/archive"
+archive_kek.ref = "archive-kek"
+
+[secrets.archive-kek]
+source.env = "UBIBLK_ARCHIVE_KEK"
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `storage` | string | yes | Must be `"filesystem"` |
+| `path` | path | yes | Directory to store archive objects |
+| `archive_kek.ref` | string | yes | Reference to a 32-byte AES-256-GCM KEK secret |
+| `autofetch` | boolean | no | Fetch stripes in the background (default: false) |
+
+### `[target]` — S3
+
+An S3-compatible object store. Discriminated by `storage = "s3"`.
+
+```toml
+[target]
+storage = "s3"
+bucket = "my-bucket"
+prefix = "ubiblk/"
+region = "auto"
+endpoint = "https://s3.example.com"
+connections = 16
+access_key_id.ref = "s3-access-key-id"
+secret_access_key.ref = "s3-secret-access-key"
+archive_kek.ref = "archive-kek"
+
+[secrets.s3-access-key-id]
+source.env = "UBIBLK_S3_ACCESS_KEY_ID"
+
+[secrets.s3-secret-access-key]
+source.env = "UBIBLK_S3_SECRET_ACCESS_KEY"
+
+[secrets.archive-kek]
+source.env = "UBIBLK_ARCHIVE_KEK"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `storage` | string | yes | — | Must be `"s3"` |
+| `bucket` | string | yes | — | S3 bucket name |
+| `prefix` | string | no | — | Key prefix (must not contain `.` or `..` path components) |
+| `region` | string | no | — | AWS region |
+| `endpoint` | string | no | — | Custom S3 endpoint URL |
+| `connections` | integer | no | 16 | Number of S3 connections (must be > 0) |
+| `access_key_id.ref` | string | yes | — | Reference to AWS access key ID secret |
+| `secret_access_key.ref` | string | yes | — | Reference to AWS secret access key secret |
+| `archive_kek.ref` | string | yes | — | Reference to a 32-byte AES-256-GCM KEK secret |
+| `autofetch` | boolean | no | false | Fetch stripes in the background |
+
+### `[secrets.*]` and `[danger_zone]`
+
+These sections use the same format as the main ubiblk config. See
+[config.md](config.md#secrets) and [config.md](config.md#danger_zone) for
+details.
+
+> **Note:** The archive KEK must be exactly 32 bytes. KEK-encrypted values use
+> the format `[12-byte nonce || ciphertext || 16-byte GCM tag]`.
+
+## Archive Format
 
 Archives consist of a `metadata.json` file, a `stripe-mapping` mapping
 file, and one data object per unique stripe payload. Only stripes which contain
@@ -98,8 +150,8 @@ to validate compatibility.
 
 `stripe_sector_count` indicates the number of 512-byte sectors per stripe. When
 `--encrypt` is enabled, the two keys stored in `encryption_key` are encrypted
-with the KEK (if provided) before being base64 encoded; otherwise,
-`encryption_key` is `null`. The `compression` field records the algorithm used
+with the archive KEK before being base64 encoded; otherwise, `encryption_key`
+is `null`. The `compression` field records the algorithm used
 to store stripe payloads. For `none`, this is a string value.
 For zstd, this is an object containing the configured compression level.
 The `level` field is required when `compression` is `zstd`.
@@ -138,7 +190,7 @@ where:
 This authenticates the stripe mapping and detects any corruption or tampering
 before the mapping is parsed or trusted.
 
-### Stripe objects
+### Stripe Objects
 
 Each archived stripe payload is stored as its own object under
 `data/<sha256 hash>`. The SHA-256 hash is computed on the stored stripe bytes

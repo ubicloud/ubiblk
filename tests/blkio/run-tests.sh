@@ -47,7 +47,8 @@ image_path = "base.raw"
 [encryption]
 xts_key.ref = "xts_key"
 [secrets.xts_key]
-source.base64 = "$xts_key"
+source.inline = "$xts_key"
+encoding = "base64"
 [danger_zone]
 enabled = true
 allow_inline_plaintext_secrets = true

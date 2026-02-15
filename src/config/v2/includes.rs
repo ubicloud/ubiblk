@@ -182,7 +182,8 @@ mod tests {
             dir.path().join("secrets.toml"),
             r#"
                 [secrets.xts-key]
-                source.base64 = "YWJj"
+                source.inline = "YWJj"
+                encoding = "base64"
                 [secrets.archive-kek]
                 source.env = "ARCHIVE_KEK"
             "#,
@@ -244,7 +245,7 @@ mod tests {
         );
 
         assert_eq!(
-            toml_get_path(&resolved, &["secrets", "xts-key", "source", "base64"]),
+            toml_get_path(&resolved, &["secrets", "xts-key", "source", "inline"]),
             Some(&Value::String("YWJj".to_string()))
         );
         assert_eq!(

@@ -71,10 +71,12 @@ fn format_source_info(config: &v2::Config) -> Result<String> {
                 image_size
             ))
         }
-        Some(v2::stripe_source::StripeSourceConfig::Remote { address, psk, .. }) => Ok(format!(
+        Some(v2::stripe_source::StripeSourceConfig::Remote(config)) => Ok(format!(
             "remote (address: {}, psk_identity: {})",
-            address,
-            psk.as_ref()
+            config.address,
+            config
+                .psk
+                .as_ref()
                 .map(|psk| psk.identity.as_str())
                 .unwrap_or("None")
         )),

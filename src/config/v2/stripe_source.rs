@@ -26,12 +26,7 @@ pub enum StripeSourceConfig {
         copy_on_read: bool,
     },
     Archive(ArchiveStorageConfig),
-    Remote {
-        address: String,
-        psk: Option<PskConfig>,
-        #[serde(default)]
-        autofetch: bool,
-    },
+    Remote(RemoteStripeConfig),
 }
 
 impl StripeSourceConfig {
@@ -42,7 +37,7 @@ impl StripeSourceConfig {
                 *autofetch
             }
             StripeSourceConfig::Archive(ArchiveStorageConfig::S3 { autofetch, .. }) => *autofetch,
-            StripeSourceConfig::Remote { autofetch, .. } => *autofetch,
+            StripeSourceConfig::Remote(RemoteStripeConfig { autofetch, .. }) => *autofetch,
         }
     }
 
@@ -66,18 +61,8 @@ impl StripeSourceConfig {
         resolved_secrets: &HashMap<String, ResolvedSecret>,
     ) -> Result<()> {
         match self {
-            StripeSourceConfig::Remote { psk, .. } => {
-                if psk.is_none()
-                    && !(danger_zone.enabled && danger_zone.allow_unencrypted_connection)
-                {
-                    return Err(ubiblk_error!(
-                                InvalidParameter {
-                                   description: "Remote stripe source requires PSK unless danger_zone.allow_unencrypted_connection is enabled".to_string()
-                           }));
-                }
-                if let Some(psk) = psk {
-                    validate_psk_secret(get_resolved_secret(&psk.secret, resolved_secrets)?)?;
-                }
+            StripeSourceConfig::Remote(config) => {
+                config.validate(danger_zone, resolved_secrets)?;
             }
             StripeSourceConfig::Archive(storage) => storage.validate(resolved_secrets)?,
             StripeSourceConfig::Raw { .. } => (),
@@ -86,16 +71,46 @@ impl StripeSourceConfig {
     }
 }
 
-fn validate_psk_secret(secret: &ResolvedSecret) -> Result<()> {
-    if secret.as_bytes().len() < 16 {
-        return Err(ubiblk_error!(InvalidParameter {
-            description: format!(
-                "PSK secret must be at least 16 bytes (got {} bytes)",
-                secret.as_bytes().len()
-            ),
-        }));
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteStripeConfig {
+    pub address: String,
+    pub psk: Option<PskConfig>,
+    #[serde(default)]
+    pub autofetch: bool,
+}
+
+impl RemoteStripeConfig {
+    pub fn validate(
+        &self,
+        danger_zone: &DangerZone,
+        resolved_secrets: &HashMap<String, ResolvedSecret>,
+    ) -> Result<()> {
+        if self.psk.is_none() && !(danger_zone.enabled && danger_zone.allow_unencrypted_connection)
+        {
+            return Err(ubiblk_error!(
+                InvalidParameter {
+                    description: "Remote stripe source requires PSK unless danger_zone.allow_unencrypted_connection is enabled".to_string()
+                }
+            ));
+        }
+        if let Some(psk) = &self.psk {
+            Self::validate_psk_secret(get_resolved_secret(&psk.secret, resolved_secrets)?)?;
+        }
+        Ok(())
     }
-    Ok(())
+
+    fn validate_psk_secret(secret: &ResolvedSecret) -> Result<()> {
+        if secret.as_bytes().len() < 16 {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "PSK secret must be at least 16 bytes (got {} bytes)",
+                    secret.as_bytes().len()
+                ),
+            }));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -348,14 +363,14 @@ mod tests {
         let config: StripeSourceConfig = toml::from_str(toml).unwrap();
         assert_eq!(
             config,
-            StripeSourceConfig::Remote {
+            StripeSourceConfig::Remote(RemoteStripeConfig {
                 address: "1.2.3.4:4555".to_string(),
                 psk: Some(PskConfig {
                     identity: "client1".to_string(),
                     secret: SecretRef::Ref("psk-secret".to_string()),
                 }),
                 autofetch: false,
-            }
+            })
         );
     }
 
@@ -370,14 +385,14 @@ mod tests {
         let config: StripeSourceConfig = toml::from_str(toml).unwrap();
         assert_eq!(
             config,
-            StripeSourceConfig::Remote {
+            StripeSourceConfig::Remote(RemoteStripeConfig {
                 address: "1.2.3.4:4555".to_string(),
                 psk: Some(PskConfig {
                     identity: "client1".to_string(),
                     secret: SecretRef::Ref("psk-secret".to_string()),
                 }),
                 autofetch: false,
-            }
+            })
         );
     }
 
@@ -530,11 +545,11 @@ mod tests {
 
     #[test]
     fn validate_rejects_remote_without_psk_when_danger_zone_disabled() {
-        let config = StripeSourceConfig::Remote {
+        let config = StripeSourceConfig::Remote(RemoteStripeConfig {
             address: "127.0.0.1:1234".to_string(),
             psk: None,
             autofetch: false,
-        };
+        });
         let danger_zone = DangerZone {
             enabled: false,
             ..Default::default()

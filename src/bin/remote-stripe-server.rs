@@ -1,7 +1,7 @@
 use std::{net::TcpListener, sync::Arc, thread};
 
 use clap::Parser;
-use log::{error, info, warn};
+use log::{error, info};
 
 use ubiblk::{
     cli::{load_config, CommonArgs},
@@ -20,8 +20,8 @@ struct Args {
     #[command(flatten)]
     common: CommonArgs,
 
-    /// Config YAML file containing listening address and PSK details.
-    #[arg(long = "listen-config", value_name = "CONFIG_YAML")]
+    /// Config TOML file containing listening address and PSK details.
+    #[arg(long = "listen-config", value_name = "CONFIG_TOML")]
     listen_config_path: std::path::PathBuf,
 }
 
@@ -45,19 +45,11 @@ fn run(args: Args) -> Result<()> {
 
     let config = load_config(&common)?;
 
-    // TODO: Fix listen config loading.
-    let listen_config = v2::Config::load(&listen_config_path)?;
-    let remote = match listen_config.stripe_source.as_ref() {
-        Some(v2::stripe_source::StripeSourceConfig::Remote { address, psk, .. }) => (address, psk),
-        _ => {
-            return Err(ubiblk::ubiblk_error!(InvalidParameter {
-                description: "listen config must define stripe_source.type = 'remote'".to_string(),
-            }))
-        }
-    };
+    let listen_config = v2::RemoteStripeServerConfig::load(&listen_config_path)?;
     let stripe_server = prepare_stripe_server(&config)?;
-    let psk = remote
-        .1
+    let psk = listen_config
+        .server
+        .psk
         .as_ref()
         .map(|psk| {
             let secret = listen_config
@@ -74,11 +66,7 @@ fn run(args: Args) -> Result<()> {
         })
         .transpose()?;
 
-    if psk.is_none() {
-        warn!("No PSK credentials configured — stripe server running WITHOUT transport encryption. All data will be transmitted in plaintext.");
-    }
-
-    let listener = TcpListener::bind(remote.0)?;
+    let listener = TcpListener::bind(&listen_config.server.address)?;
     info!("listening on {}", listener.local_addr()?);
 
     loop {

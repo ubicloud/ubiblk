@@ -424,4 +424,33 @@ mod tests {
         assert_eq!(write_ops, 1);
         assert_eq!(flush_ops, 1);
     }
+
+    #[test]
+    fn complete_request_unsupported_op_returns_invalid() {
+        let (mut handler, _device) = setup_handler(SECTOR_SIZE, 1);
+        let request = UblkIoRequest {
+            op: UblkOp::Unsupported,
+            sector_offset: 0,
+            sector_count: 0,
+            request_id: 0,
+            bytes: 0,
+        };
+        assert!(matches!(
+            handler.complete_request(&request, true),
+            Err(UblkIoError::Invalid)
+        ));
+    }
+
+    #[test]
+    fn enqueue_flush_request() {
+        let (mut handler, _device) = setup_handler(SECTOR_SIZE, 1);
+        let request = UblkIoRequest {
+            op: UblkOp::Flush,
+            sector_offset: 0,
+            sector_count: 0,
+            request_id: 0,
+            bytes: 0,
+        };
+        handler.enqueue_request(&request).unwrap();
+    }
 }

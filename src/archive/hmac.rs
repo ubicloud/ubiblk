@@ -42,10 +42,9 @@ fn metadata_hmac_input(metadata: &ArchiveMetadata) -> Vec<u8> {
     data.extend_from_slice(&metadata.stripe_sector_count.to_le_bytes());
 
     match &metadata.encryption_key {
-        Some((key1, key2)) => {
+        Some(key) => {
             data.push(1);
-            push_len_prefixed(&mut data, key1);
-            push_len_prefixed(&mut data, key2);
+            push_len_prefixed(&mut data, key);
         }
         None => data.push(0),
     }
@@ -106,7 +105,7 @@ mod tests {
         let metadata = ArchiveMetadata {
             format_version: 1,
             stripe_sector_count: 128,
-            encryption_key: Some((vec![123u8; 32], vec![234u8; 32])),
+            encryption_key: Some(vec![123u8; 64]),
             compression: ArchiveCompressionAlgorithm::None,
             hmac_key: hmac_key.to_vec(),
             metadata_hmac: Vec::new(),
@@ -131,7 +130,7 @@ mod tests {
         let mut metadata = ArchiveMetadata {
             format_version: 1,
             stripe_sector_count: 128,
-            encryption_key: Some((vec![123u8; 32], vec![234u8; 32])),
+            encryption_key: Some(vec![123u8; 64]),
             compression: ArchiveCompressionAlgorithm::Zstd { level: 3 },
             hmac_key: vec![0x00u8; 32],
             metadata_hmac: vec![0xFFu8; 32],
@@ -152,7 +151,7 @@ mod tests {
 
         // bytes should be stable and match the expected value to catch
         // accidental changes
-        let expect_sha256 = "f7b3df24235376fa332dc740f1a8e559572bf7c364947114f865963276cf0350";
+        let expect_sha256 = "779dd6db5299da3d7d1354c10e82111bed78d6265604c3a918457e922a66d6b6";
         assert_eq!(
             sha256_hex(&input1),
             expect_sha256,

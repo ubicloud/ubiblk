@@ -41,7 +41,7 @@ impl ArchiveStripeSource {
         verify_metadata_hmac_tag(&hmac_key, &metadata)?;
         let xts_cipher = match metadata.encryption_key {
             None => None,
-            Some(key) => Some(XtsBlockCipher::from_encrypted(key.0, key.1, &kek)?),
+            Some(key) => Some(XtsBlockCipher::from_encrypted_key(key, &kek)?),
         };
         let stripe_hashes =
             Self::fetch_stripe_hashes(store.as_mut(), &hmac_key, xts_cipher.clone())?;
@@ -296,7 +296,7 @@ mod tests {
     fn build_metadata_json(
         format_version: u32,
         stripe_sector_count: u64,
-        encryption_key: Option<(Vec<u8>, Vec<u8>)>,
+        encryption_key: Option<Vec<u8>>,
         compression: ArchiveCompressionAlgorithm,
         hmac_key: &[u8],
     ) -> String {

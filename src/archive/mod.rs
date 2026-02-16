@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    crypt::{decode_key, decode_optional_key_pair, encode_key, encode_optional_key_pair},
+    crypt::{decode_key, decode_optional_key, encode_key, encode_optional_key},
     Result,
 };
 use serde::{Deserialize, Serialize};
@@ -86,13 +86,13 @@ pub struct ArchiveMetadata {
     pub format_version: u32,
     /// Number of sectors per stripe.
     pub stripe_sector_count: u64,
-    /// Optional encrypted keys used for encrypting the archived data.
+    /// Optional encrypted 64-byte AES-XTS key used for encrypting archived data.
     #[serde(
         default,
-        deserialize_with = "decode_optional_key_pair",
-        serialize_with = "encode_optional_key_pair"
+        deserialize_with = "decode_optional_key",
+        serialize_with = "encode_optional_key"
     )]
-    pub encryption_key: Option<(Vec<u8>, Vec<u8>)>,
+    pub encryption_key: Option<Vec<u8>>,
     #[serde(default)]
     pub compression: ArchiveCompressionAlgorithm,
     #[serde(
@@ -169,7 +169,7 @@ mod tests {
         let metadata = ArchiveMetadata {
             format_version: 1,
             stripe_sector_count: 128,
-            encryption_key: Some((vec![123u8; 32], vec![234u8; 32])),
+            encryption_key: Some(vec![123u8; 64]),
             compression: ArchiveCompressionAlgorithm::Zstd { level: 3 },
             hmac_key: vec![178u8; 32],
             metadata_hmac: vec![199u8; 32],

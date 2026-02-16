@@ -43,6 +43,11 @@ impl XtsBlockCipher {
         })
     }
 
+    pub fn from_encrypted_key(encrypted_key: Vec<u8>, kek: &KeyEncryptionCipher) -> Result<Self> {
+        let decrypted_key = kek.decrypt_key_data(&encrypted_key)?;
+        Self::from_combined_key(decrypted_key)
+    }
+
     fn rand_bytes(buf: &mut [u8]) -> Result<()> {
         rand_bytes(buf).map_err(|e| {
             crate::ubiblk_error!(CryptoError {
@@ -61,6 +66,37 @@ impl XtsBlockCipher {
 
     pub fn encrypted_keys(&self, kek: &KeyEncryptionCipher) -> Result<(Vec<u8>, Vec<u8>)> {
         kek.encrypt_xts_keys(&self.key1, &self.key2)
+    }
+
+    pub fn encrypted_key(&self, kek: &KeyEncryptionCipher) -> Result<Vec<u8>> {
+        let mut combined = Vec::with_capacity(64);
+        combined.extend_from_slice(&self.key1);
+        combined.extend_from_slice(&self.key2);
+        kek.encrypt_key_data(&combined)
+    }
+
+    fn from_combined_key(combined_key: Vec<u8>) -> Result<Self> {
+        if combined_key.len() != 64 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "XTS key length must be exactly 64 bytes (got {} bytes)",
+                    combined_key.len()
+                ),
+            }));
+        }
+
+        let (key1, key2) = combined_key.split_at(32);
+        let key1: [u8; 32] = key1.try_into().map_err(|_| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: "Internal error: failed to split combined key".to_string(),
+            })
+        })?;
+        let key2: [u8; 32] = key2.try_into().map_err(|_| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: "Internal error: failed to split combined key".to_string(),
+            })
+        })?;
+        Ok(Self { key1, key2 })
     }
 
     fn get_initial_tweak(&self, sector: u64) -> [u8; 16] {
@@ -217,5 +253,26 @@ mod tests {
         let (enc3, enc4) = xts_cipher.encrypted_keys(&kek).unwrap();
         let xts_cipher2 = XtsBlockCipher::from_encrypted(enc3, enc4, &kek).unwrap();
         assert_eq!(xts_cipher, xts_cipher2);
+    }
+
+    #[test]
+    fn test_combined_key_roundtrip() {
+        let kek = KeyEncryptionCipher::default();
+        let xts_cipher = XtsBlockCipher::new(vec![3u8; 32], vec![4u8; 32]).unwrap();
+
+        let encrypted = xts_cipher.encrypted_key(&kek).unwrap();
+        assert_eq!(encrypted.len(), 64);
+
+        let roundtrip = XtsBlockCipher::from_encrypted_key(encrypted, &kek).unwrap();
+        assert_eq!(xts_cipher, roundtrip);
+    }
+
+    #[test]
+    fn test_from_combined_key_rejects_non_64_bytes() {
+        let kek = KeyEncryptionCipher::default();
+        let err = XtsBlockCipher::from_encrypted_key(vec![0u8; 63], &kek).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("XTS key length must be exactly 64 bytes"));
     }
 }

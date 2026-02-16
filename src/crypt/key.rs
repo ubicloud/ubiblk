@@ -1,5 +1,3 @@
-use std::{fs::File, path::PathBuf};
-
 use crate::{Result, UbiblkError};
 use aes_gcm::{
     aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
@@ -60,31 +58,6 @@ impl KeyEncryptionCipher {
             .ok_or_else(|| param_err("Authentication data is required"))?;
 
         Ok((key, auth_data))
-    }
-
-    pub fn load(path: Option<&PathBuf>, allow_regular_file: bool) -> Result<Self> {
-        let Some(path) = path else {
-            return Ok(KeyEncryptionCipher::default());
-        };
-
-        // Open the file first before checking, to avoid TOCTOU issues.
-        let file = File::open(path)?;
-
-        if !allow_regular_file && file.metadata()?.is_file() {
-            return Err(param_err(concat!(
-                "Refusing to read KEK from a regular file.\n",
-                "KEK material is sensitive and should be provided via a pipe or stdin.\n",
-                "If this is intentional, re-run with --allow-regular-file-as-kek.",
-            )));
-        }
-
-        let kek: KeyEncryptionCipher = serde_yaml::from_reader(file).map_err(|e| {
-            crate::ubiblk_error!(InvalidParameter {
-                description: format!("Error parsing KEK file {}: {e}", path.display()),
-            })
-        })?;
-
-        Ok(kek)
     }
 
     pub fn encrypt_xts_keys(&self, key1: &[u8], key2: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -249,8 +222,6 @@ fn param_err(description: impl Into<String>) -> UbiblkError {
 
 #[cfg(test)]
 mod tests {
-    use crate::utils::umask_guard::UMASK_LOCK;
-
     use super::*;
     use aes_gcm::KeyInit;
 
@@ -433,53 +404,6 @@ mod tests {
     }
 
     #[test]
-    fn test_loading_from_none_path_returns_default() {
-        let cipher = KeyEncryptionCipher::load(None, false).unwrap();
-        assert_eq!(cipher, KeyEncryptionCipher::default());
-    }
-
-    #[test]
-    fn test_loading_from_nonexistent_path_fails() {
-        let bad_path = PathBuf::from("/path/to/nonexistent/kek.yaml");
-        let res = KeyEncryptionCipher::load(Some(&bad_path), false);
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn test_loading_from_invalid_yaml_fails() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        let mut temp_file = NamedTempFile::new().unwrap();
-        write!(temp_file, "invalid: [this is not valid yaml").unwrap();
-        temp_file.flush().unwrap();
-
-        let res = KeyEncryptionCipher::load(Some(&temp_file.path().to_path_buf()), true);
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn test_load_key_encryption_cipher_success() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        let kek = KeyEncryptionCipher {
-            method: CipherMethod::Aes256Gcm,
-            key: Some(vec![0x11u8; 32]),
-            auth_data: Some(b"test-aad".to_vec()),
-        };
-
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let yaml_data = serde_yaml::to_string(&kek).unwrap();
-        write!(temp_file, "{}", yaml_data).unwrap();
-        temp_file.flush().unwrap();
-
-        let loaded_kek =
-            KeyEncryptionCipher::load(Some(&temp_file.path().to_path_buf()), true).unwrap();
-        assert_eq!(loaded_kek, kek);
-    }
-
-    #[test]
     fn test_encrypt_xts_keys_none_method() {
         let key1 = [0xAAu8; 32];
         let key2 = [0xBBu8; 32];
@@ -618,59 +542,5 @@ mod tests {
         let dec2 = cipher.decrypt_key_data(&enc2).unwrap();
         assert_eq!(dec1, plaintext);
         assert_eq!(dec2, plaintext);
-    }
-
-    #[test]
-    fn test_load_rejects_regular_file_without_allow_flag() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        let mut temp_file = NamedTempFile::new().unwrap();
-        write!(temp_file, "method: none").unwrap();
-        temp_file.flush().unwrap();
-
-        let res = KeyEncryptionCipher::load(Some(&temp_file.path().to_path_buf()), false);
-        assert!(res.is_err());
-        assert!(res
-            .unwrap_err()
-            .to_string()
-            .contains("Refusing to read KEK from a regular file."));
-    }
-
-    #[test]
-    fn test_load_allows_named_pipe() {
-        use std::io::Write;
-
-        // serialize with umask changing tests to avoid permission issues.
-        let _m = UMASK_LOCK.lock();
-
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let fifo_path = tmp_dir.path().join("test_kek_fifo");
-
-        // create a named pipe (FIFO)
-        let _ = std::fs::remove_file(&fifo_path); // Clean up if it already exists
-        nix::unistd::mkfifo(
-            &fifo_path,
-            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
-        )
-        .unwrap();
-
-        let fifo_path_for_load = fifo_path.clone();
-
-        // Write valid KEK data to the FIFO in a separate thread
-        std::thread::spawn(move || {
-            let kek = KeyEncryptionCipher {
-                method: CipherMethod::Aes256Gcm,
-                key: Some(vec![0x11u8; 32]),
-                auth_data: Some(b"test-aad".to_vec()),
-            };
-            let yaml_data = serde_yaml::to_string(&kek).unwrap();
-            let mut fifo_file = File::create(&fifo_path).unwrap();
-            fifo_file.write_all(yaml_data.as_bytes()).unwrap();
-        });
-
-        // Attempt to load the KEK from the named pipe
-        let res = KeyEncryptionCipher::load(Some(&fifo_path_for_load), false);
-        assert!(res.is_ok());
     }
 }

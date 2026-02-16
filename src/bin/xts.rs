@@ -31,7 +31,7 @@ enum Action {
     about = "Encode or decode an AES-XTS encrypted image"
 )]
 struct Args {
-    /// Path to the configuration YAML file
+    /// Path to the configuration TOML file
     #[arg(short = 'f', long = "config")]
     config: String,
 

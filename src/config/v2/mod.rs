@@ -4,6 +4,7 @@ pub mod secrets;
 pub mod stripe_source;
 pub mod tuning;
 
+use log::warn;
 use serde::Deserialize;
 use std::{collections::HashMap, path::PathBuf};
 
@@ -67,6 +68,41 @@ pub struct DangerZone {
     pub allow_unencrypted_connection: bool,
 }
 
+impl DangerZone {
+    /// Returns the names of `allow_*` flags that are set to `true` but ignored
+    /// because `enabled` is `false`.
+    pub fn ignored_flags(&self) -> Vec<&'static str> {
+        if self.enabled {
+            return Vec::new();
+        }
+        let mut flags = Vec::new();
+        if self.allow_unencrypted_disk {
+            flags.push("allow_unencrypted_disk");
+        }
+        if self.allow_inline_plaintext_secrets {
+            flags.push("allow_inline_plaintext_secrets");
+        }
+        if self.allow_secret_over_regular_file {
+            flags.push("allow_secret_over_regular_file");
+        }
+        if self.allow_unencrypted_connection {
+            flags.push("allow_unencrypted_connection");
+        }
+        flags
+    }
+
+    /// Logs a warning if any `allow_*` flags are set but `enabled` is `false`.
+    pub fn warn_ignored_flags(&self) {
+        let ignored = self.ignored_flags();
+        if !ignored.is_empty() {
+            warn!(
+                "danger_zone has flags set but enabled = false; ignored flags: {}",
+                ignored.join(", ")
+            );
+        }
+    }
+}
+
 /// Core device paths and identity.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -91,4 +127,58 @@ fn default_device_id() -> String {
 #[serde(deny_unknown_fields)]
 pub struct EncryptionSection {
     pub xts_key: SecretRef,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignored_flags_empty_when_all_defaults() {
+        let dz = DangerZone::default();
+        assert!(dz.ignored_flags().is_empty());
+    }
+
+    #[test]
+    fn ignored_flags_empty_when_enabled() {
+        let dz = DangerZone {
+            enabled: true,
+            allow_unencrypted_disk: true,
+            allow_unencrypted_connection: true,
+            ..DangerZone::default()
+        };
+        assert!(dz.ignored_flags().is_empty());
+    }
+
+    #[test]
+    fn ignored_flags_lists_set_flags_when_not_enabled() {
+        let dz = DangerZone {
+            enabled: false,
+            allow_unencrypted_disk: true,
+            allow_inline_plaintext_secrets: true,
+            ..DangerZone::default()
+        };
+        let flags = dz.ignored_flags();
+        assert_eq!(
+            flags,
+            vec!["allow_unencrypted_disk", "allow_inline_plaintext_secrets"]
+        );
+    }
+
+    #[test]
+    fn ignored_flags_lists_all_flags_when_all_set_without_enabled() {
+        let dz = DangerZone {
+            enabled: false,
+            allow_unencrypted_disk: true,
+            allow_inline_plaintext_secrets: true,
+            allow_secret_over_regular_file: true,
+            allow_unencrypted_connection: true,
+        };
+        let flags = dz.ignored_flags();
+        assert_eq!(flags.len(), 4);
+        assert!(flags.contains(&"allow_unencrypted_disk"));
+        assert!(flags.contains(&"allow_inline_plaintext_secrets"));
+        assert!(flags.contains(&"allow_secret_over_regular_file"));
+        assert!(flags.contains(&"allow_unencrypted_connection"));
+    }
 }

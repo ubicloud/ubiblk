@@ -13,46 +13,16 @@ cd target/tests/blkio
 LOG_FILE="vhost-backend.log"
 : > "$LOG_FILE"
 
-echo "Setting up disk..."
-# Always create/recreate these files
-rm -f disk.raw disk.metadata base.raw
-echo "Creating disk files (always recreated)..."
-truncate --size 4M disk.raw
-truncate --size 8K disk.metadata
+rm -f disk.raw metadata config.toml xts_key base.raw
 
 echo "Creating base image with pattern..."
 make -C $PROJECT_ROOT populate-base-image
 
-# Generate AES-XTS keys for disk encryption
-echo "Generating AES-XTS keys for disk encryption..."
-xts_key=$(openssl rand -base64 64 | tr -d "\n")
-
-CONFIG_FILE="ubiblk-config.toml"
-echo "Creating $CONFIG_FILE..."
-cat > "$CONFIG_FILE" << EOF
-[device]
-data_path = "disk.raw"
-metadata_path = "disk.metadata"
-vhost_socket = "vhost.sock"
-device_id = "vm123456"
-[tuning]
-num_queues = 4
-queue_size = 256
-seg_size_max = 4096
-seg_count_max = 1
-poll_timeout_us = 500
-[stripe_source]
-type = "raw"
-image_path = "base.raw"
-[encryption]
-xts_key.ref = "xts_key"
-[secrets.xts_key]
-source.inline = "$xts_key"
-encoding = "base64"
-[danger_zone]
-enabled = true
-allow_inline_plaintext_secrets = true
-EOF
+CONFIG_FILE="config.toml"
+echo "Initializing ubiblk test project with scripts/ubiblk-init..."
+"$PROJECT_ROOT/scripts/ubiblk-init" --size 4M --dir . --base base.raw \
+    --num-queues 4 --queue-size 256 --seg-size-max 4096 --seg-count-max 1 \
+    --poll-timeout-us 500 --force
 
 STRIPE_SECTOR_COUNT_SHIFT=${STRIPE_SECTOR_COUNT_SHIFT:-11}
 if ! [[ "$STRIPE_SECTOR_COUNT_SHIFT" =~ ^[0-9]+$ ]] || [ "$STRIPE_SECTOR_COUNT_SHIFT" -lt 1 ] || \

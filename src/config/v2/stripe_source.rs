@@ -7,7 +7,10 @@ use serde::Deserialize;
 
 use super::{secrets::SecretRef, DangerZone};
 use crate::{
-    config::v2::secrets::{get_resolved_secret, ResolvedSecret},
+    config::v2::{
+        load::resolve_path,
+        secrets::{get_resolved_secret, ResolvedSecret},
+    },
     ubiblk_error, Result,
 };
 
@@ -52,6 +55,18 @@ impl StripeSourceConfig {
         match self {
             StripeSourceConfig::Raw { image_path, .. } => Some(image_path),
             _ => None,
+        }
+    }
+
+    pub fn resolve_paths(&mut self, config_dir: &Path) {
+        match self {
+            StripeSourceConfig::Raw { image_path, .. } => {
+                *image_path = resolve_path(image_path.clone(), config_dir);
+            }
+            StripeSourceConfig::Archive(ArchiveStorageConfig::Filesystem { path, .. }) => {
+                *path = resolve_path(path.clone(), config_dir);
+            }
+            _ => {}
         }
     }
 

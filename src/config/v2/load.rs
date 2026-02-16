@@ -1,5 +1,8 @@
 use serde::de::DeserializeOwned;
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use super::{tuning::TuningSection, Config, DeviceSection, EncryptionSection};
 use crate::{
@@ -23,16 +26,18 @@ impl Config {
         let merged = load_merged(root, config_dir, &Self::allowed_top_level_keys())?;
         let common = load_common(&merged)?;
 
-        let device: DeviceSection = parse_required_section(&merged, "device")?;
+        let mut device: DeviceSection = parse_required_section(&merged, "device")?;
+        resolve_device_paths(&mut device, config_dir);
 
         let tuning: TuningSection = parse_optional_section(&merged, "tuning")?.unwrap_or_default();
         tuning.validate()?;
 
         let encryption: Option<EncryptionSection> = parse_optional_section(&merged, "encryption")?;
-        let stripe_source: Option<StripeSourceConfig> =
+        let mut stripe_source: Option<StripeSourceConfig> =
             parse_optional_section(&merged, "stripe_source")?;
 
-        if let Some(stripe_source) = &stripe_source {
+        if let Some(stripe_source) = &mut stripe_source {
+            stripe_source.resolve_paths(config_dir);
             stripe_source.validate(&common.danger_zone, &common.secrets)?;
         }
 
@@ -64,6 +69,25 @@ impl Config {
             "secrets",
         ]
     }
+}
+
+pub(super) fn resolve_path(path: PathBuf, config_dir: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        config_dir.join(path)
+    }
+}
+
+pub(super) fn resolve_optional_path(path: Option<PathBuf>, config_dir: &Path) -> Option<PathBuf> {
+    path.map(|p| resolve_path(p, config_dir))
+}
+
+fn resolve_device_paths(device: &mut DeviceSection, config_dir: &Path) {
+    device.data_path = resolve_path(std::mem::take(&mut device.data_path), config_dir);
+    device.metadata_path = resolve_optional_path(device.metadata_path.take(), config_dir);
+    device.vhost_socket = resolve_optional_path(device.vhost_socket.take(), config_dir);
+    device.rpc_socket = resolve_optional_path(device.rpc_socket.take(), config_dir);
 }
 
 impl ArchiveTargetConfig {
@@ -539,5 +563,94 @@ address = "127.0.0.1:3322"
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Remote stripe source requires PSK unless danger_zone.allow_unencrypted_connection is enabled"));
+    }
+
+    #[test]
+    fn resolves_relative_device_paths_from_config_dir() {
+        let toml = r#"
+            [device]
+            data_path = "disk.raw"
+            metadata_path = "metadata"
+            vhost_socket = "vhost.sock"
+            rpc_socket = "/tmp/rpc.sock"
+            [stripe_source]
+            type = "raw"
+            image_path = "ubuntu.img"
+            [danger_zone]
+            enabled = true
+            allow_unencrypted_disk = true
+        "#;
+        let value: toml::Value = toml::from_str(toml).unwrap();
+        let config = Config::load_from_value(value, Path::new("/tmp/ubiblk-config")).unwrap();
+
+        assert_eq!(
+            config.device.data_path,
+            Path::new("/tmp/ubiblk-config/disk.raw")
+        );
+        assert_eq!(
+            config.device.metadata_path,
+            Some(PathBuf::from("/tmp/ubiblk-config/metadata"))
+        );
+        assert_eq!(
+            config.device.vhost_socket,
+            Some(PathBuf::from("/tmp/ubiblk-config/vhost.sock"))
+        );
+        assert_eq!(
+            config.device.rpc_socket,
+            Some(PathBuf::from("/tmp/rpc.sock"))
+        );
+        if let Some(StripeSourceConfig::Raw { image_path, .. }) = config.stripe_source {
+            assert_eq!(image_path, PathBuf::from("/tmp/ubiblk-config/ubuntu.img"));
+        } else {
+            panic!("Expected raw stripe source");
+        }
+    }
+
+    #[test]
+    fn resolves_relative_archive_filesystem_paths_from_config_dir() {
+        let toml = r#"
+            [device]
+            data_path = "disk.raw"
+            metadata_path = "metadata"
+            vhost_socket = "/tmp/vhost.sock"
+            rpc_socket = "rpc.sock"
+            [stripe_source]
+            type = "archive"
+            storage = "filesystem"
+            path = "archives"
+            archive_kek.ref = "archive_kek"
+            [secrets.archive_kek]
+            source.inline = "0123456789abcdef0123456789abcdef"
+            [danger_zone]
+            enabled = true
+            allow_unencrypted_disk = true
+            allow_inline_plaintext_secrets = true
+        "#;
+        let value: toml::Value = toml::from_str(toml).unwrap();
+        let config = Config::load_from_value(value, Path::new("/tmp/ubiblk-config")).unwrap();
+        assert_eq!(
+            config.device.data_path,
+            PathBuf::from("/tmp/ubiblk-config/disk.raw")
+        );
+        assert_eq!(
+            config.device.metadata_path,
+            Some(PathBuf::from("/tmp/ubiblk-config/metadata"))
+        );
+        assert_eq!(
+            config.device.vhost_socket,
+            Some(PathBuf::from("/tmp/vhost.sock"))
+        );
+        assert_eq!(
+            config.device.rpc_socket,
+            Some(PathBuf::from("/tmp/ubiblk-config/rpc.sock"))
+        );
+        if let Some(StripeSourceConfig::Archive(ArchiveStorageConfig::Filesystem {
+            path, ..
+        })) = config.stripe_source
+        {
+            assert_eq!(path, PathBuf::from("/tmp/ubiblk-config/archives"));
+        } else {
+            panic!("Expected archive stripe source");
+        }
     }
 }

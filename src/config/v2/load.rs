@@ -186,7 +186,9 @@ fn load_merged(root: toml::Value, config_dir: &Path, allowed_keys: &[&str]) -> R
 }
 
 fn load_common(merged: &toml::Value) -> Result<CommonResolvedConfig> {
-    let danger_zone = parse_optional_section(merged, "danger_zone")?.unwrap_or_default();
+    let danger_zone: DangerZone =
+        parse_optional_section(merged, "danger_zone")?.unwrap_or_default();
+    danger_zone.warn_ignored_flags();
     let secret_defs = parse_secrets(merged)?;
     let secrets = resolve_secrets(&secret_defs, &danger_zone)?;
     Ok(CommonResolvedConfig {

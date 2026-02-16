@@ -22,6 +22,16 @@ PROG = os.path.basename(sys.argv[0])
 
 STRIPE_CHOICES = {"64K": 7, "128K": 8, "256K": 9, "512K": 10, "1M": 11}
 SIZE_UNITS = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+DEFAULT_TUNING = {
+    "num_queues": 1,
+    "queue_size": 64,
+    "seg_size_max": 65536,
+    "seg_count_max": 4,
+    "poll_timeout_us": 1000,
+    "io_engine": "io_uring",
+    "write_through": False,
+}
+IO_ENGINE_CHOICES = ("io_uring", "sync")
 
 
 def die(msg):
@@ -143,7 +153,7 @@ def parse_size(s):
 
 # --- Config generation ---
 
-def make_config(*, use_kek, encrypted_xts_b64=None, base_image=None):
+def make_config(*, use_kek, tuning, encrypted_xts_b64=None, base_image=None):
     c = f"""\
 # WARNING: This configuration is for DEVELOPMENT use only.
 # All secrets are stored as local plaintext files.
@@ -183,12 +193,21 @@ encoding = "base64"
 source.file = "xts_key"
 encoding = "base64"
 """
-    c += """
+    c += f"""
 # WARNING: Remove this entire section for production.
 [danger_zone]
 enabled = true
 allow_inline_plaintext_secrets = true
 allow_secret_over_regular_file = true
+
+[tuning]
+num_queues = {tuning["num_queues"]}
+queue_size = {tuning["queue_size"]}
+seg_size_max = {tuning["seg_size_max"]}
+seg_count_max = {tuning["seg_count_max"]}
+poll_timeout_us = {tuning["poll_timeout_us"]}
+io_engine = "{tuning["io_engine"]}"
+write_through = {str(tuning["write_through"]).lower()}
 """
     if base_image:
         c += f"""
@@ -202,7 +221,7 @@ image_path = "{base_image}"
 # --- Core init ---
 
 def run_init(*, size_str, size_bytes, target_dir,
-             stripe_shift, use_kek, base_image=None, force=False):
+             stripe_shift, use_kek, tuning, base_image=None, force=False):
     target_dir = os.path.abspath(target_dir)
     os.makedirs(target_dir, exist_ok=True)
 
@@ -255,6 +274,7 @@ def run_init(*, size_str, size_bytes, target_dir,
     config_path = os.path.join(target_dir, "config.toml")
     atomic_write(config_path, make_config(
         use_kek=use_kek,
+        tuning=tuning,
         encrypted_xts_b64=encrypted_xts_b64, base_image=base_image))
     info("config.toml")
 
@@ -308,6 +328,21 @@ def wizard():
     ], default="1M")
     stripe_shift = STRIPE_CHOICES[stripe_label]
 
+    while True:
+        raw = ask("Number of queues", str(DEFAULT_TUNING["num_queues"]))
+        try:
+            num_queues = int(raw)
+            if num_queues > 0:
+                break
+        except (TypeError, ValueError):
+            # Invalid or non-integer input; a generic error message is printed below
+            # and the loop will retry.
+            pass
+        print("  Number of queues must be a positive integer.", file=sys.stderr)
+
+    tuning = DEFAULT_TUNING.copy()
+    tuning["num_queues"] = num_queues
+
     target_dir = ask("Target directory", ".")
 
     if not confirm("\nProceed? (Y/n)"):
@@ -324,7 +359,7 @@ def wizard():
 
     run_init(size_str=size_str, size_bytes=size_bytes, target_dir=target_dir,
              stripe_shift=stripe_shift,
-             use_kek=use_kek, base_image=base_image, force=force)
+             use_kek=use_kek, tuning=tuning, base_image=base_image, force=force)
 
 
 # --- CLI ---
@@ -340,8 +375,36 @@ def main():
     p.add_argument("--kek", action="store_true",
                     help="encrypt XTS key with a generated KEK")
     p.add_argument("--base", help="path to raw base image")
+    p.add_argument("--num-queues", type=int,
+                    default=DEFAULT_TUNING["num_queues"],
+                    help=f'number of queues (default: {DEFAULT_TUNING["num_queues"]})')
+    p.add_argument("--queue-size", type=int,
+                    default=DEFAULT_TUNING["queue_size"],
+                    help=f'queue depth (default: {DEFAULT_TUNING["queue_size"]})')
+    p.add_argument("--seg-size-max", type=int,
+                    default=DEFAULT_TUNING["seg_size_max"],
+                    help=("max segment size in bytes "
+                          f'(default: {DEFAULT_TUNING["seg_size_max"]})'))
+    p.add_argument("--seg-count-max", type=int,
+                    default=DEFAULT_TUNING["seg_count_max"],
+                    help=("max segment count per request "
+                          f'(default: {DEFAULT_TUNING["seg_count_max"]})'))
+    p.add_argument("--poll-timeout-us", type=int,
+                    default=DEFAULT_TUNING["poll_timeout_us"],
+                    help=("poll timeout in microseconds "
+                          f'(default: {DEFAULT_TUNING["poll_timeout_us"]})'))
+    p.add_argument("--io-engine", choices=IO_ENGINE_CHOICES,
+                    default=DEFAULT_TUNING["io_engine"],
+                    help=f'io engine (default: {DEFAULT_TUNING["io_engine"]})')
+    p.add_argument("--write-through", action="store_true",
+                    default=DEFAULT_TUNING["write_through"],
+                    help="enable write-through mode")
     p.add_argument("--force", action="store_true")
     args = p.parse_args()
+
+    for field in ("num_queues", "queue_size", "seg_size_max", "seg_count_max", "poll_timeout_us"):
+        if getattr(args, field) <= 0:
+            die(f"--{field.replace('_', '-')} must be a positive integer")
 
     if args.size is None:
         if not sys.stdin.isatty():
@@ -352,9 +415,21 @@ def main():
             size_str, size_bytes = parse_size(args.size)
         except ValueError as e:
             die(str(e))
+
+        tuning = {
+            "num_queues": args.num_queues,
+            "queue_size": args.queue_size,
+            "seg_size_max": args.seg_size_max,
+            "seg_count_max": args.seg_count_max,
+            "poll_timeout_us": args.poll_timeout_us,
+            "io_engine": args.io_engine,
+            "write_through": args.write_through,
+        }
+
         run_init(size_str=size_str, size_bytes=size_bytes, target_dir=args.dir,
                  stripe_shift=STRIPE_CHOICES[args.stripe_size],
-                 use_kek=args.kek, base_image=args.base, force=args.force)
+                 use_kek=args.kek, tuning=tuning,
+                 base_image=args.base, force=args.force)
 
 
 if __name__ == "__main__":

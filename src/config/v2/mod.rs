@@ -66,6 +66,8 @@ pub struct DangerZone {
     pub allow_secret_over_regular_file: bool,
     #[serde(default)]
     pub allow_unencrypted_connection: bool,
+    #[serde(default)]
+    pub allow_env_secrets: bool,
 }
 
 impl DangerZone {
@@ -87,6 +89,9 @@ impl DangerZone {
         }
         if self.allow_unencrypted_connection {
             flags.push("allow_unencrypted_connection");
+        }
+        if self.allow_env_secrets {
+            flags.push("allow_env_secrets");
         }
         flags
     }
@@ -173,12 +178,14 @@ mod tests {
             allow_inline_plaintext_secrets: true,
             allow_secret_over_regular_file: true,
             allow_unencrypted_connection: true,
+            allow_env_secrets: true,
         };
         let flags = dz.ignored_flags();
-        assert_eq!(flags.len(), 4);
+        assert_eq!(flags.len(), 5);
         assert!(flags.contains(&"allow_unencrypted_disk"));
         assert!(flags.contains(&"allow_inline_plaintext_secrets"));
         assert!(flags.contains(&"allow_secret_over_regular_file"));
         assert!(flags.contains(&"allow_unencrypted_connection"));
+        assert!(flags.contains(&"allow_env_secrets"));
     }
 }

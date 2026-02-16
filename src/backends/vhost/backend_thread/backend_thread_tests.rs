@@ -167,6 +167,7 @@ mod tests {
                 allow_inline_plaintext_secrets: true,
                 allow_secret_over_regular_file: true,
                 allow_unencrypted_connection: true,
+                allow_env_secrets: false,
             },
             stripe_source: None,
             secrets: std::collections::HashMap::new(),

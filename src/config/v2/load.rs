@@ -268,6 +268,9 @@ mod tests {
             xts_key.ref = "my_xts_key"
             [secrets.my_xts_key]
             source.env = "XTS_KEY"
+            [danger_zone]
+            enabled = true
+            allow_env_secrets = true
         "#;
         let config = parse_config(toml).expect("Failed to load config");
         assert_eq!(config.device.data_path, Path::new("/dev/ubiblk0"));
@@ -316,6 +319,9 @@ mod tests {
             xts_key.ref = "short_key"
             [secrets.short_key]
             source.env = "SHORT_KEY"
+            [danger_zone]
+            enabled = true
+            allow_env_secrets = true
         "#;
         let result = parse_config(toml);
         assert!(result.is_err());
@@ -442,6 +448,9 @@ path = "/backups/archive1"
 archive_kek.ref = "my_archive_kek"
 [secrets.my_archive_kek]
 source.env = "LOADS_VALID_TARGET_CONFIG_ARCHIVE_KEK"
+[danger_zone]
+enabled = true
+allow_env_secrets = true
         "#;
         let value: toml::Value = toml::from_str(toml).unwrap();
         let result = ArchiveTargetConfig::load_from_value(value, Path::new("."));
@@ -467,6 +476,9 @@ psk.identity = "node-a"
 psk.secret.ref = "my_psk"
 [secrets.my_psk]
 source.env = "LOADS_VALID_REMOTE_SERVER_CONFIG_PSK"
+[danger_zone]
+enabled = true
+allow_env_secrets = true
         "#;
 
         let value: toml::Value = toml::from_str(toml).unwrap();

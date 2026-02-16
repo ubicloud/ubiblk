@@ -149,12 +149,35 @@ struct CommonResolvedConfig {
 
 fn load_root_toml(path: &Path, error_context: &str) -> Result<toml::Value> {
     let content = std::fs::read_to_string(path).context(error_context.to_string())?;
+    warn_if_loose_permissions(path);
     toml::from_str(&content).map_err(|e| {
         ubiblk_error!(InvalidParameter {
             description: format!("Failed to parse TOML config: {}", e),
         })
     })
 }
+
+#[cfg(unix)]
+fn warn_if_loose_permissions(path: &Path) {
+    if let Some(mode) = get_file_mode(path) {
+        if mode & 0o077 != 0 {
+            log::warn!(
+                "config file '{}' is accessible to other users (mode {:04o}); consider restricting to 0600",
+                path.display(),
+                mode & 0o7777
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+fn get_file_mode(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).ok().map(|m| m.permissions().mode())
+}
+
+#[cfg(not(unix))]
+fn warn_if_loose_permissions(_path: &Path) {}
 
 fn load_merged(root: toml::Value, config_dir: &Path, allowed_keys: &[&str]) -> Result<toml::Value> {
     let merged = resolve_includes(root, config_dir)?;
@@ -451,6 +474,44 @@ source.env = "LOADS_VALID_REMOTE_SERVER_CONFIG_PSK"
         assert_eq!(config.server.address, "127.0.0.1:3322");
         assert_eq!(config.server.psk.as_ref().unwrap().identity, "node-a");
         assert_eq!(config.secrets.len(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn warns_on_loose_config_permissions() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("ubiblk-test-perms");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // File with 0644 should be detected as loose
+        let loose_path = dir.join("loose.toml");
+        let mut f = std::fs::File::create(&loose_path).unwrap();
+        f.write_all(b"[device]\ndata_path = \"/dev/x\"\n").unwrap();
+        std::fs::set_permissions(&loose_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let mode = get_file_mode(&loose_path).unwrap();
+        assert_ne!(
+            mode & 0o077,
+            0,
+            "0644 file should have group/other bits set"
+        );
+
+        // File with 0600 should not be flagged
+        let tight_path = dir.join("tight.toml");
+        let mut f = std::fs::File::create(&tight_path).unwrap();
+        f.write_all(b"[device]\ndata_path = \"/dev/x\"\n").unwrap();
+        std::fs::set_permissions(&tight_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mode = get_file_mode(&tight_path).unwrap();
+        assert_eq!(mode & 0o077, 0, "0600 file should have no group/other bits");
+
+        // load_root_toml should succeed (warning only, not error) even with loose perms
+        let result = load_root_toml(&loose_path, "test");
+        assert!(result.is_ok(), "loose permissions should warn, not error");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

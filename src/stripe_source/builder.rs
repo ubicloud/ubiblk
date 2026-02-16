@@ -192,8 +192,13 @@ impl StripeSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::v2::stripe_source::StripeSourceConfig;
-    use crate::config::v2::DeviceSection;
+    use crate::config::v2::secrets::{
+        resolve_secrets, SecretDef, SecretEncoding, SecretRef, SecretSource,
+    };
+    use crate::config::v2::stripe_source::{ArchiveStorageConfig, StripeSourceConfig};
+    use crate::config::v2::{DangerZone, DeviceSection};
+    use base64::Engine;
+    use std::collections::HashMap;
     use std::fs::File;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -319,5 +324,237 @@ mod tests {
         let stripe_source = result.unwrap();
         // NullBlockDevice has sector_count of 0
         assert_eq!(stripe_source.sector_count(), 0);
+    }
+
+    fn make_inline_secret(value: &str) -> SecretDef {
+        SecretDef {
+            source: SecretSource::Inline(
+                base64::engine::general_purpose::STANDARD.encode(value.as_bytes()),
+            ),
+            kek: None,
+            encoding: SecretEncoding::Base64,
+        }
+    }
+
+    fn make_inline_secret_bytes(value: &[u8]) -> SecretDef {
+        SecretDef {
+            source: SecretSource::Inline(base64::engine::general_purpose::STANDARD.encode(value)),
+            kek: None,
+            encoding: SecretEncoding::Base64,
+        }
+    }
+
+    fn danger_zone_permissive() -> DangerZone {
+        DangerZone {
+            enabled: true,
+            allow_unencrypted_disk: true,
+            allow_inline_plaintext_secrets: true,
+            allow_secret_over_regular_file: true,
+            allow_unencrypted_connection: true,
+            allow_env_secrets: false,
+        }
+    }
+
+    fn resolve(defs: HashMap<String, SecretDef>) -> HashMap<String, v2::secrets::ResolvedSecret> {
+        resolve_secrets(&defs, &danger_zone_permissive()).unwrap()
+    }
+
+    #[test]
+    fn test_build_archive_kek_filesystem() {
+        let kek_bytes = "0123456789abcdef0123456789abcdef";
+        let secrets = resolve(HashMap::from([(
+            "my_kek".to_string(),
+            make_inline_secret(kek_bytes),
+        )]));
+        let config = ArchiveStorageConfig::Filesystem {
+            path: "/tmp/archive".into(),
+            archive_kek: SecretRef::Ref("my_kek".to_string()),
+            autofetch: false,
+        };
+
+        let result = StripeSourceBuilder::build_archive_kek(&config, &secrets);
+        assert!(result.is_ok());
+        let kek = result.unwrap();
+        assert_eq!(kek.method, CipherMethod::Aes256Gcm);
+        assert_eq!(kek.key.unwrap(), kek_bytes.as_bytes());
+        assert_eq!(kek.auth_data.unwrap(), b"ubiblk_archive");
+    }
+
+    #[test]
+    fn test_build_archive_kek_s3() {
+        let kek_bytes = "0123456789abcdef0123456789abcdef";
+        let secrets = resolve(HashMap::from([
+            ("my_kek".to_string(), make_inline_secret(kek_bytes)),
+            (
+                "aws_key".to_string(),
+                make_inline_secret("AKIA1234567890123456"),
+            ),
+            ("aws_secret".to_string(), make_inline_secret("super-secret")),
+        ]));
+        let config = ArchiveStorageConfig::S3 {
+            bucket: "test-bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("aws_key".to_string()),
+            secret_access_key: SecretRef::Ref("aws_secret".to_string()),
+            endpoint: None,
+            connections: 4,
+            archive_kek: SecretRef::Ref("my_kek".to_string()),
+            autofetch: false,
+        };
+
+        let result = StripeSourceBuilder::build_archive_kek(&config, &secrets);
+        assert!(result.is_ok());
+        let kek = result.unwrap();
+        assert_eq!(kek.method, CipherMethod::Aes256Gcm);
+    }
+
+    #[test]
+    fn test_build_archive_kek_missing_secret() {
+        let secrets = HashMap::new();
+        let config = ArchiveStorageConfig::Filesystem {
+            path: "/tmp/archive".into(),
+            archive_kek: SecretRef::Ref("nonexistent".to_string()),
+            autofetch: false,
+        };
+
+        let result = StripeSourceBuilder::build_archive_kek(&config, &secrets);
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("not found"), "Got: {err}");
+    }
+
+    #[test]
+    fn test_build_aws_credentials_success() {
+        let secrets = resolve(HashMap::from([
+            (
+                "key_id".to_string(),
+                make_inline_secret("AKIA1234567890123456"),
+            ),
+            (
+                "secret_key".to_string(),
+                make_inline_secret("my-secret-access-key"),
+            ),
+        ]));
+
+        let result = StripeSourceBuilder::build_aws_credentials(
+            &SecretRef::Ref("key_id".to_string()),
+            &SecretRef::Ref("secret_key".to_string()),
+            &secrets,
+        );
+        assert!(result.is_ok());
+        let creds = result.unwrap();
+        assert!(creds.is_some());
+    }
+
+    #[test]
+    fn test_build_aws_credentials_missing_access_key_id() {
+        let secrets = resolve(HashMap::from([(
+            "secret_key".to_string(),
+            make_inline_secret("my-secret-access-key"),
+        )]));
+
+        let result = StripeSourceBuilder::build_aws_credentials(
+            &SecretRef::Ref("missing_key".to_string()),
+            &SecretRef::Ref("secret_key".to_string()),
+            &secrets,
+        );
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("access_key_id") && err.contains("not found"),
+            "Got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_build_aws_credentials_missing_secret_access_key() {
+        let secrets = resolve(HashMap::from([(
+            "key_id".to_string(),
+            make_inline_secret("AKIA1234567890123456"),
+        )]));
+
+        let result = StripeSourceBuilder::build_aws_credentials(
+            &SecretRef::Ref("key_id".to_string()),
+            &SecretRef::Ref("missing_secret".to_string()),
+            &secrets,
+        );
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("secret_access_key") && err.contains("not found"),
+            "Got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_build_aws_credentials_non_utf8_access_key_id() {
+        let secrets = resolve(HashMap::from([
+            (
+                "bad_key".to_string(),
+                make_inline_secret_bytes(&[0xFF, 0xFE, 0xFD]),
+            ),
+            (
+                "secret_key".to_string(),
+                make_inline_secret("my-secret-access-key"),
+            ),
+        ]));
+
+        let result = StripeSourceBuilder::build_aws_credentials(
+            &SecretRef::Ref("bad_key".to_string()),
+            &SecretRef::Ref("secret_key".to_string()),
+            &secrets,
+        );
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("access_key_id") && err.contains("not valid UTF-8"),
+            "Got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_build_aws_credentials_non_utf8_secret_access_key() {
+        let secrets = resolve(HashMap::from([
+            (
+                "key_id".to_string(),
+                make_inline_secret("AKIA1234567890123456"),
+            ),
+            (
+                "bad_secret".to_string(),
+                make_inline_secret_bytes(&[0xFF, 0xFE, 0xFD]),
+            ),
+        ]));
+
+        let result = StripeSourceBuilder::build_aws_credentials(
+            &SecretRef::Ref("key_id".to_string()),
+            &SecretRef::Ref("bad_secret".to_string()),
+            &secrets,
+        );
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("secret_access_key") && err.contains("not valid UTF-8"),
+            "Got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_build_archive_store_filesystem() {
+        let dir = tempdir().unwrap();
+        let archive_path = dir.path().join("archive");
+
+        let secrets = resolve(HashMap::from([(
+            "kek".to_string(),
+            make_inline_secret("0123456789abcdef0123456789abcdef"),
+        )]));
+        let config = ArchiveStorageConfig::Filesystem {
+            path: archive_path,
+            archive_kek: SecretRef::Ref("kek".to_string()),
+            autofetch: false,
+        };
+
+        let result = StripeSourceBuilder::build_archive_store(&config, &secrets);
+        assert!(result.is_ok());
     }
 }

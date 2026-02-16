@@ -115,6 +115,7 @@ allow_unencrypted_disk = true
 allow_inline_plaintext_secrets = true
 allow_secret_over_regular_file = true
 allow_unencrypted_connection = true
+allow_env_secrets = true
 ```
 
 | Flag | Default | Effect when enabled |
@@ -124,6 +125,7 @@ allow_unencrypted_connection = true
 | `allow_inline_plaintext_secrets` | false | Allow `source.inline` secrets without a KEK |
 | `allow_secret_over_regular_file` | false | Allow reading `source.file` secrets from regular files (not just pipes) |
 | `allow_unencrypted_connection` | false | Allow remote connections without PSK |
+| `allow_env_secrets` | false | Allow `source.env` secrets (environment variables persist in `/proc/PID/environ`) |
 
 ## Secrets
 
@@ -148,9 +150,17 @@ Each source is specified as a sub-key of `source`:
 |---------|--------|-------------|
 | `source.file` | path | Read secret from a file. Regular files are rejected unless `allow_secret_over_regular_file` is set; prefer named pipes. |
 | `source.inline` | string | Inline secret data. Without a `kek`, requires `allow_inline_plaintext_secrets`. |
-| `source.env` | string | Read secret from an environment variable. |
+| `source.env` | string | Read secret from an environment variable. Requires `allow_env_secrets`. |
 
 Secret data must not exceed 8192 bytes after decoding.
+
+**Security note on `source.env`:** Environment variables remain in the process
+environment for its entire lifetime and are readable via `/proc/PID/environ` by
+the same UID or root. Unlike pipe-based secrets which are consumed and discarded,
+env var secrets persist. For this reason, `source.env` requires
+`danger_zone.allow_env_secrets` to be enabled. For production use, prefer
+`source.file` with a named pipe, which delivers the secret through a
+one-time-read channel that leaves no trace in the process environment.
 
 ### Secret encoding
 
@@ -355,6 +365,14 @@ source.env = "AWS_ACCESS_KEY_ID"
 
 [secrets.aws-secret-key]
 source.env = "AWS_SECRET_ACCESS_KEY"
+```
+
+The S3 credentials above use `source.env`, so the config must include:
+
+```toml
+[danger_zone]
+enabled = true
+allow_env_secrets = true
 ```
 
 **stripe_source.toml:**

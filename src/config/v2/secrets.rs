@@ -189,7 +189,7 @@ fn load_source(
     match source {
         SecretSource::File(path) => load_file_source(name, path, danger_zone),
         SecretSource::Inline(data) => load_inline_source(name, data, encrypted, danger_zone),
-        SecretSource::Env(var) => load_env_source(name, var),
+        SecretSource::Env(var) => load_env_source(name, var, danger_zone),
     }
 }
 
@@ -264,7 +264,15 @@ fn load_inline_source(
     Ok(bytes)
 }
 
-fn load_env_source(name: &str, var: &str) -> Result<Vec<u8>> {
+fn load_env_source(name: &str, var: &str, danger_zone: &DangerZone) -> Result<Vec<u8>> {
+    if !(danger_zone.enabled && danger_zone.allow_env_secrets) {
+        return Err(ubiblk_error!(InvalidParameter {
+            description: format!(
+                "secrets.{name}: source.env requires danger_zone.allow_env_secrets to be enabled \
+                 (environment variables persist in /proc/PID/environ)"
+            )
+        }));
+    }
     let value = std::env::var(var).map_err(|e| {
         ubiblk_error!(InvalidParameter {
             description: format!(
@@ -608,5 +616,47 @@ mod tests {
         let error = resolve_secrets(&defs, &default_danger_zone()).unwrap_err();
         let error_message = format!("{error}");
         assert!(error_message.contains("circular secret references detected"));
+    }
+
+    #[test]
+    fn resolve_secrets_rejects_env_source_without_danger_zone() {
+        std::env::set_var("TEST_REJECT_ENV_SECRET", "secret-value");
+        let defs = HashMap::from([(
+            "api".to_string(),
+            SecretDef {
+                source: SecretSource::Env("TEST_REJECT_ENV_SECRET".to_string()),
+                kek: None,
+                encoding: SecretEncoding::Plaintext,
+            },
+        )]);
+
+        let error = resolve_secrets(&defs, &default_danger_zone()).unwrap_err();
+        let error_message = format!("{error}");
+        assert!(
+            error_message.contains("source.env requires danger_zone.allow_env_secrets"),
+            "unexpected error: {error_message}"
+        );
+    }
+
+    #[test]
+    fn resolve_secrets_accepts_env_source_with_allow_env_secrets() {
+        std::env::set_var("TEST_ACCEPT_ENV_SECRET", "secret-value");
+        let defs = HashMap::from([(
+            "api".to_string(),
+            SecretDef {
+                source: SecretSource::Env("TEST_ACCEPT_ENV_SECRET".to_string()),
+                kek: None,
+                encoding: SecretEncoding::Plaintext,
+            },
+        )]);
+
+        let danger_zone = DangerZone {
+            enabled: true,
+            allow_env_secrets: true,
+            ..DangerZone::default()
+        };
+
+        let resolved = resolve_secrets(&defs, &danger_zone).unwrap();
+        assert_eq!(resolved["api"].as_bytes(), b"secret-value");
     }
 }

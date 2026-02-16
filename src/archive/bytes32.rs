@@ -36,3 +36,102 @@ where
 
     deserializer.deserialize_bytes(Bytes32Visitor)
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Wrapper {
+        #[serde(with = "super")]
+        data: [u8; 32],
+    }
+
+    fn cbor_roundtrip(wrapper: &Wrapper) -> Vec<u8> {
+        let mut buf = Vec::new();
+        ciborium::into_writer(wrapper, &mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn serialize_deserialize_roundtrip() {
+        let original = Wrapper { data: [0xAB; 32] };
+        let bytes = cbor_roundtrip(&original);
+        let decoded: Wrapper = ciborium::from_reader(&bytes[..]).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn serialize_deserialize_zeros() {
+        let original = Wrapper { data: [0; 32] };
+        let bytes = cbor_roundtrip(&original);
+        let decoded: Wrapper = ciborium::from_reader(&bytes[..]).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn deserialize_wrong_length_too_short() {
+        // Manually craft CBOR with a bytes field that's too short (16 bytes instead of 32)
+        #[derive(Serialize)]
+        struct FakeWrapper {
+            data: ciborium::Value,
+        }
+        let fake = FakeWrapper {
+            data: ciborium::Value::Bytes(vec![0xAA; 16]),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&fake, &mut buf).unwrap();
+
+        let result: Result<Wrapper, _> = ciborium::from_reader(&buf[..]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_wrong_length_too_long() {
+        #[derive(Serialize)]
+        struct FakeWrapper {
+            data: ciborium::Value,
+        }
+        let fake = FakeWrapper {
+            data: ciborium::Value::Bytes(vec![0xBB; 64]),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&fake, &mut buf).unwrap();
+
+        let result: Result<Wrapper, _> = ciborium::from_reader(&buf[..]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_wrong_length_empty() {
+        #[derive(Serialize)]
+        struct FakeWrapper {
+            data: ciborium::Value,
+        }
+        let fake = FakeWrapper {
+            data: ciborium::Value::Bytes(vec![]),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&fake, &mut buf).unwrap();
+
+        let result: Result<Wrapper, _> = ciborium::from_reader(&buf[..]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_wrong_type() {
+        // Pass a string instead of bytes — triggers the `expecting` method
+        #[derive(Serialize)]
+        struct FakeWrapper {
+            data: String,
+        }
+        let fake = FakeWrapper {
+            data: "not bytes".to_string(),
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&fake, &mut buf).unwrap();
+
+        let result: Result<Wrapper, _> = ciborium::from_reader(&buf[..]);
+        assert!(result.is_err());
+    }
+}

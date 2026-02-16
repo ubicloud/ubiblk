@@ -8,7 +8,7 @@ use super::{tuning::TuningSection, Config, DeviceSection, EncryptionSection};
 use crate::{
     config::v2::{
         includes::resolve_includes,
-        secrets::{parse_secrets, resolve_secrets, ResolvedSecret},
+        secrets::{parse_secrets, resolve_secrets, ResolvedSecret, SecretSource},
         stripe_source::{ArchiveStorageConfig, RemoteStripeConfig, StripeSourceConfig},
         ArchiveTargetConfig, DangerZone, RemoteStripeServerConfig,
     },
@@ -24,7 +24,7 @@ impl Config {
 
     fn load_from_value(root: toml::Value, config_dir: &Path) -> Result<Self> {
         let merged = load_merged(root, config_dir, &Self::allowed_top_level_keys())?;
-        let common = load_common(&merged)?;
+        let common = load_common(&merged, config_dir)?;
 
         let mut device: DeviceSection = parse_required_section(&merged, "device")?;
         resolve_device_paths(&mut device, config_dir);
@@ -99,7 +99,7 @@ impl ArchiveTargetConfig {
 
     fn load_from_value(value: toml::Value, config_dir: &Path) -> Result<Self> {
         let merged = load_merged(value, config_dir, &Self::allowed_top_level_keys())?;
-        let common = load_common(&merged)?;
+        let common = load_common(&merged, config_dir)?;
 
         let target: ArchiveStorageConfig = parse_required_section(&merged, "target")?;
         target.validate(&common.secrets)?;
@@ -125,7 +125,7 @@ impl RemoteStripeServerConfig {
 
     fn load_from_value(value: toml::Value, config_dir: &Path) -> Result<Self> {
         let merged = load_merged(value, config_dir, &Self::allowed_top_level_keys())?;
-        let common = load_common(&merged)?;
+        let common = load_common(&merged, config_dir)?;
 
         let server: RemoteStripeConfig = parse_required_section(&merged, "server")?;
         server.validate(&common.danger_zone, &common.secrets)?;
@@ -209,16 +209,28 @@ fn load_merged(root: toml::Value, config_dir: &Path, allowed_keys: &[&str]) -> R
     Ok(merged)
 }
 
-fn load_common(merged: &toml::Value) -> Result<CommonResolvedConfig> {
+fn load_common(merged: &toml::Value, config_dir: &Path) -> Result<CommonResolvedConfig> {
     let danger_zone: DangerZone =
         parse_optional_section(merged, "danger_zone")?.unwrap_or_default();
     danger_zone.warn_ignored_flags();
-    let secret_defs = parse_secrets(merged)?;
+    let mut secret_defs = parse_secrets(merged)?;
+    resolve_secret_paths(&mut secret_defs, config_dir);
     let secrets = resolve_secrets(&secret_defs, &danger_zone)?;
     Ok(CommonResolvedConfig {
         danger_zone,
         secrets,
     })
+}
+
+fn resolve_secret_paths(
+    secret_defs: &mut HashMap<String, super::secrets::SecretDef>,
+    config_dir: &Path,
+) {
+    for secret_def in secret_defs.values_mut() {
+        if let SecretSource::File(path) = &mut secret_def.source {
+            *path = resolve_path(std::mem::take(path), config_dir);
+        }
+    }
 }
 
 fn parse_required_section<T: DeserializeOwned>(merged: &toml::Value, key: &str) -> Result<T> {
@@ -652,5 +664,35 @@ address = "127.0.0.1:3322"
         } else {
             panic!("Expected archive stripe source");
         }
+    }
+
+    #[test]
+    fn resolves_relative_secret_file_paths_from_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("secret.txt");
+        std::fs::write(
+            &secret_path,
+            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+
+        let toml = r#"
+            [device]
+            data_path = "disk.raw"
+            [encryption]
+            xts_key.ref = "xts"
+            [secrets.xts]
+            source.file = "secret.txt"
+            [danger_zone]
+            enabled = true
+            allow_secret_over_regular_file = true
+        "#;
+        let value: toml::Value = toml::from_str(toml).unwrap();
+        let config = Config::load_from_value(value, dir.path()).unwrap();
+
+        assert_eq!(
+            config.secrets["xts"].as_bytes(),
+            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
     }
 }

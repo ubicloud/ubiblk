@@ -92,8 +92,36 @@ pub fn resolve_includes(root: Value, config_dir: &Path) -> Result<Value> {
 
     root_table.remove("include");
 
+    let canonical_config_dir = config_dir.canonicalize().map_err(|e| {
+        ubiblk_error!(InvalidParameter {
+            description: format!(
+                "failed to canonicalize config directory {:?}: {e}",
+                config_dir
+            )
+        })
+    })?;
+
     for entry in &entries {
         let file_path = config_dir.join(&entry.path);
+
+        // Guard against symlink traversal: canonicalize the resolved path
+        // and verify it stays within the config directory.
+        match file_path.canonicalize() {
+            Ok(canonical_path) => {
+                if !canonical_path.starts_with(&canonical_config_dir) {
+                    return Err(ubiblk_error!(InvalidParameter {
+                        description: format!(
+                            "include '{:?}': resolved path escapes config directory",
+                            entry.path
+                        )
+                    }));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && entry.optional => continue,
+            Err(_) => {
+                // Fall through to read_to_string which will produce the appropriate error
+            }
+        }
 
         let content = match std::fs::read_to_string(&file_path) {
             Ok(c) => c,
@@ -343,6 +371,72 @@ mod tests {
 
         let error = resolve_includes(root, dir.path()).unwrap_err();
         assert!(format!("{error}").contains("nested includes are not allowed"));
+    }
+
+    #[test]
+    fn resolve_includes_rejects_symlink_escaping_config_dir() {
+        let dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+
+        // Create a file outside the config directory
+        fs::write(
+            outside_dir.path().join("secret.toml"),
+            "[secrets]\nkey = \"val\"\n",
+        )
+        .unwrap();
+
+        // Create a symlink inside the config dir pointing outside
+        std::os::unix::fs::symlink(
+            outside_dir.path().join("secret.toml"),
+            dir.path().join("escape.toml"),
+        )
+        .unwrap();
+
+        let root = toml::from_str::<toml::Value>(r#"include = ["escape.toml"]"#).unwrap();
+        let error = resolve_includes(root, dir.path()).unwrap_err();
+        assert!(
+            format!("{error}").contains("resolved path escapes config directory"),
+            "expected escape error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn resolve_includes_allows_symlink_within_config_dir() {
+        let dir = TempDir::new().unwrap();
+
+        // Create a real file inside the config directory
+        fs::write(
+            dir.path().join("real-secrets.toml"),
+            "[secrets]\nkey = \"val\"\n",
+        )
+        .unwrap();
+
+        // Create a symlink inside the config dir pointing to the real file
+        std::os::unix::fs::symlink(
+            dir.path().join("real-secrets.toml"),
+            dir.path().join("link-secrets.toml"),
+        )
+        .unwrap();
+
+        let root = toml::from_str::<toml::Value>(r#"include = ["link-secrets.toml"]"#).unwrap();
+        let resolved = resolve_includes(root, dir.path()).unwrap();
+        assert_eq!(
+            toml_get_path(&resolved, &["secrets", "key"]),
+            Some(&Value::String("val".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_includes_allows_regular_file_inside_config_dir() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("extras.toml"), "[extras]\nfoo = \"bar\"\n").unwrap();
+
+        let root = toml::from_str::<toml::Value>(r#"include = ["extras.toml"]"#).unwrap();
+        let resolved = resolve_includes(root, dir.path()).unwrap();
+        assert_eq!(
+            toml_get_path(&resolved, &["extras", "foo"]),
+            Some(&Value::String("bar".to_string()))
+        );
     }
 
     #[test]

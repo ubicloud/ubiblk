@@ -142,7 +142,8 @@ to validate compatibility.
       "level": 3
     }
   },
-  "hmac_key": "<BASE64-ENCODED-ENCRYPTED-HMAC-KEY>"
+  "hmac_key": "<BASE64-ENCODED-ENCRYPTED-HMAC-KEY>",
+  "metadata_hmac": "<BASE64-ENCODED-HMAC-TAG>"
 }
 ```
 
@@ -154,7 +155,14 @@ to store stripe payloads. For `none`, this is a string value.
 For zstd, this is an object containing the configured compression level.
 The `level` field is required when `compression` is `zstd`.
 `hmac_key` stores a KEK-encrypted HMAC key used to authenticate
-`stripe-mapping`.
+`stripe-mapping`. `metadata_hmac` stores a 32-byte HMAC-SHA256 tag that
+authenticates selected metadata fields (`format_version`,
+`stripe_sector_count`, `encryption_key`, and `compression`) using a domain-
+separated input (`ARCHIVE_METADATA_HMAC_V1`).
+
+Before trusting any metadata fields, readers verify `metadata_hmac` using
+`hmac_key`. This prevents tampering with archive parameters such as the stripe
+layout, compression mode, or encrypted archive key.
 
 ### `stripe-mapping`
 

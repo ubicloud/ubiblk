@@ -315,4 +315,97 @@ mod tests {
         remove_device_symlink(&link).expect("Failed to remove device symlink");
         assert!(!link.exists());
     }
+
+    #[test]
+    fn test_remove_device_symlink_not_found() {
+        let _l = UMASK_LOCK.lock().unwrap();
+        let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let link = tmp_dir.path().join("nonexistent-symlink");
+        // Should succeed silently when path doesn't exist
+        remove_device_symlink(&link).expect("Should succeed for nonexistent path");
+    }
+
+    #[test]
+    fn test_remove_device_symlink_not_a_symlink() {
+        let _l = UMASK_LOCK.lock().unwrap();
+        let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let link = tmp_dir.path().join("regular-file");
+        std::fs::write(&link, b"not a symlink").expect("Failed to create file");
+        // Should succeed but leave the file in place
+        remove_device_symlink(&link).expect("Should succeed for non-symlink");
+        assert!(link.exists(), "Non-symlink file should be left in place");
+    }
+
+    #[test]
+    fn test_ublk_op_from_raw() {
+        assert_eq!(
+            UblkOp::from_raw(libublk::sys::UBLK_IO_OP_READ),
+            UblkOp::Read
+        );
+        assert_eq!(
+            UblkOp::from_raw(libublk::sys::UBLK_IO_OP_WRITE),
+            UblkOp::Write
+        );
+        assert_eq!(
+            UblkOp::from_raw(libublk::sys::UBLK_IO_OP_FLUSH),
+            UblkOp::Flush
+        );
+        assert_eq!(UblkOp::from_raw(0xFF), UblkOp::Unsupported);
+        assert_eq!(UblkOp::from_raw(u32::MAX), UblkOp::Unsupported);
+    }
+
+    #[test]
+    fn test_create_device_symlink_nested_parent() {
+        let _l = UMASK_LOCK.lock().unwrap();
+        let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let target = tmp_dir.path().join("ublk-target");
+        let link = tmp_dir.path().join("a/b/c/ublk-symlink");
+        create_device_symlink(&target, &link).expect("Failed to create device symlink");
+        let symlink_target = std::fs::read_link(&link).expect("Failed to read symlink");
+        assert_eq!(symlink_target, target);
+    }
+
+    #[test]
+    fn test_create_device_symlink_replaces_existing_symlink() {
+        let _l = UMASK_LOCK.lock().unwrap();
+        let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let target1 = tmp_dir.path().join("target1");
+        let target2 = tmp_dir.path().join("target2");
+        let link = tmp_dir.path().join("ublk-symlink");
+        // Create initial symlink
+        std::os::unix::fs::symlink(&target1, &link).expect("Failed to create symlink");
+        // Replace with new target
+        create_device_symlink(&target2, &link).expect("Failed to replace device symlink");
+        let symlink_target = std::fs::read_link(&link).expect("Failed to read symlink");
+        assert_eq!(symlink_target, target2);
+    }
+
+    #[test]
+    fn test_set_thread_name_valid() {
+        // Should not panic with a valid name
+        set_thread_name("test-thread");
+    }
+
+    #[test]
+    fn test_set_thread_name_with_nul() {
+        // Name containing a null byte — CString::new will fail, but
+        // set_thread_name should handle it gracefully (just log an error)
+        set_thread_name("bad\0name");
+    }
+
+    #[test]
+    fn test_ublk_io_request_fields() {
+        let req = UblkIoRequest {
+            op: UblkOp::Read,
+            sector_offset: 100,
+            sector_count: 8,
+            request_id: 3,
+            bytes: 4096,
+        };
+        assert_eq!(req.op, UblkOp::Read);
+        assert_eq!(req.sector_offset, 100);
+        assert_eq!(req.sector_count, 8);
+        assert_eq!(req.request_id, 3);
+        assert_eq!(req.bytes, 4096);
+    }
 }

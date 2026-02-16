@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+"""ubiblk-init — Initialize a ubiblk development project directory.
+
+Creates disk.raw (sparse), metadata, config.toml, and key material.
+NOT intended for production use.
+
+Usage:
+  ubiblk-init                  # interactive wizard
+  ubiblk-init --size 1G        # non-interactive defaults
+"""
+
+import argparse
+import base64
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from contextlib import suppress
+
+PROG = os.path.basename(sys.argv[0])
+
+STRIPE_CHOICES = {"64K": 7, "128K": 8, "256K": 9, "512K": 10, "1M": 11}
+SIZE_UNITS = {"K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+
+
+def die(msg):
+    print(f"{PROG}: error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def warn(msg):
+    if sys.stderr.isatty():
+        print(f"\033[1;31mWARNING:\033[0m {msg}", file=sys.stderr)
+    else:
+        print(f"WARNING: {msg}", file=sys.stderr)
+
+
+def info(msg):
+    print(f"  * {msg}", file=sys.stderr)
+
+
+# --- Input helpers ---
+
+def ask(prompt, default=None):
+    """Prompt for free text with optional default."""
+    suffix = f" [{default}]" if default is not None else ""
+    try:
+        raw = input(f"{prompt}{suffix}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        die("aborted")
+    return raw or default
+
+
+def choose(prompt, options, default=None):
+    """Prompt user to pick from a list. options: [(value, label), ...]."""
+    print(f"\n{prompt}", file=sys.stderr)
+    default_idx = None
+    for i, (val, label) in enumerate(options, 1):
+        tag = " (default)" if val == default else ""
+        print(f"  [{i}] {label}{tag}", file=sys.stderr)
+        if val == default:
+            default_idx = i
+    while True:
+        raw = ask("Choice", str(default_idx) if default_idx else None)
+        try:
+            idx = int(raw)
+            if 1 <= idx <= len(options):
+                return options[idx - 1][0]
+        except (TypeError, ValueError):
+            # Invalid or non-numeric input; fall through to prompt again.
+            continue
+        print(f"  Enter 1-{len(options)}.", file=sys.stderr)
+
+
+def confirm(prompt, default="y"):
+    """Ask for a yes/no confirmation.
+    The `default` parameter should be one of the valid lowercase responses,
+    typically "y" or "n". A response (or default) is treated as affirmative
+    if, when lowercased, it is "y" or "yes"; all other values are treated
+    as negative.
+    """
+    raw = ask(prompt, default)
+    return raw.lower() in ("y", "yes")
+
+
+# --- File helpers ---
+
+def fsync_path(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_write(dest, content):
+    dest = os.path.abspath(dest)
+    parent = os.path.dirname(dest)
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=parent, prefix=".tmp.")
+        with os.fdopen(fd, "wb") as f:
+            f.write(content.encode() if isinstance(content, str) else content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, dest)
+        tmp_path = None  # Signal that rename was successful
+        fsync_path(parent)
+    finally:
+        if tmp_path:
+            with suppress(OSError):
+                os.unlink(tmp_path)
+
+
+# --- Crypto ---
+
+def encrypt_xts_key(xts_key_raw, kek_raw):
+    """Encrypt XTS key with AES-256-GCM. AAD = b"xts_key".
+    Returns base64(nonce + ciphertext + tag)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    nonce = os.urandom(12)
+    ct = AESGCM(kek_raw).encrypt(nonce, xts_key_raw, b"xts_key")
+    return base64.b64encode(nonce + ct).decode()
+
+
+# --- Size parsing ---
+
+def parse_size(s):
+    s = s.strip().upper()
+    if not s:
+        raise ValueError("empty size string")
+    if s[-1] in SIZE_UNITS:
+        val = int(s[:-1])
+    else:
+        val = int(s)
+    if val <= 0:
+        raise ValueError("size must be a positive integer")
+    if s[-1] in SIZE_UNITS:
+        return s, val * SIZE_UNITS[s[-1]]
+    return s, val
+
+
+# --- Config generation ---
+
+def make_config(*, use_kek, encrypted_xts_b64=None, base_image=None):
+    c = f"""\
+# WARNING: This configuration is for DEVELOPMENT use only.
+# All secrets are stored as local plaintext files.
+#
+# For production:
+#   - Do NOT use source.file for key material.
+#   - Deliver the KEK via a named pipe, HSM, or secret manager.
+#   - Remove the [danger_zone] section entirely.
+
+[device]
+data_path = "disk.raw"
+metadata_path = "metadata"
+vhost_socket = "vhost.sock"
+
+[encryption]
+xts_key.ref = "xts_key"
+"""
+    if use_kek:
+        c += f"""
+# WARNING: The KEK is stored in a plaintext file for dev convenience.
+# In production, do not store the KEK in a plaintext file; obtain it
+# from a secure external source.
+[secrets.xts_key]
+source.inline = "{encrypted_xts_b64}"
+encoding = "base64"
+kek.ref = "kek"
+
+[secrets.kek]
+source.file = "kek"
+encoding = "base64"
+"""
+    else:
+        c += """
+# WARNING: The XTS key is stored in a plaintext file for dev convenience.
+# In production, encrypt the XTS key with a KEK and use kek.ref.
+[secrets.xts_key]
+source.file = "xts_key"
+encoding = "base64"
+"""
+    c += """
+# WARNING: Remove this entire section for production.
+[danger_zone]
+enabled = true
+allow_inline_plaintext_secrets = true
+allow_secret_over_regular_file = true
+"""
+    if base_image:
+        c += f"""
+[stripe_source]
+type = "raw"
+image_path = "{base_image}"
+"""
+    return c
+
+
+# --- Core init ---
+
+def run_init(*, size_str, size_bytes, target_dir,
+             stripe_shift, use_kek, base_image=None, force=False):
+    target_dir = os.path.abspath(target_dir)
+    os.makedirs(target_dir, exist_ok=True)
+
+    if not shutil.which("init-metadata"):
+        die("init-metadata not found on PATH")
+
+    if base_image:
+        try:
+            base_image = os.path.realpath(base_image)
+        except OSError as e:
+            die(f"failed to resolve base image path '{base_image}': {e}")
+        if not os.path.isfile(base_image):
+            die(f"base image not found: {base_image}")
+
+    expected = ["disk.raw", "metadata", "config.toml"]
+    expected.append("kek" if use_kek else "xts_key")
+    for name in expected:
+        p = os.path.join(target_dir, name)
+        if os.path.exists(p) and not force:
+            die(f"{p} already exists (use --force to overwrite)")
+
+    print(f"\nInitializing ubiblk ({size_str}) in {target_dir}", file=sys.stderr)
+
+    # 1. Disk image
+    disk_path = os.path.join(target_dir, "disk.raw")
+    with open(disk_path, "wb") as f:
+        f.truncate(size_bytes)
+    fsync_path(disk_path)
+    info(f"disk.raw ({size_str})")
+
+    # 2. Key material
+    encrypted_xts_b64 = None
+    # 64 bytes = 512 bits total (2 × 256-bit AES keys) for AES-256-XTS
+    xts_key_raw = os.urandom(64)
+
+    if use_kek:
+        # 32 bytes = 256 bits for AES-256-GCM KEK
+        kek_raw = os.urandom(32)
+        kek_b64 = base64.b64encode(kek_raw).decode()
+        atomic_write(os.path.join(target_dir, "kek"), kek_b64)
+        encrypted_xts_b64 = encrypt_xts_key(xts_key_raw, kek_raw)
+        info("kek (KEK, base64)")
+        info("XTS key encrypted with KEK")
+    else:
+        xts_b64 = base64.b64encode(xts_key_raw).decode()
+        atomic_write(os.path.join(target_dir, "xts_key"), xts_b64)
+        info("xts_key (base64)")
+
+    # 3. Config
+    config_path = os.path.join(target_dir, "config.toml")
+    atomic_write(config_path, make_config(
+        use_kek=use_kek,
+        encrypted_xts_b64=encrypted_xts_b64, base_image=base_image))
+    info("config.toml")
+
+    # 4. Metadata
+    subprocess.run(["init-metadata", "--config", config_path,
+                   "--stripe-sector-count-shift", str(stripe_shift)],
+                   cwd=target_dir, check=True, capture_output=True)
+    info("metadata")
+
+    print(f"\nDone. Project ready at {target_dir}\n", file=sys.stderr)
+    print(f"Now run 'vhost-backend --config {config_path}'\n", file=sys.stderr)
+
+
+# --- Wizard ---
+
+def wizard():
+    print("\nubiblk-init — development setup\n", file=sys.stderr)
+    warn("This tool is for development only. Key management isn't secure.\n")
+
+    while True:
+        raw = ask("Disk size (e.g. 512M, 1G, 10G)", "1G")
+        try:
+            size_str, size_bytes = parse_size(raw)
+            break
+        except ValueError as e:
+            print(f"  {e}", file=sys.stderr)
+
+    base_image = None
+    if choose("Base image:", [
+        (False, "No base image (empty disk)"),
+        (True, "Use an existing raw image"),
+    ], default=False):
+        while True:
+            path = ask("  Path to base image")
+            if path and os.path.isfile(path):
+                try:
+                    base_image = os.path.realpath(path)
+                except OSError as e:
+                    print(f"  failed to resolve base image path '{path}': {e}", file=sys.stderr)
+                    continue
+                break
+            print("  File not found.", file=sys.stderr)
+
+    use_kek = choose("Key encryption:", [
+        (False, "No — store XTS key directly"),
+        (True, "Yes — wrap XTS key with a generated KEK"),
+    ], default=False)
+
+    stripe_label = choose("Stripe size:", [
+        (k, k) for k in STRIPE_CHOICES
+    ], default="1M")
+    stripe_shift = STRIPE_CHOICES[stripe_label]
+
+    target_dir = ask("Target directory", ".")
+
+    if not confirm("\nProceed? (Y/n)"):
+        die("aborted")
+
+    force = False
+    abs_target = os.path.abspath(target_dir)
+    existing = [f for f in ["disk.raw", "metadata", "config.toml", "kek", "xts_key"]
+                if os.path.exists(os.path.join(abs_target, f))]
+    if existing:
+        if not confirm(f"  Files exist ({', '.join(existing)}). Overwrite? (y/N)", "n"):
+            die("aborted")
+        force = True
+
+    run_init(size_str=size_str, size_bytes=size_bytes, target_dir=target_dir,
+             stripe_shift=stripe_shift,
+             use_kek=use_kek, base_image=base_image, force=force)
+
+
+# --- CLI ---
+
+def main():
+    p = argparse.ArgumentParser(prog=PROG,
+        description="Initialize a ubiblk development project directory.",
+        epilog="Without --size, runs an interactive wizard.")
+    p.add_argument("--size", help="disk size, e.g. 512M, 1G")
+    p.add_argument("--dir", default=".", help="target directory")
+    p.add_argument("--stripe-size", choices=STRIPE_CHOICES.keys(), default="1M",
+                    help="stripe size (default: 1M)")
+    p.add_argument("--kek", action="store_true",
+                    help="encrypt XTS key with a generated KEK")
+    p.add_argument("--base", help="path to raw base image")
+    p.add_argument("--force", action="store_true")
+    args = p.parse_args()
+
+    if args.size is None:
+        if not sys.stdin.isatty():
+            die("non-interactive requires --size")
+        wizard()
+    else:
+        try:
+            size_str, size_bytes = parse_size(args.size)
+        except ValueError as e:
+            die(str(e))
+        run_init(size_str=size_str, size_bytes=size_bytes, target_dir=args.dir,
+                 stripe_shift=STRIPE_CHOICES[args.stripe_size],
+                 use_kek=args.kek, base_image=args.base, force=args.force)
+
+
+if __name__ == "__main__":
+    main()

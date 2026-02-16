@@ -292,7 +292,7 @@ impl StripeArchiver {
 
     fn archive_metadata(&self) -> Result<ArchiveMetadata> {
         let encryption_key = if let Some(block_cipher) = self.block_cipher.as_ref() {
-            Some(block_cipher.encrypted_keys(&self.kek)?)
+            Some(block_cipher.encrypted_key(&self.kek)?)
         } else {
             None
         };

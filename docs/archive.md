@@ -114,7 +114,8 @@ These sections use the same format as the main ubiblk config. See
 details.
 
 > **Note:** The archive KEK must be exactly 32 bytes. KEK-encrypted values use
-> the format `[12-byte nonce || ciphertext || 16-byte GCM tag]`.
+> AES-256-GCM with AAD set to the fixed ASCII string `"ubiblk_archive"`, and
+> ciphertext is encoded as `[12-byte nonce || ciphertext || 16-byte GCM tag]`.
 
 ## Archive Format
 
@@ -135,10 +136,7 @@ to validate compatibility.
 {
   "format_version": 1,
   "stripe_sector_count": 2048,
-  "encryption_key": [
-    "<BASE64-ENCODED-KEY-1>",
-    "<BASE64-ENCODED-KEY-2>"
-  ],
+  "encryption_key": "<BASE64-ENCODED-64-BYTE-XTS-KEY>",
   "compression": {
     "zstd": {
       "level": 3
@@ -149,9 +147,9 @@ to validate compatibility.
 ```
 
 `stripe_sector_count` indicates the number of 512-byte sectors per stripe. When
-`--encrypt` is enabled, the two keys stored in `encryption_key` are encrypted
-with the archive KEK before being base64 encoded; otherwise, `encryption_key`
-is `null`. The `compression` field records the algorithm used
+`--encrypt` is enabled, the 64-byte XTS key stored in `encryption_key` is
+encrypted with the archive KEK before being base64 encoded; otherwise,
+`encryption_key` is `null`. The `compression` field records the algorithm used
 to store stripe payloads. For `none`, this is a string value.
 For zstd, this is an object containing the configured compression level.
 The `level` field is required when `compression` is `zstd`.

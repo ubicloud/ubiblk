@@ -144,6 +144,8 @@ pub enum ArchiveStorageConfig {
         region: Option<String>,
         access_key_id: SecretRef,
         secret_access_key: SecretRef,
+        #[serde(default)]
+        session_token: Option<SecretRef>,
         endpoint: Option<String>,
         #[serde(default = "default_connections")]
         connections: usize,
@@ -168,6 +170,7 @@ impl ArchiveStorageConfig {
                 connections,
                 access_key_id,
                 secret_access_key,
+                session_token,
                 archive_kek,
                 ..
             } => {
@@ -180,6 +183,12 @@ impl ArchiveStorageConfig {
                     secret_access_key,
                     resolved_secrets,
                 )?)?;
+                if let Some(session_token) = session_token {
+                    Self::validate_aws_session_token(get_resolved_secret(
+                        session_token,
+                        resolved_secrets,
+                    )?)?;
+                }
                 Self::validate_prefix(prefix)?;
                 Self::validate_connections(connections)
             }
@@ -234,6 +243,15 @@ impl ArchiveStorageConfig {
         if access_key_id.as_bytes().is_empty() {
             return Err(ubiblk_error!(InvalidParameter {
                 description: "AWS access_key_id cannot be empty".to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_aws_session_token(session_token: &ResolvedSecret) -> Result<()> {
+        if session_token.as_bytes().is_empty() {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: "AWS session_token cannot be empty".to_string(),
             }));
         }
         Ok(())
@@ -320,6 +338,7 @@ mod tests {
             region = "eu-west-1"
             access_key_id.ref = "aws-access-key-id"
             secret_access_key.ref = "aws-secret-access-key"
+            session_token.ref = "aws-session-token"
             archive_kek.ref = "archive-kek"
             autofetch = false
         "#;
@@ -332,6 +351,7 @@ mod tests {
                 region: Some("eu-west-1".to_string()),
                 access_key_id: SecretRef::Ref("aws-access-key-id".to_string()),
                 secret_access_key: SecretRef::Ref("aws-secret-access-key".to_string()),
+                session_token: Some(SecretRef::Ref("aws-session-token".to_string())),
                 archive_kek: SecretRef::Ref("archive-kek".to_string()),
                 autofetch: false,
                 connections: 16,
@@ -360,6 +380,7 @@ mod tests {
                 region: Some("eu-west-1".to_string()),
                 access_key_id: SecretRef::Ref("aws-access-key-id".to_string()),
                 secret_access_key: SecretRef::Ref("aws-secret-access-key".to_string()),
+                session_token: None,
                 archive_kek: SecretRef::Ref("archive-kek".to_string()),
                 autofetch: false,
                 connections: 16,
@@ -432,6 +453,7 @@ mod tests {
                 access_key_id,
                 secret_access_key,
                 archive_kek,
+                session_token,
                 ..
             }) => {
                 assert_eq!(access_key_id, SecretRef::Ref("my-access-key".to_string()));
@@ -440,6 +462,7 @@ mod tests {
                     SecretRef::Ref("my-secret-key".to_string())
                 );
                 assert_eq!(archive_kek, SecretRef::Ref("my-kek".to_string()));
+                assert_eq!(session_token, None);
             }
             _ => panic!("expected archive s3"),
         }
@@ -636,6 +659,7 @@ mod tests {
             region: Some("us-east-1".to_string()),
             access_key_id: SecretRef::Ref("key".to_string()),
             secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: None,
             archive_kek: SecretRef::Ref("kek".to_string()),
             autofetch: false,
             connections: 16,
@@ -649,6 +673,48 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_empty_s3_session_token() {
+        let mut secrets = valid_s3_secrets();
+        let empty_defs = HashMap::from([(
+            "session".to_string(),
+            SecretDef {
+                source: SecretSource::Inline(b64_engine.encode("".as_bytes())),
+                kek: None,
+                encoding: SecretEncoding::Base64,
+            },
+        )]);
+        secrets.extend(
+            resolve_secrets(
+                &empty_defs,
+                &DangerZone {
+                    enabled: true,
+                    allow_inline_plaintext_secrets: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        );
+
+        let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("key".to_string()),
+            secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: Some(SecretRef::Ref("session".to_string())),
+            archive_kek: SecretRef::Ref("kek".to_string()),
+            autofetch: false,
+            connections: 16,
+            endpoint: None,
+        });
+
+        let result = config.validate(&DangerZone::default(), &secrets);
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("AWS session_token cannot be empty"));
+    }
+
+    #[test]
     fn validate_rejects_invalid_s3_connections() {
         let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
             bucket: "bucket".to_string(),
@@ -656,6 +722,7 @@ mod tests {
             region: Some("us-east-1".to_string()),
             access_key_id: SecretRef::Ref("key".to_string()),
             secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: None,
             archive_kek: SecretRef::Ref("kek".to_string()),
             autofetch: false,
             connections: 0,

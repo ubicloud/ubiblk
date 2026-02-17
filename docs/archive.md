@@ -82,6 +82,7 @@ endpoint = "https://s3.example.com"
 connections = 16
 access_key_id.ref = "s3-access-key-id"
 secret_access_key.ref = "s3-secret-access-key"
+session_token.ref = "s3-session-token"      # optional
 archive_kek.ref = "archive-kek"
 
 [secrets.s3-access-key-id]
@@ -104,6 +105,7 @@ source.env = "UBIBLK_ARCHIVE_KEK"
 | `connections` | integer | no | 16 | Number of S3 connections (must be > 0) |
 | `access_key_id.ref` | string | yes | — | Reference to AWS access key ID secret |
 | `secret_access_key.ref` | string | yes | — | Reference to AWS secret access key secret |
+| `session_token.ref` | string | no | — | Reference to AWS session token secret (for temporary credentials) |
 | `archive_kek.ref` | string | yes | — | Reference to a 32-byte AES-256-GCM KEK secret |
 | `autofetch` | boolean | no | false | Fetch stripes in the background |
 

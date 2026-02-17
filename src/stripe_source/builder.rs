@@ -5,7 +5,11 @@ use crate::{
     archive::{ArchiveStore, FileSystemStore, S3Store},
     backends::build_raw_image_device,
     block_device::NullBlockDevice,
-    config::v2::{self, stripe_source::ArchiveStorageConfig},
+    config::v2::{
+        self,
+        secrets::{get_resolved_secret, ResolvedSecret, SecretRef},
+        stripe_source::ArchiveStorageConfig,
+    },
     stripe_server::connect_to_stripe_server,
     utils::s3::{build_s3_client, create_runtime},
     CipherMethod, KeyEncryptionCipher, Result,
@@ -72,62 +76,44 @@ impl StripeSourceBuilder {
         )?))
     }
 
-    fn build_aws_credentials(
-        access_key_id: &v2::secrets::SecretRef,
-        secret_access_key: &v2::secrets::SecretRef,
-        secrets: &std::collections::HashMap<String, v2::secrets::ResolvedSecret>,
-    ) -> Result<Option<aws_sdk_s3::config::Credentials>> {
-        let access_key_id = String::from_utf8(
-            secrets
-                .get(access_key_id.id())
-                .ok_or_else(|| {
-                    crate::ubiblk_error!(InvalidParameter {
-                        description: format!(
-                            "AWS access_key_id secret '{}' not found",
-                            access_key_id.id()
-                        ),
-                    })
-                })?
-                .as_bytes()
-                .to_vec(),
-        )
-        .map_err(|e| {
+    fn resolved_secret_to_string(
+        secret_ref: &SecretRef,
+        secrets: &std::collections::HashMap<String, ResolvedSecret>,
+    ) -> Result<String> {
+        let secret = get_resolved_secret(secret_ref, secrets)?;
+        String::from_utf8(secret.as_bytes().to_vec()).map_err(|_| {
             crate::ubiblk_error!(InvalidParameter {
-                description: format!("AWS access_key_id is not valid UTF-8: {e}"),
+                description: format!("Secret '{}' is not valid UTF-8", secret_ref.id()),
             })
-        })?;
-        let secret_access_key = String::from_utf8(
-            secrets
-                .get(secret_access_key.id())
-                .ok_or_else(|| {
-                    crate::ubiblk_error!(InvalidParameter {
-                        description: format!(
-                            "AWS secret_access_key secret '{}' not found",
-                            secret_access_key.id()
-                        ),
-                    })
-                })?
-                .as_bytes()
-                .to_vec(),
-        )
-        .map_err(|e| {
-            crate::ubiblk_error!(InvalidParameter {
-                description: format!("AWS secret_access_key is not valid UTF-8: {e}"),
-            })
-        })?;
+        })
+    }
 
-        Ok(Some(
-            aws_sdk_s3::config::Credentials::builder()
-                .access_key_id(access_key_id)
-                .secret_access_key(secret_access_key)
-                .provider_name("ubiblk_archive")
-                .build(),
-        ))
+    fn build_aws_credentials(
+        access_key_id: &SecretRef,
+        secret_access_key: &SecretRef,
+        session_token: Option<&SecretRef>,
+        secrets: &std::collections::HashMap<String, ResolvedSecret>,
+    ) -> Result<Option<aws_sdk_s3::config::Credentials>> {
+        let access_key_id = Self::resolved_secret_to_string(access_key_id, secrets)?;
+        let secret_access_key = Self::resolved_secret_to_string(secret_access_key, secrets)?;
+        let session_token = session_token
+            .map(|t| Self::resolved_secret_to_string(t, secrets))
+            .transpose()?;
+
+        let mut credentials = aws_sdk_s3::config::Credentials::builder()
+            .access_key_id(access_key_id)
+            .secret_access_key(secret_access_key)
+            .provider_name("ubiblk_archive");
+        if let Some(session_token) = session_token {
+            credentials = credentials.session_token(session_token);
+        }
+
+        Ok(Some(credentials.build()))
     }
 
     pub fn build_archive_kek(
         config: &ArchiveStorageConfig,
-        secrets: &std::collections::HashMap<String, v2::secrets::ResolvedSecret>,
+        secrets: &std::collections::HashMap<String, ResolvedSecret>,
     ) -> Result<KeyEncryptionCipher> {
         let archive_kek = match config {
             ArchiveStorageConfig::Filesystem { archive_kek, .. } => archive_kek,
@@ -151,7 +137,7 @@ impl StripeSourceBuilder {
 
     pub fn build_archive_store(
         config: &ArchiveStorageConfig,
-        secrets: &std::collections::HashMap<String, v2::secrets::ResolvedSecret>,
+        secrets: &std::collections::HashMap<String, ResolvedSecret>,
     ) -> Result<Box<dyn ArchiveStore>> {
         match config {
             ArchiveStorageConfig::Filesystem { path, .. } => {
@@ -163,12 +149,17 @@ impl StripeSourceBuilder {
                 region,
                 access_key_id,
                 secret_access_key,
+                session_token,
                 connections,
                 endpoint,
                 ..
             } => {
-                let decrypted_credentials =
-                    Self::build_aws_credentials(access_key_id, secret_access_key, secrets)?;
+                let decrypted_credentials = Self::build_aws_credentials(
+                    access_key_id,
+                    secret_access_key,
+                    session_token.as_ref(),
+                    secrets,
+                )?;
                 let runtime = create_runtime()?;
                 let client = build_s3_client(
                     &runtime,
@@ -192,9 +183,7 @@ impl StripeSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::v2::secrets::{
-        resolve_secrets, SecretDef, SecretEncoding, SecretRef, SecretSource,
-    };
+    use crate::config::v2::secrets::{resolve_secrets, SecretDef, SecretEncoding, SecretSource};
     use crate::config::v2::stripe_source::{ArchiveStorageConfig, StripeSourceConfig};
     use crate::config::v2::{DangerZone, DeviceSection};
     use base64::Engine;
@@ -355,7 +344,7 @@ mod tests {
         }
     }
 
-    fn resolve(defs: HashMap<String, SecretDef>) -> HashMap<String, v2::secrets::ResolvedSecret> {
+    fn resolve(defs: HashMap<String, SecretDef>) -> HashMap<String, ResolvedSecret> {
         resolve_secrets(&defs, &danger_zone_permissive()).unwrap()
     }
 
@@ -397,6 +386,7 @@ mod tests {
             region: Some("us-east-1".to_string()),
             access_key_id: SecretRef::Ref("aws_key".to_string()),
             secret_access_key: SecretRef::Ref("aws_secret".to_string()),
+            session_token: None,
             endpoint: None,
             connections: 4,
             archive_kek: SecretRef::Ref("my_kek".to_string()),
@@ -440,11 +430,99 @@ mod tests {
         let result = StripeSourceBuilder::build_aws_credentials(
             &SecretRef::Ref("key_id".to_string()),
             &SecretRef::Ref("secret_key".to_string()),
+            None,
             &secrets,
         );
         assert!(result.is_ok());
         let creds = result.unwrap();
         assert!(creds.is_some());
+    }
+
+    #[test]
+    fn test_build_aws_credentials_with_session_token() {
+        let secrets = resolve(HashMap::from([
+            (
+                "key_id".to_string(),
+                make_inline_secret("AKIA1234567890123456"),
+            ),
+            (
+                "secret_key".to_string(),
+                make_inline_secret("my-secret-access-key"),
+            ),
+            ("session".to_string(), make_inline_secret("session-token")),
+        ]));
+
+        let result = StripeSourceBuilder::build_aws_credentials(
+            &SecretRef::Ref("key_id".to_string()),
+            &SecretRef::Ref("secret_key".to_string()),
+            Some(&SecretRef::Ref("session".to_string())),
+            &secrets,
+        );
+        assert!(result.is_ok());
+        let creds = result.unwrap().unwrap();
+        assert_eq!(creds.session_token(), Some("session-token"));
+    }
+
+    #[test]
+    fn test_build_aws_credentials_missing_session_token() {
+        let secrets = resolve(HashMap::from([
+            (
+                "key_id".to_string(),
+                make_inline_secret("AKIA1234567890123456"),
+            ),
+            (
+                "secret_key".to_string(),
+                make_inline_secret("my-secret-access-key"),
+            ),
+        ]));
+        let result = StripeSourceBuilder::build_aws_credentials(
+            &SecretRef::Ref("key_id".to_string()),
+            &SecretRef::Ref("secret_key".to_string()),
+            Some(&SecretRef::Ref("missing_session".to_string())),
+            &secrets,
+        );
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("missing_session") && err.contains("not found"),
+            "Got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_build_aws_credentials_non_utf8_session_token() {
+        let secrets = resolve(HashMap::from([
+            (
+                "key_id".to_string(),
+                make_inline_secret("AKIA1234567890123456"),
+            ),
+            (
+                "secret_key".to_string(),
+                make_inline_secret("my-secret-access-key"),
+            ),
+            (
+                "session".to_string(),
+                SecretDef {
+                    source: SecretSource::Inline(
+                        base64::engine::general_purpose::STANDARD.encode([0xFF, 0xFE, 0xFD]),
+                    ),
+                    kek: None,
+                    encoding: SecretEncoding::Base64,
+                },
+            ),
+        ]));
+        let result = StripeSourceBuilder::build_aws_credentials(
+            &SecretRef::Ref("key_id".to_string()),
+            &SecretRef::Ref("secret_key".to_string()),
+            Some(&SecretRef::Ref("session".to_string())),
+            &secrets,
+        );
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("session") && err.to_lowercase().contains("utf-8"),
+            "Got: {err}"
+        );
     }
 
     #[test]
@@ -457,12 +535,13 @@ mod tests {
         let result = StripeSourceBuilder::build_aws_credentials(
             &SecretRef::Ref("missing_key".to_string()),
             &SecretRef::Ref("secret_key".to_string()),
+            None,
             &secrets,
         );
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
-            err.contains("access_key_id") && err.contains("not found"),
+            err.contains("missing_key") && err.contains("not found"),
             "Got: {err}"
         );
     }
@@ -477,12 +556,13 @@ mod tests {
         let result = StripeSourceBuilder::build_aws_credentials(
             &SecretRef::Ref("key_id".to_string()),
             &SecretRef::Ref("missing_secret".to_string()),
+            None,
             &secrets,
         );
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
-            err.contains("secret_access_key") && err.contains("not found"),
+            err.contains("missing_secret") && err.contains("not found"),
             "Got: {err}"
         );
     }
@@ -503,12 +583,13 @@ mod tests {
         let result = StripeSourceBuilder::build_aws_credentials(
             &SecretRef::Ref("bad_key".to_string()),
             &SecretRef::Ref("secret_key".to_string()),
+            None,
             &secrets,
         );
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
-            err.contains("access_key_id") && err.contains("not valid UTF-8"),
+            err.contains("bad_key") && err.contains("not valid UTF-8"),
             "Got: {err}"
         );
     }
@@ -529,12 +610,13 @@ mod tests {
         let result = StripeSourceBuilder::build_aws_credentials(
             &SecretRef::Ref("key_id".to_string()),
             &SecretRef::Ref("bad_secret".to_string()),
+            None,
             &secrets,
         );
         assert!(result.is_err());
         let err = format!("{}", result.unwrap_err());
         assert!(
-            err.contains("secret_access_key") && err.contains("not valid UTF-8"),
+            err.contains("bad_secret") && err.contains("not valid UTF-8"),
             "Got: {err}"
         );
     }

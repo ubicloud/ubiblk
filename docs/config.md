@@ -243,6 +243,7 @@ prefix = "v1/"                              # optional
 region = "eu-west-1"                        # optional
 access_key_id.ref = "aws-access-key"
 secret_access_key.ref = "aws-secret-key"
+session_token.ref = "aws-session-token"      # optional
 archive_kek.ref = "archive-kek"
 endpoint = "https://s3.example.com"         # optional
 connections = 16                            # optional, default: 16
@@ -256,6 +257,7 @@ autofetch = false                           # optional, default: false
 | `region` | string | no | — | AWS region |
 | `access_key_id.ref` | string | yes | — | Reference to AWS access key ID secret |
 | `secret_access_key.ref` | string | yes | — | Reference to AWS secret access key secret |
+| `session_token.ref` | string | no | — | Reference to AWS session token secret (for temporary credentials) |
 | `archive_kek.ref` | string | yes | — | Reference to 32-byte archive KEK secret |
 | `endpoint` | string | no | — | Custom S3 endpoint URL |
 | `connections` | integer | no | 16 | Number of S3 connections (must be > 0) |
@@ -385,6 +387,7 @@ prefix = "v1/"
 region = "eu-west-1"
 access_key_id.ref = "aws-access-key"
 secret_access_key.ref = "aws-secret-key"
+session_token.ref = "aws-session-token"      # optional
 archive_kek.ref = "archive-kek"
 autofetch = true
 ```

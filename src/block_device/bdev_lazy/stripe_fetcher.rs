@@ -172,9 +172,15 @@ impl StripeFetcher {
 
     fn start_fetches(&mut self) {
         while !self.fetch_queue.is_empty() && self.buffer_pool.has_available() {
-            let stripe_id = self.fetch_queue.pop_front().unwrap();
+            let stripe_id = self
+                .fetch_queue
+                .pop_front()
+                .expect("loop guard ensures fetch queue is non-empty");
 
-            let buf = self.buffer_pool.get_buffer().unwrap();
+            let buf = self
+                .buffer_pool
+                .get_buffer()
+                .expect("loop guard ensures buffer pool has available buffers");
             self.allocated_buffers.insert(stripe_id, buf.clone());
             if let Err(e) = self.stripe_source.request(stripe_id, buf.clone()) {
                 error!("Failed to request stripe {stripe_id} from source: {e:?}");

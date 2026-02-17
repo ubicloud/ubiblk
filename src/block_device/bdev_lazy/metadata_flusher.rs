@@ -182,7 +182,10 @@ impl MetadataFlusher {
         let mut newly_added = Vec::new();
 
         while !self.queued_requests.is_empty() && self.buffer_pool.has_available() {
-            let req = *self.queued_requests.front().unwrap();
+            let req = *self
+                .queued_requests
+                .front()
+                .expect("loop guard ensures queue is non-empty");
             let group = UbiMetadata::stripe_id_to_group(req.stripe_id);
             let sector = UbiMetadata::stripe_id_to_sector(req.stripe_id);
             if self.sectors_being_updated.contains(&sector) {
@@ -201,7 +204,10 @@ impl MetadataFlusher {
                 continue;
             }
 
-            let buf = self.buffer_pool.get_buffer().unwrap();
+            let buf = self
+                .buffer_pool
+                .get_buffer()
+                .expect("loop guard ensures buffer pool has available buffers");
             self.metadata.stripe_headers[req.stripe_id] |= requested_bitmask;
 
             let headers_start = group * STRIPE_HEADERS_PER_SECTOR;

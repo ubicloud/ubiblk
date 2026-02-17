@@ -71,7 +71,9 @@ fn run() -> Result<()> {
         }
 
         let mut parts = trimmed.split_whitespace();
-        let cmd = parts.next().unwrap();
+        let cmd = parts
+            .next()
+            .expect("non-empty trimmed string has at least one token");
 
         match cmd {
             "exit" | "quit" => break,

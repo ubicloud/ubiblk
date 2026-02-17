@@ -71,7 +71,9 @@ fn compressed_payload(data: &[u8]) -> Result<&[u8]> {
             description: "Data too short to contain size header".to_string(),
         }));
     }
-    let size_bytes: [u8; 4] = data[0..4].try_into().unwrap();
+    let size_bytes: [u8; 4] = data[0..4]
+        .try_into()
+        .expect("slice is exactly 4 bytes after length check");
     let compressed_size = u32::from_le_bytes(size_bytes) as usize;
     if compressed_size + 4 > data.len() {
         return Err(crate::ubiblk_error!(ArchiveError {

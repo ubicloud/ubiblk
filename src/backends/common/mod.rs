@@ -804,4 +804,191 @@ mod tests {
 
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
     }
+
+    #[test]
+    fn init_metadata_without_stripe_source() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let metadata_file = tempfile::NamedTempFile::new().unwrap();
+        metadata_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), Some(metadata_file.path()), None);
+        init_metadata(&config, 11).unwrap();
+    }
+
+    #[test]
+    fn init_metadata_fails_without_metadata_path() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), None, None);
+        let result = init_metadata(&config, 11);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("metadata_path"));
+    }
+
+    #[test]
+    fn build_block_device_with_encryption() {
+        use crate::config::v2::secrets::{
+            resolve_secrets, SecretDef, SecretEncoding, SecretRef, SecretSource,
+        };
+        use std::collections::HashMap;
+
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        // Create a 64-byte XTS key (2x32 bytes) as base64-encoded inline secret
+        use base64::Engine;
+        let xts_key_b64 = base64::engine::general_purpose::STANDARD.encode([0x42u8; 64]);
+        let secret_defs = HashMap::from([(
+            "xts-key".to_string(),
+            SecretDef {
+                source: SecretSource::Inline(xts_key_b64),
+                kek: None,
+                encoding: SecretEncoding::Base64,
+            },
+        )]);
+        let danger_zone = v2::DangerZone {
+            enabled: true,
+            allow_unencrypted_disk: true,
+            allow_inline_plaintext_secrets: true,
+            allow_secret_over_regular_file: true,
+            allow_unencrypted_connection: true,
+            allow_env_secrets: false,
+        };
+        let secrets = resolve_secrets(&secret_defs, &danger_zone).unwrap();
+
+        let mut config = test_config(disk_file.path(), None, None);
+        config.encryption = Some(v2::EncryptionSection {
+            xts_key: SecretRef::Ref("xts-key".to_string()),
+        });
+        config.secrets = secrets;
+
+        let result = build_block_device(disk_file.path(), &config, false);
+        assert!(
+            result.is_ok(),
+            "build_block_device failed: {:?}",
+            result.err().map(|e| e.to_string())
+        );
+    }
+
+    #[test]
+    fn build_block_device_with_encryption_missing_secret() {
+        use crate::config::v2::secrets::SecretRef;
+
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let mut config = test_config(disk_file.path(), None, None);
+        config.encryption = Some(v2::EncryptionSection {
+            xts_key: SecretRef::Ref("missing-key".to_string()),
+        });
+
+        let result = build_block_device(disk_file.path(), &config, false);
+        assert!(result.is_err());
+        let err = format!("{}", result.err().unwrap());
+        assert!(err.contains("missing"));
+    }
+
+    #[test]
+    fn run_backend_loop_with_rpc_socket() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let rpc_dir = tempfile::tempdir().unwrap();
+        let rpc_path = rpc_dir.path().join("test.sock");
+
+        let mut config = test_config(disk_file.path(), None, None);
+        config.device.rpc_socket = Some(rpc_path);
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_handle = call_count.clone();
+        run_backend_loop(&config, "test-backend", false, |_| {
+            call_count_handle.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn status_reporter_returns_none_without_metadata() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), None, None);
+        let env = BackendEnv::build(&config).unwrap();
+        assert!(env.status_reporter().is_none());
+    }
+
+    #[test]
+    fn ensure_metadata_file_rejects_non_regular_file() {
+        let _umask_guard = UMASK_LOCK.lock().unwrap();
+        // /dev/null can be opened read+write but is not a regular file
+        let result = ensure_metadata_file(Path::new("/dev/null"), SECTOR_SIZE);
+        assert!(result.is_err());
+        let err = format!("{}", result.err().unwrap());
+        assert!(
+            err.contains("not a regular file"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ensure_metadata_file_preserves_size_when_already_large_enough() {
+        let _umask_guard = UMASK_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let metadata_path = dir.path().join("metadata.bin");
+        // Create file larger than minimum
+        std::fs::write(&metadata_path, vec![0u8; SECTOR_SIZE * 8]).unwrap();
+        std::fs::set_permissions(&metadata_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        ensure_metadata_file(&metadata_path, SECTOR_SIZE).unwrap();
+
+        // Size should NOT have been truncated
+        assert_eq!(
+            std::fs::metadata(&metadata_path).unwrap().len(),
+            (SECTOR_SIZE * 8) as u64
+        );
+    }
+
+    #[test]
+    fn stop_bgworker_on_env_without_bgworker() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), None, None);
+        let mut env = BackendEnv::build(&config).unwrap();
+        // Should not panic when there is no bgworker
+        env.stop_bgworker_thread();
+    }
+
+    #[test]
+    fn run_bgworker_thread_noop_without_config() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), None, None);
+        let mut env = BackendEnv::build(&config).unwrap();
+        // No bgworker_config, so this is a no-op
+        env.run_bgworker_thread().unwrap();
+    }
+
+    #[test]
+    fn create_io_engine_sync() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+
+        let result = create_io_engine_device(
+            v2::tuning::IoEngine::Sync,
+            disk_file.path().to_path_buf(),
+            128,
+            false,
+            true,
+            true,
+        );
+        assert!(result.is_ok());
+    }
 }

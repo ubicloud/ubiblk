@@ -633,4 +633,142 @@ mod tests {
         // restore original affinity
         sched_setaffinity(Pid::from_raw(0), &orig_affinity).unwrap();
     }
+
+    #[test]
+    fn get_request_slot_allocates_larger_when_existing_too_small() {
+        let (mut thread, mem) = create_thread();
+        let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
+        let chain = build_chain(&mem, &[desc]);
+        let req = Request::new(
+            RequestType::In,
+            vec![(GuestAddress(0x2000), 64u32)],
+            0,
+            GuestAddress(0),
+        );
+
+        // Fill all existing slots
+        for _ in 0..thread.request_slots.len() {
+            thread.get_request_slot(64, &req, &chain);
+        }
+        // Now request a larger buffer than any existing slot — forces push path
+        let big_req = Request::new(
+            RequestType::In,
+            vec![(GuestAddress(0x2000), (SECTOR_SIZE * 4) as u32)],
+            0,
+            GuestAddress(0),
+        );
+        let idx = thread.get_request_slot(SECTOR_SIZE * 4, &big_req, &chain);
+        assert!(idx >= 2); // pushed beyond original slots
+        assert!(thread.request_slots[idx].used);
+    }
+
+    #[test]
+    fn process_queue_handles_flush() {
+        use virtio_bindings::virtio_blk::VIRTIO_BLK_T_FLUSH;
+
+        let (mut thread, mem, device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let addrs = setup_queue_request(&mem, &queue, 0x1000, VIRTIO_BLK_T_FLUSH, 0, 0, 0);
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_OK as u8);
+
+        let metrics = device.metrics.read().unwrap();
+        assert_eq!(metrics.flushes, 1);
+    }
+
+    #[test]
+    fn process_queue_write_from_invalid_guest_addr() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+
+        // Set up a write request with data at an invalid (out-of-bounds) guest address
+        let hdr = GuestAddress(0x1000);
+        let data = GuestAddress(0x20000); // beyond guest memory
+        let status = GuestAddress(0x3000);
+        mem.write_obj::<u32>(VIRTIO_BLK_T_OUT, hdr).unwrap();
+        mem.write_obj::<u32>(0, hdr.unchecked_add(4)).unwrap();
+        mem.write_obj::<u64>(0, hdr.unchecked_add(8)).unwrap();
+
+        let descs = [
+            RawDescriptor::from(SplitDescriptor::new(hdr.0, 16, VRING_DESC_F_NEXT as u16, 1)),
+            RawDescriptor::from(SplitDescriptor::new(
+                data.0,
+                SECTOR_SIZE as u32,
+                VRING_DESC_F_NEXT as u16,
+                2,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                status.0,
+                1,
+                VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+        ];
+        queue.add_desc_chains(&descs, 0).unwrap();
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        let status_val = mem.read_obj::<u8>(status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_IOERR as u8);
+
+        let metrics = device.metrics.read().unwrap();
+        assert_eq!(metrics.writes, 0);
+    }
+
+    #[test]
+    fn process_queue_with_event_idx_enabled() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        thread.event_idx = true;
+
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let addrs = setup_queue_request(
+            &mem,
+            &queue,
+            0x1000,
+            VIRTIO_BLK_T_IN,
+            0,
+            SECTOR_SIZE as u32,
+            VRING_DESC_F_WRITE as u16,
+        );
+
+        let pattern = vec![0x42; SECTOR_SIZE];
+        device.write(0, &pattern, pattern.len());
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_OK as u8);
+    }
+
+    #[test]
+    fn process_get_device_id_handles_write_failure() {
+        let (mut thread, mem) = create_thread();
+        let desc = SplitDescriptor::new(0x1000, 16, VRING_DESC_F_WRITE as u16, 0);
+        let chain = build_chain(&mem, &[desc]);
+        // data_addr is outside guest memory so write_slice will fail
+        let data_addr = GuestAddress(0x20000);
+        let status_addr = GuestAddress(0x5000);
+        let request = Request::new(
+            RequestType::GetDeviceID,
+            vec![(data_addr, VIRTIO_BLK_ID_BYTES)],
+            0,
+            status_addr,
+        );
+        let vring = setup_vring(&mem);
+        let mut vring_guard = vring.get_mut();
+
+        thread.process_get_device_id(&request, chain, &mut vring_guard);
+
+        let status = mem.read_obj::<u8>(status_addr).unwrap();
+        assert_eq!(status, VIRTIO_BLK_S_IOERR as u8);
+    }
 }

@@ -65,7 +65,7 @@ source.env = "UBIBLK_ARCHIVE_KEK"
 |-------|------|----------|-------------|
 | `storage` | string | yes | Must be `"filesystem"` |
 | `path` | path | yes | Directory to store archive objects |
-| `archive_kek.ref` | string | yes | Reference to a 32-byte AES-256-GCM KEK secret |
+| `archive_kek.ref` | string | no | Reference to a 32-byte AES-256-GCM KEK secret |
 | `autofetch` | boolean | no | Fetch stripes in the background (default: false) |
 
 ### `[target]` — S3
@@ -106,7 +106,7 @@ source.env = "UBIBLK_ARCHIVE_KEK"
 | `access_key_id.ref` | string | yes | — | Reference to AWS access key ID secret |
 | `secret_access_key.ref` | string | yes | — | Reference to AWS secret access key secret |
 | `session_token.ref` | string | no | — | Reference to AWS session token secret (for temporary credentials) |
-| `archive_kek.ref` | string | yes | — | Reference to a 32-byte AES-256-GCM KEK secret |
+| `archive_kek.ref` | string | no | — | Reference to a 32-byte AES-256-GCM KEK secret |
 | `autofetch` | boolean | no | false | Fetch stripes in the background |
 
 ### `[secrets.*]` and `[danger_zone]`

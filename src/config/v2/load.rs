@@ -494,7 +494,7 @@ allow_env_secrets = true
         let config = result.unwrap();
         assert!(matches!(config.target, ArchiveStorageConfig::Filesystem {
             path, archive_kek, ..
-        } if path == Path::new("/backups/archive1") && archive_kek.id() == "my_archive_kek"));
+        } if path == Path::new("/backups/archive1") && archive_kek.as_ref().is_some_and(|k| k.id() == "my_archive_kek")));
         assert_eq!(config.secrets.len(), 1);
     }
 

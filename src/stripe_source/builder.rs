@@ -119,6 +119,11 @@ impl StripeSourceBuilder {
             ArchiveStorageConfig::Filesystem { archive_kek, .. } => archive_kek,
             ArchiveStorageConfig::S3 { archive_kek, .. } => archive_kek,
         };
+
+        let Some(archive_kek) = archive_kek else {
+            return Ok(KeyEncryptionCipher::default());
+        };
+
         let key = secrets
             .get(archive_kek.id())
             .ok_or_else(|| {
@@ -357,7 +362,7 @@ mod tests {
         )]));
         let config = ArchiveStorageConfig::Filesystem {
             path: "/tmp/archive".into(),
-            archive_kek: SecretRef::Ref("my_kek".to_string()),
+            archive_kek: Some(SecretRef::Ref("my_kek".to_string())),
             autofetch: false,
         };
 
@@ -389,7 +394,7 @@ mod tests {
             session_token: None,
             endpoint: None,
             connections: 4,
-            archive_kek: SecretRef::Ref("my_kek".to_string()),
+            archive_kek: Some(SecretRef::Ref("my_kek".to_string())),
             autofetch: false,
         };
 
@@ -404,7 +409,7 @@ mod tests {
         let secrets = HashMap::new();
         let config = ArchiveStorageConfig::Filesystem {
             path: "/tmp/archive".into(),
-            archive_kek: SecretRef::Ref("nonexistent".to_string()),
+            archive_kek: Some(SecretRef::Ref("nonexistent".to_string())),
             autofetch: false,
         };
 
@@ -632,7 +637,7 @@ mod tests {
         )]));
         let config = ArchiveStorageConfig::Filesystem {
             path: archive_path,
-            archive_kek: SecretRef::Ref("kek".to_string()),
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
             autofetch: false,
         };
 

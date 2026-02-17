@@ -133,7 +133,7 @@ impl RemoteStripeConfig {
 pub enum ArchiveStorageConfig {
     Filesystem {
         path: PathBuf,
-        archive_kek: SecretRef,
+        archive_kek: Option<SecretRef>,
         #[serde(default)]
         autofetch: bool,
     },
@@ -149,7 +149,7 @@ pub enum ArchiveStorageConfig {
         endpoint: Option<String>,
         #[serde(default = "default_connections")]
         connections: usize,
-        archive_kek: SecretRef,
+        archive_kek: Option<SecretRef>,
         #[serde(default)]
         autofetch: bool,
     },
@@ -163,7 +163,11 @@ impl ArchiveStorageConfig {
     pub fn validate(&self, resolved_secrets: &HashMap<String, ResolvedSecret>) -> Result<()> {
         match self {
             ArchiveStorageConfig::Filesystem { archive_kek, .. } => {
-                Self::validate_archive_kek(get_resolved_secret(archive_kek, resolved_secrets)?)
+                if let Some(archive_kek) = archive_kek {
+                    Self::validate_archive_kek(get_resolved_secret(archive_kek, resolved_secrets)?)
+                } else {
+                    Ok(())
+                }
             }
             ArchiveStorageConfig::S3 {
                 prefix,
@@ -174,7 +178,12 @@ impl ArchiveStorageConfig {
                 archive_kek,
                 ..
             } => {
-                Self::validate_archive_kek(get_resolved_secret(archive_kek, resolved_secrets)?)?;
+                if let Some(archive_kek) = archive_kek {
+                    Self::validate_archive_kek(get_resolved_secret(
+                        archive_kek,
+                        resolved_secrets,
+                    )?)?;
+                }
                 Self::validate_aws_access_key_id(get_resolved_secret(
                     access_key_id,
                     resolved_secrets,
@@ -322,7 +331,7 @@ mod tests {
             config,
             StripeSourceConfig::Archive(ArchiveStorageConfig::Filesystem {
                 path: PathBuf::from("/path/to/archive/root"),
-                archive_kek: SecretRef::Ref("archive-kek".to_string()),
+                archive_kek: Some(SecretRef::Ref("archive-kek".to_string())),
                 autofetch: false,
             })
         );
@@ -352,7 +361,7 @@ mod tests {
                 access_key_id: SecretRef::Ref("aws-access-key-id".to_string()),
                 secret_access_key: SecretRef::Ref("aws-secret-access-key".to_string()),
                 session_token: Some(SecretRef::Ref("aws-session-token".to_string())),
-                archive_kek: SecretRef::Ref("archive-kek".to_string()),
+                archive_kek: Some(SecretRef::Ref("archive-kek".to_string())),
                 autofetch: false,
                 connections: 16,
                 endpoint: None,
@@ -381,7 +390,7 @@ mod tests {
                 access_key_id: SecretRef::Ref("aws-access-key-id".to_string()),
                 secret_access_key: SecretRef::Ref("aws-secret-access-key".to_string()),
                 session_token: None,
-                archive_kek: SecretRef::Ref("archive-kek".to_string()),
+                archive_kek: Some(SecretRef::Ref("archive-kek".to_string())),
                 autofetch: false,
                 connections: 16,
                 endpoint: None,
@@ -461,7 +470,7 @@ mod tests {
                     secret_access_key,
                     SecretRef::Ref("my-secret-key".to_string())
                 );
-                assert_eq!(archive_kek, SecretRef::Ref("my-kek".to_string()));
+                assert_eq!(archive_kek, Some(SecretRef::Ref("my-kek".to_string())));
                 assert_eq!(session_token, None);
             }
             _ => panic!("expected archive s3"),
@@ -660,7 +669,7 @@ mod tests {
             access_key_id: SecretRef::Ref("key".to_string()),
             secret_access_key: SecretRef::Ref("secret".to_string()),
             session_token: None,
-            archive_kek: SecretRef::Ref("kek".to_string()),
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
             autofetch: false,
             connections: 16,
             endpoint: None,
@@ -702,7 +711,7 @@ mod tests {
             access_key_id: SecretRef::Ref("key".to_string()),
             secret_access_key: SecretRef::Ref("secret".to_string()),
             session_token: Some(SecretRef::Ref("session".to_string())),
-            archive_kek: SecretRef::Ref("kek".to_string()),
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
             autofetch: false,
             connections: 16,
             endpoint: None,
@@ -723,7 +732,7 @@ mod tests {
             access_key_id: SecretRef::Ref("key".to_string()),
             secret_access_key: SecretRef::Ref("secret".to_string()),
             session_token: None,
-            archive_kek: SecretRef::Ref("kek".to_string()),
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
             autofetch: false,
             connections: 0,
             endpoint: None,

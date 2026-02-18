@@ -325,7 +325,7 @@ mod tests {
             source: SecretSource::Inline(
                 base64::engine::general_purpose::STANDARD.encode(value.as_bytes()),
             ),
-            kek: None,
+            encrypted_by: None,
             encoding: SecretEncoding::Base64,
         }
     }
@@ -333,7 +333,7 @@ mod tests {
     fn make_inline_secret_bytes(value: &[u8]) -> SecretDef {
         SecretDef {
             source: SecretSource::Inline(base64::engine::general_purpose::STANDARD.encode(value)),
-            kek: None,
+            encrypted_by: None,
             encoding: SecretEncoding::Base64,
         }
     }
@@ -511,7 +511,7 @@ mod tests {
                     source: SecretSource::Inline(
                         base64::engine::general_purpose::STANDARD.encode([0xFF, 0xFE, 0xFD]),
                     ),
-                    kek: None,
+                    encrypted_by: None,
                     encoding: SecretEncoding::Base64,
                 },
             ),

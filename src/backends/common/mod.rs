@@ -845,7 +845,7 @@ mod tests {
             "xts-key".to_string(),
             SecretDef {
                 source: SecretSource::Inline(xts_key_b64),
-                kek: None,
+                encrypted_by: None,
                 encoding: SecretEncoding::Base64,
             },
         )]);

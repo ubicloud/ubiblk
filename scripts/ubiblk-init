@@ -179,7 +179,7 @@ xts_key.ref = "xts_key"
 [secrets.xts_key]
 source.inline = "{encrypted_xts_b64}"
 encoding = "base64"
-kek.ref = "kek"
+encrypted_by.ref = "kek"
 
 [secrets.kek]
 source.file = "kek"
@@ -188,7 +188,7 @@ encoding = "base64"
     else:
         c += """
 # WARNING: The XTS key is stored in a plaintext file for dev convenience.
-# In production, encrypt the XTS key with a KEK and use kek.ref.
+# In production, encrypt the XTS key with a KEK and use encrypted_by.ref.
 [secrets.xts_key]
 source.file = "xts_key"
 encoding = "base64"

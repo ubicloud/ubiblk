@@ -625,7 +625,7 @@ mod tests {
                     source: SecretSource::Inline(
                         b64_engine.encode("AKIA1234567890123456".as_bytes()),
                     ),
-                    kek: None,
+                    encrypted_by: None,
                     encoding: SecretEncoding::Base64,
                 },
             ),
@@ -633,7 +633,7 @@ mod tests {
                 "secret".to_string(),
                 SecretDef {
                     source: SecretSource::Inline(b64_engine.encode("super-secret-key")),
-                    kek: None,
+                    encrypted_by: None,
                     encoding: SecretEncoding::Base64,
                 },
             ),
@@ -643,7 +643,7 @@ mod tests {
                     source: SecretSource::Inline(
                         b64_engine.encode("0123456789abcdef0123456789abcdef"),
                     ),
-                    kek: None,
+                    encrypted_by: None,
                     encoding: SecretEncoding::Base64,
                 },
             ),
@@ -688,7 +688,7 @@ mod tests {
             "session".to_string(),
             SecretDef {
                 source: SecretSource::Inline(b64_engine.encode("".as_bytes())),
-                kek: None,
+                encrypted_by: None,
                 encoding: SecretEncoding::Base64,
             },
         )]);

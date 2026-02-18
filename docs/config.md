@@ -130,7 +130,7 @@ allow_env_secrets = true
 ## Secrets
 
 Secrets are declared as sub-tables under `[secrets]`. Each secret has a
-`source` and an optional `kek` for envelope encryption.
+`source` and an optional `encrypted_by` reference for envelope encryption.
 
 ```toml
 [secrets.config-kek]
@@ -139,7 +139,7 @@ source.file = "/run/secrets/kek.pipe"
 [secrets.xts-key]
 source.inline = "TmVjZXNzYXJ5IGJ5dGVzIGhlcmU..."
 encoding = "base64"
-kek.ref = "config-kek"
+encrypted_by.ref = "config-kek"
 ```
 
 ### Source types
@@ -149,7 +149,7 @@ Each source is specified as a sub-key of `source`:
 | Sub-key | Format | Description |
 |---------|--------|-------------|
 | `source.file` | path | Read secret from a file. Regular files are rejected unless `allow_secret_over_regular_file` is set; prefer named pipes. |
-| `source.inline` | string | Inline secret data. Without a `kek`, requires `allow_inline_plaintext_secrets`. |
+| `source.inline` | string | Inline secret data. Without `encrypted_by`, requires `allow_inline_plaintext_secrets`. |
 | `source.env` | string | Read secret from an environment variable. Requires `allow_env_secrets`. |
 
 Secret data must not exceed 8192 bytes after decoding.
@@ -173,7 +173,7 @@ Each secret can set an `encoding` field (defaults to `plaintext` when omitted):
 
 ### KEK encryption
 
-The `kek` field references another secret that holds a 32-byte AES-256-GCM key.
+The `encrypted_by` field references another secret that holds a 32-byte AES-256-GCM key.
 The source data is then treated as encrypted:
 
     [12-byte nonce || ciphertext || 16-byte GCM tag]
@@ -191,14 +191,14 @@ Config fields reference secrets using a `ref` sub-key:
 xts_key.ref = "xts-key"
 ```
 
-References inside `[secrets]` (the `kek` field) are handled through topological
+References inside `[secrets]` (the `encrypted_by` field) are handled through topological
 sorting to resolve dependencies in the correct order.
 
 ### Resolution rules
 
 1. All secrets are topologically sorted by KEK dependencies.
 2. Each secret's source bytes are loaded.
-3. If a `kek` is specified, the raw bytes are decrypted using the resolved KEK.
+3. If `encrypted_by` is specified, the raw bytes are decrypted using the resolved KEK.
 4. Circular KEK dependencies are detected and rejected.
 
 ## `[stripe_source]`
@@ -328,7 +328,7 @@ source.file = "/run/secrets/kek.pipe"
 [secrets.xts-key]
 source.inline = "<AES-256-GCM encrypted XTS key>"
 encoding = "base64"
-kek.ref = "config-kek"
+encrypted_by.ref = "config-kek"
 ```
 
 ### Archive stripe source with S3
@@ -355,12 +355,12 @@ source.file = "/run/secrets/kek.pipe"
 [secrets.xts-key]
 source.inline = "<encrypted XTS key>"
 encoding = "base64"
-kek.ref = "config-kek"
+encrypted_by.ref = "config-kek"
 
 [secrets.archive-kek]
 source.inline = "<encrypted archive KEK>"
 encoding = "base64"
-kek.ref = "config-kek"
+encrypted_by.ref = "config-kek"
 
 [secrets.aws-access-key]
 source.env = "AWS_ACCESS_KEY_ID"

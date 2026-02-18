@@ -54,8 +54,8 @@ pub struct SecretDef {
     /// Encoding of the secret data. Defaults to plaintext when omitted.
     #[serde(default)]
     pub encoding: SecretEncoding,
-    /// Optional KEK reference from the `kek.ref` TOML field.
-    pub kek: Option<SecretRef>,
+    /// Optional KEK reference from the `encrypted_by.ref` TOML field.
+    pub encrypted_by: Option<SecretRef>,
 }
 
 /// Resolved secret bytes ready for use by the rest of the config system.
@@ -87,7 +87,7 @@ impl Drop for ResolvedSecret {
 /// Parse the `[secrets]` table from a TOML value.
 ///
 /// Expects a TOML table where each key maps to a sub-table with `source` and
-/// optional `kek` fields.
+/// optional `encrypted_by` fields.
 pub fn parse_secrets(table: &toml::Value) -> Result<HashMap<String, SecretDef>> {
     let Some(value) = table.get("secrets") else {
         return Ok(HashMap::new());
@@ -117,7 +117,7 @@ pub fn resolve_secrets(
     let mut remaining_defs: Vec<(&String, &SecretDef)> = defs.iter().collect();
 
     for (name, def) in defs {
-        if let Some(SecretRef::Ref(kek_ref)) = &def.kek {
+        if let Some(SecretRef::Ref(kek_ref)) = &def.encrypted_by {
             if !defs.contains_key(kek_ref) {
                 return Err(ubiblk_error!(InvalidParameter {
                     description: format!("secrets.{name}: missing KEK reference '{kek_ref}'")
@@ -156,7 +156,7 @@ pub fn maybe_resolve_secret(
     resolved: &HashMap<String, ResolvedSecret>,
     danger_zone: &DangerZone,
 ) -> Result<Option<ResolvedSecret>> {
-    if let Some(SecretRef::Ref(kek_ref)) = &def.kek {
+    if let Some(SecretRef::Ref(kek_ref)) = &def.encrypted_by {
         let Some(kek_secret) = resolved.get(kek_ref) else {
             return Ok(None);
         };
@@ -334,7 +334,7 @@ mod tests {
             encoding = 'base64'
             [secrets.api]
             source.env = 'API_TOKEN'
-            kek.ref = 'kek'
+            encrypted_by.ref = 'kek'
         "#,
         )
         .unwrap();
@@ -348,7 +348,7 @@ mod tests {
                 source: SecretSource::Inline(
                     "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=".to_string()
                 ),
-                kek: None,
+                encrypted_by: None,
                 encoding: SecretEncoding::Base64,
             }
         );
@@ -356,7 +356,7 @@ mod tests {
             parsed["api"],
             SecretDef {
                 source: SecretSource::Env("API_TOKEN".to_string()),
-                kek: Some(SecretRef::Ref("kek".to_string())),
+                encrypted_by: Some(SecretRef::Ref("kek".to_string())),
                 encoding: SecretEncoding::Plaintext,
             }
         );
@@ -435,7 +435,7 @@ mod tests {
             "plain".to_string(),
             SecretDef {
                 source: SecretSource::Inline("aGVsbG8=".to_string()),
-                kek: None,
+                encrypted_by: None,
                 encoding: SecretEncoding::Base64,
             },
         )]);
@@ -455,7 +455,7 @@ mod tests {
             "secret_file".to_string(),
             SecretDef {
                 source: SecretSource::File(file.path().to_path_buf()),
-                kek: None,
+                encrypted_by: None,
                 encoding: SecretEncoding::Plaintext,
             },
         )]);
@@ -475,7 +475,7 @@ mod tests {
             "secret_file".to_string(),
             SecretDef {
                 source: SecretSource::File(file.path().to_path_buf()),
-                kek: None,
+                encrypted_by: None,
                 encoding: SecretEncoding::Plaintext,
             },
         )]);
@@ -516,7 +516,7 @@ mod tests {
                 "kek".to_string(),
                 SecretDef {
                     source: SecretSource::File(fifo_path_for_config),
-                    kek: None,
+                    encrypted_by: None,
                     encoding: SecretEncoding::Plaintext,
                 },
             ),
@@ -524,7 +524,7 @@ mod tests {
                 secret_name.to_string(),
                 SecretDef {
                     source: SecretSource::Inline(b64_engine.encode(encrypted)),
-                    kek: Some(SecretRef::Ref("kek".to_string())),
+                    encrypted_by: Some(SecretRef::Ref("kek".to_string())),
                     encoding: SecretEncoding::Base64,
                 },
             ),
@@ -544,7 +544,7 @@ mod tests {
                 "a".to_string(),
                 SecretDef {
                     source: SecretSource::Inline("YQ==".to_string()),
-                    kek: Some(SecretRef::Ref("b".to_string())),
+                    encrypted_by: Some(SecretRef::Ref("b".to_string())),
                     encoding: SecretEncoding::Base64,
                 },
             ),
@@ -552,7 +552,7 @@ mod tests {
                 "b".to_string(),
                 SecretDef {
                     source: SecretSource::Inline("Yg==".to_string()),
-                    kek: Some(SecretRef::Ref("a".to_string())),
+                    encrypted_by: Some(SecretRef::Ref("a".to_string())),
                     encoding: SecretEncoding::Base64,
                 },
             ),
@@ -570,7 +570,7 @@ mod tests {
             "api".to_string(),
             SecretDef {
                 source: SecretSource::Inline("aGVsbG8=".to_string()),
-                kek: Some(SecretRef::Ref("missing".to_string())),
+                encrypted_by: Some(SecretRef::Ref("missing".to_string())),
                 encoding: SecretEncoding::Base64,
             },
         )]);
@@ -589,7 +589,7 @@ mod tests {
             "big".to_string(),
             SecretDef {
                 source: SecretSource::Inline(large_data_b64),
-                kek: None,
+                encrypted_by: None,
                 encoding: SecretEncoding::Base64,
             },
         )]);
@@ -609,7 +609,7 @@ mod tests {
             "self".to_string(),
             SecretDef {
                 source: SecretSource::Inline("aGVsbG8=".to_string()),
-                kek: Some(SecretRef::Ref("self".to_string())),
+                encrypted_by: Some(SecretRef::Ref("self".to_string())),
                 encoding: SecretEncoding::Base64,
             },
         )]);
@@ -625,7 +625,7 @@ mod tests {
             "api".to_string(),
             SecretDef {
                 source: SecretSource::Env("TEST_REJECT_ENV_SECRET".to_string()),
-                kek: None,
+                encrypted_by: None,
                 encoding: SecretEncoding::Plaintext,
             },
         )]);
@@ -645,7 +645,7 @@ mod tests {
             "api".to_string(),
             SecretDef {
                 source: SecretSource::Env("TEST_ACCEPT_ENV_SECRET".to_string()),
-                kek: None,
+                encrypted_by: None,
                 encoding: SecretEncoding::Plaintext,
             },
         )]);

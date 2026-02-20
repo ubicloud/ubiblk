@@ -196,7 +196,7 @@ fn load_source(
 fn decode(bytes: &[u8], encoding: &SecretEncoding) -> Result<Vec<u8>> {
     match encoding {
         SecretEncoding::Plaintext => Ok(bytes.to_vec()),
-        SecretEncoding::Base64 => b64_engine.decode(bytes).map_err(|e| {
+        SecretEncoding::Base64 => b64_engine.decode(bytes.trim_ascii_end()).map_err(|e| {
             ubiblk_error!(InvalidParameter {
                 description: format!("invalid base64: {e}")
             })
@@ -396,6 +396,44 @@ mod tests {
         assert!(result.is_err());
         let error_message = result.unwrap_err().to_string();
         assert!(error_message.contains("invalid base64"));
+    }
+
+    #[test]
+    fn trailing_whitespace_in_base64_is_ignored() {
+        // create temp file with KEK value
+        let mut kek_file = NamedTempFile::new().unwrap();
+        let kek_value = b"f8ACgfKiW8EaGmdW4uvp6iRtV3yzcoKGRdoXzzVO9fI=\n";
+        kek_file.write_all(kek_value).unwrap();
+        let value = toml::from_str::<toml::Value>(
+            format!(
+                r#"
+[secrets.xts-key]
+source.inline = "tjxpbj55yTT9mjsRp/gOo0tJjtDPZ8xaWNGHJs6e40Da3ZY8OYDTG5wXDqMjDkjOY4JDYSINtTDwDRyO9UN0tPM79dIK3Fstx2iJsAvCEvq8V0Vb1O+UKtYI6ts=\r\n "
+encoding = "base64"
+encrypted_by.ref = "kek"
+
+[secrets.kek]
+source.file = "{}"
+encoding = "base64"
+        "#,
+                kek_file.path().display()
+            ).as_str(),
+        )
+        .unwrap();
+
+        let danger_zone = DangerZone {
+            enabled: true,
+            allow_secret_over_regular_file: true,
+            ..DangerZone::default()
+        };
+
+        let resolved = resolve_secrets(&parse_secrets(&value).unwrap(), &danger_zone).unwrap();
+
+        let xts_key = resolved.get("xts-key").unwrap();
+        assert_eq!(xts_key.as_bytes().len(), 64);
+
+        let kek = resolved.get("kek").unwrap();
+        assert_eq!(kek.as_bytes().len(), 32);
     }
 
     #[test]

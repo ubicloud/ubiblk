@@ -127,13 +127,13 @@ supported:
 Example using socat to query the status and pretty-print the response:
 
 ```bash
-$ echo '{"command": "status"}' | socat - UNIX-CONNECT:/tmp/ubiblk-rpc.sock | jq .
+$ echo '{"command": "status"}' | nc -U -q 0 /path/to/rpc.sock | jq .
 {
   "status": {
     "stripes": {
-      "fetched": 428,
-      "no_source": 4608,
-      "total": 8192
+      "fetched": 265,
+      "source": 3584,
+      "total": 40960
     }
   }
 }

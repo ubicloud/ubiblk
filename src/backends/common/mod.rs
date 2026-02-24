@@ -3,7 +3,7 @@ use std::{
     fs::{File, OpenOptions},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::{mpsc::{channel, Receiver, Sender}, Arc},
 };
 
 use log::{error, info};
@@ -18,7 +18,7 @@ use crate::{
     },
     config::v2,
     stripe_source::StripeSourceBuilder,
-    utils::aligned_buffer::BUFFER_ALIGNMENT,
+    utils::{aligned_buffer::BUFFER_ALIGNMENT, s3::UpdatableS3Client},
     Result, ResultExt,
 };
 
@@ -46,6 +46,7 @@ pub struct BackendEnv {
     config: v2::Config,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<io_tracking::IoTracker>,
+    shared_s3_client: Option<Arc<UpdatableS3Client>>,
 }
 
 impl BackendEnv {
@@ -74,6 +75,7 @@ impl BackendEnv {
                 config: config.clone(),
                 status_reporter: None,
                 io_trackers: Self::build_io_trackers(config),
+                shared_s3_client: None,
             }),
             Some(metadata_dev) => {
                 Self::build_with_bgworker(disk_device, metadata_dev, config, alignment)
@@ -87,12 +89,13 @@ impl BackendEnv {
             let (startup_sender, startup_receiver) = channel();
             self.bgworker_thread = Some(Self::spawn_bgworker_thread(config, startup_sender)?);
 
-            let startup_status = startup_receiver.recv().map_err(|e| {
+            let startup_result = startup_receiver.recv().map_err(|e| {
                 crate::ubiblk_error!(ChannelError {
                     reason: format!("Failed to receive bgworker startup status: {e}"),
                 })
             })?;
-            startup_status?;
+            let shared_client = startup_result?;
+            self.shared_s3_client = shared_client;
         }
 
         Ok(())
@@ -118,6 +121,10 @@ impl BackendEnv {
 
     pub fn io_trackers(&self) -> &Vec<io_tracking::IoTracker> {
         &self.io_trackers
+    }
+
+    pub fn shared_s3_client(&self) -> Option<Arc<UpdatableS3Client>> {
+        self.shared_s3_client.clone()
     }
 
     pub fn config(&self) -> &v2::Config {
@@ -179,6 +186,7 @@ impl BackendEnv {
             config: config.clone(),
             status_reporter: Some(status_reporter),
             io_trackers: Self::build_io_trackers(config),
+            shared_s3_client: None,
         })
     }
 
@@ -229,13 +237,13 @@ impl BackendEnv {
 
     fn spawn_bgworker_thread(
         config: BgWorkerConfig,
-        startup_sender: Sender<Result<()>>,
+        startup_sender: Sender<Result<Option<Arc<UpdatableS3Client>>>>,
     ) -> Result<std::thread::JoinHandle<()>> {
         std::thread::Builder::new()
             .name("bgworker".to_string())
             .spawn(move || match Self::build_bgworker(config) {
-                Ok(mut worker) => {
-                    if let Err(send_err) = startup_sender.send(Ok(())) {
+                Ok((mut worker, shared_client)) => {
+                    if let Err(send_err) = startup_sender.send(Ok(shared_client)) {
                         error!("Failed to send bgworker startup success: {send_err}");
                     } else {
                         info!("Bgworker thread started successfully");
@@ -255,7 +263,9 @@ impl BackendEnv {
             })
     }
 
-    fn build_bgworker(config: BgWorkerConfig) -> Result<BgWorker> {
+    fn build_bgworker(
+        config: BgWorkerConfig,
+    ) -> Result<(BgWorker, Option<Arc<UpdatableS3Client>>)> {
         let BgWorkerConfig {
             target_dev,
             stripe_source_builder,
@@ -266,15 +276,15 @@ impl BackendEnv {
             receiver,
         } = config;
 
-        let stripe_source = match stripe_source_builder.build() {
-            Ok(source) => source,
+        let (stripe_source, shared_client) = match stripe_source_builder.build() {
+            Ok(result) => result,
             Err(e) => {
                 error!("Failed to build stripe source: {e}");
                 return Err(e);
             }
         };
 
-        BgWorker::new(
+        let worker = BgWorker::new(
             stripe_source,
             &*target_dev,
             &*metadata_dev,
@@ -282,7 +292,9 @@ impl BackendEnv {
             autofetch,
             shared_state,
             receiver,
-        )
+        )?;
+
+        Ok((worker, shared_client))
     }
 }
 
@@ -312,7 +324,13 @@ where
     let _rpc_handle = if let Some(path) = config.device.rpc_socket.as_ref() {
         let status_reporter = backend_env.status_reporter();
         let io_trackers = backend_env.io_trackers().clone();
-        Some(rpc::start_rpc_server(path, status_reporter, io_trackers)?)
+        let shared_s3_client = backend_env.shared_s3_client();
+        Some(rpc::start_rpc_server(
+            path,
+            status_reporter,
+            io_trackers,
+            shared_s3_client,
+        )?)
     } else {
         None
     };
@@ -344,7 +362,7 @@ pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Resu
         // No image source
         UbiMetadata::new(stripe_sector_count_shift, base_stripe_count, 0)
     } else {
-        let stripe_source =
+        let (stripe_source, _) =
             StripeSourceBuilder::new(config.clone(), stripe_sector_count, false).build()?;
         UbiMetadata::new_from_stripe_source(
             stripe_sector_count_shift,
@@ -699,7 +717,7 @@ mod tests {
     fn run_bgworker_handles_shutdown_request() {
         let (config, sender) = build_test_bgworker_config();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
-        let mut worker = BackendEnv::build_bgworker(config).unwrap();
+        let (mut worker, _) = BackendEnv::build_bgworker(config).unwrap();
         worker.run();
     }
 

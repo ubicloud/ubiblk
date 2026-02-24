@@ -15,7 +15,7 @@ use std::{
 
 use crate::{
     backends::common::io_tracking::{IoKind, IoTracker},
-    utils::umask_guard::UmaskGuard,
+    utils::{s3::UpdatableS3Client, umask_guard::UmaskGuard},
     Result,
 };
 use log::{error, info, warn};
@@ -31,11 +31,14 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 struct RpcState {
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
+    shared_s3_client: Option<Arc<UpdatableS3Client>>,
 }
 
 #[derive(Deserialize)]
 struct RpcRequest {
     command: String,
+    #[serde(default)]
+    params: Option<Value>,
 }
 
 #[allow(dead_code)]
@@ -68,6 +71,7 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     path: P,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
+    shared_s3_client: Option<Arc<UpdatableS3Client>>,
 ) -> Result<RpcServerHandle> {
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
@@ -93,6 +97,7 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     let state = Arc::new(RpcState {
         status_reporter,
         io_trackers,
+        shared_s3_client,
     });
 
     info!("RPC server listening on {:?}", path);
@@ -233,9 +238,40 @@ fn process_request(request: RpcRequest, state: &RpcState) -> Value {
                 .collect();
             json!({ "stats": { "queues": queue_stats } })
         }
+        "update-credentials" => handle_update_credentials(request.params, state),
         other => json!({
             "error": format!("unknown command: {other}"),
         }),
+    }
+}
+
+fn handle_update_credentials(params: Option<Value>, state: &RpcState) -> Value {
+    let Some(shared_client) = &state.shared_s3_client else {
+        return json!({ "error": "no S3 client configured for this device" });
+    };
+
+    let Some(params) = params else {
+        return json!({ "error": "missing params for update-credentials" });
+    };
+
+    let key_id = match params.get("key_id").and_then(Value::as_str) {
+        Some(v) => v.to_string(),
+        None => return json!({ "error": "missing or invalid 'key_id' in params" }),
+    };
+
+    let secret_key = match params.get("secret_key").and_then(Value::as_str) {
+        Some(v) => v.to_string(),
+        None => return json!({ "error": "missing or invalid 'secret_key' in params" }),
+    };
+
+    let session_token = params
+        .get("session_token")
+        .and_then(Value::as_str)
+        .map(String::from);
+
+    match shared_client.update_credentials(key_id, secret_key, session_token) {
+        Ok(()) => json!({ "result": "credentials updated" }),
+        Err(e) => json!({ "error": format!("failed to update credentials: {e}") }),
     }
 }
 
@@ -289,14 +325,22 @@ mod tests {
     }
 
     fn rpc_call(socket_path: &Path, command: &str) -> Value {
+        rpc_call_with_params(socket_path, command, None)
+    }
+
+    fn rpc_call_with_params(socket_path: &Path, command: &str, params: Option<Value>) -> Value {
         let mut stream = connect(socket_path);
 
         // Send request
-        let request = json!({ "command": command }).to_string();
+        let mut request = json!({ "command": command });
+        if let Some(params) = params {
+            request["params"] = params;
+        }
+        let request_str = request.to_string();
         stream
-            .write_all(request.as_bytes())
+            .write_all(request_str.as_bytes())
             .expect("Failed to write to socket");
-        stream.write_all(b"\n").expect("Failed to write newline"); // Important: logic expects read_line
+        stream.write_all(b"\n").expect("Failed to write newline");
 
         read_response(&mut stream)
     }
@@ -307,7 +351,7 @@ mod tests {
         io_trackers: Vec<IoTracker>,
     ) -> Result<RpcServerHandle> {
         let _l = UMASK_LOCK.lock().unwrap();
-        start_rpc_server(path, status_reporter, io_trackers)
+        start_rpc_server(path, status_reporter, io_trackers, None)
     }
 
     #[test]
@@ -581,5 +625,128 @@ mod tests {
         let stats = &response["stats"];
         assert!(stats.get("queues").is_some());
         assert_eq!(stats["queues"].as_array().unwrap().len(), 0);
+    }
+
+    fn start_rpc_server_with_s3(
+        path: &Path,
+        shared_s3_client: Option<Arc<crate::utils::s3::UpdatableS3Client>>,
+    ) -> Result<RpcServerHandle> {
+        let _l = UMASK_LOCK.lock().unwrap();
+        start_rpc_server(path, None, vec![], shared_s3_client)
+    }
+
+    #[test]
+    fn test_rpc_update_credentials_no_s3_client() {
+        let path = test_socket_path("update_creds_no_client");
+        let handle =
+            start_rpc_server_with_s3(&path, None).expect("Failed to start RPC server");
+
+        let response = rpc_call_with_params(
+            &path,
+            "update-credentials",
+            Some(json!({
+                "key_id": "AKIA123",
+                "secret_key": "secret123"
+            })),
+        );
+
+        handle.stop().expect("Failed to stop RPC server");
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("no S3 client"));
+    }
+
+    #[test]
+    fn test_rpc_update_credentials_missing_params() {
+        let path = test_socket_path("update_creds_no_params");
+        let client = crate::utils::s3::UpdatableS3Client::new(
+            crate::utils::s3::build_s3_client(
+                &crate::utils::s3::create_runtime().unwrap(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+            None,
+            None,
+        );
+        let shared = Arc::new(client);
+        let handle =
+            start_rpc_server_with_s3(&path, Some(shared)).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "update-credentials");
+
+        handle.stop().expect("Failed to stop RPC server");
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("missing params"));
+    }
+
+    #[test]
+    fn test_rpc_update_credentials_missing_key_id() {
+        let path = test_socket_path("update_creds_no_key");
+        let client = crate::utils::s3::UpdatableS3Client::new(
+            crate::utils::s3::build_s3_client(
+                &crate::utils::s3::create_runtime().unwrap(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+            None,
+            None,
+        );
+        let shared = Arc::new(client);
+        let handle =
+            start_rpc_server_with_s3(&path, Some(shared)).expect("Failed to start RPC server");
+
+        let response = rpc_call_with_params(
+            &path,
+            "update-credentials",
+            Some(json!({ "secret_key": "secret" })),
+        );
+
+        handle.stop().expect("Failed to stop RPC server");
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("key_id"));
+    }
+
+    #[test]
+    fn test_rpc_update_credentials_success() {
+        let path = test_socket_path("update_creds_ok");
+        let client = crate::utils::s3::UpdatableS3Client::new(
+            crate::utils::s3::build_s3_client(
+                &crate::utils::s3::create_runtime().unwrap(),
+                None,
+                Some("http://localhost:9999"),
+                Some("auto"),
+                None,
+            )
+            .unwrap(),
+            Some("http://localhost:9999".to_string()),
+            Some("auto".to_string()),
+        );
+        let shared = Arc::new(client);
+        let handle =
+            start_rpc_server_with_s3(&path, Some(shared)).expect("Failed to start RPC server");
+
+        let response = rpc_call_with_params(
+            &path,
+            "update-credentials",
+            Some(json!({
+                "key_id": "AKIA_NEW_KEY",
+                "secret_key": "new_secret_key",
+                "session_token": "new_session_token"
+            })),
+        );
+
+        handle.stop().expect("Failed to stop RPC server");
+        assert_eq!(response["result"], "credentials updated");
     }
 }

@@ -89,7 +89,7 @@ fn run() -> Result<()> {
 
     let stripe_sector_count = 1u64 << metadata.stripe_sector_count_shift;
 
-    let stripe_source = StripeSourceBuilder::new(
+    let (stripe_source, _) = StripeSourceBuilder::new(
         config.clone(),
         stripe_sector_count,
         metadata.has_fetched_all_stripes(),
@@ -97,7 +97,7 @@ fn run() -> Result<()> {
     .build()?;
 
     let target_config = v2::ArchiveTargetConfig::load(&args.target_config_path)?;
-    let store =
+    let (store, _) =
         StripeSourceBuilder::build_archive_store(&target_config.target, &target_config.secrets)?;
 
     let compression = match args.compression {

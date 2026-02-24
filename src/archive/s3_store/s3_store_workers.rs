@@ -8,21 +8,19 @@ use crossbeam_channel::{Receiver, Sender};
 use log::{debug, error, info, warn};
 
 use super::{S3ByteStream, S3Client, S3Request, S3Result};
-use crate::Result;
+use crate::{utils::s3::UpdatableS3Client, Result};
 struct WorkerContext {
-    client: S3Client,
+    shared_client: Arc<UpdatableS3Client>,
     bucket: Arc<String>,
 }
 
 pub(super) fn spawn_workers(
-    client: S3Client,
+    shared_client: Arc<UpdatableS3Client>,
     bucket: Arc<String>,
     mut worker_threads: usize,
     request_rx: Receiver<S3Request>,
     result_tx: Sender<S3Result>,
 ) -> Result<Vec<JoinHandle<()>>> {
-    let client_config = client.config().clone();
-
     if worker_threads < 1 {
         worker_threads = 1;
         warn!("At least one S3 worker thread is required; defaulting to 1");
@@ -36,7 +34,7 @@ pub(super) fn spawn_workers(
 
     for i in 0..worker_threads {
         let ctx = WorkerContext {
-            client: S3Client::from_conf(client_config.clone()),
+            shared_client: Arc::clone(&shared_client),
             bucket: Arc::clone(&bucket),
         };
         let rx = request_rx.clone();
@@ -73,10 +71,13 @@ fn run_worker_loop(ctx: WorkerContext, rx: Receiver<S3Request>, tx: Sender<S3Res
 }
 
 async fn process_request(ctx: &WorkerContext, req: S3Request, tx: &Sender<S3Result>) {
+    // Clone the client before each request so credential updates are picked up
+    // and the RwLock is not held across async operations.
+    let client = ctx.shared_client.client();
     match req {
         S3Request::Put { name, key, data } => {
             debug!("Uploading object to S3: {}", name);
-            let result = upload_object(ctx, &key, data).await;
+            let result = upload_object(&client, &ctx.bucket, &key, data).await;
             if let Err(e) = tx.send(S3Result::Put {
                 name: name.clone(),
                 result,
@@ -86,7 +87,7 @@ async fn process_request(ctx: &WorkerContext, req: S3Request, tx: &Sender<S3Resu
         }
         S3Request::Get { name, key } => {
             debug!("Fetching object from S3: {}", name);
-            let result = fetch_object(ctx, &key).await;
+            let result = fetch_object(&client, &ctx.bucket, &key).await;
             if let Err(e) = tx.send(S3Result::Get {
                 name: name.clone(),
                 result,
@@ -97,10 +98,15 @@ async fn process_request(ctx: &WorkerContext, req: S3Request, tx: &Sender<S3Resu
     }
 }
 
-async fn upload_object(ctx: &WorkerContext, key: &str, data: Vec<u8>) -> Result<()> {
-    ctx.client
+async fn upload_object(
+    client: &S3Client,
+    bucket: &str,
+    key: &str,
+    data: Vec<u8>,
+) -> Result<()> {
+    client
         .put_object()
-        .bucket(ctx.bucket.as_str())
+        .bucket(bucket)
         .key(key)
         .body(S3ByteStream::from(data))
         .send()
@@ -113,11 +119,10 @@ async fn upload_object(ctx: &WorkerContext, key: &str, data: Vec<u8>) -> Result<
     Ok(())
 }
 
-async fn fetch_object(ctx: &WorkerContext, key: &str) -> Result<Vec<u8>> {
-    let output = ctx
-        .client
+async fn fetch_object(client: &S3Client, bucket: &str, key: &str) -> Result<Vec<u8>> {
+    let output = client
         .get_object()
-        .bucket(ctx.bucket.as_str())
+        .bucket(bucket)
         .key(key)
         .send()
         .await
@@ -151,8 +156,13 @@ mod tests {
     ) -> (Sender<S3Request>, Receiver<S3Result>, Vec<JoinHandle<()>>) {
         let (request_tx, request_rx) = unbounded();
         let (result_tx, result_rx) = unbounded();
-        let workers = spawn_workers(
+        let shared_client = Arc::new(UpdatableS3Client::new(
             mock_client!(aws_sdk_s3, rules),
+            None,
+            None,
+        ));
+        let workers = spawn_workers(
+            shared_client,
             Arc::new("test-bucket".to_string()),
             1,
             request_rx,

@@ -1,6 +1,8 @@
 use log::info;
 use ubiblk_macros::error_context;
 
+use std::sync::Arc;
+
 use crate::{
     archive::{ArchiveStore, FileSystemStore, S3Store},
     backends::build_raw_image_device,
@@ -11,7 +13,7 @@ use crate::{
         stripe_source::ArchiveStorageConfig,
     },
     stripe_server::connect_to_stripe_server,
-    utils::s3::{build_s3_client, create_runtime},
+    utils::s3::{build_s3_client, create_runtime, UpdatableS3Client},
     CipherMethod, KeyEncryptionCipher, Result,
 };
 
@@ -36,32 +38,39 @@ impl StripeSourceBuilder {
         }
     }
 
+    /// Build the stripe source and optionally return a shared S3 client for credential updates.
     #[error_context("Failed to build stripe source")]
-    pub fn build(&self) -> Result<Box<dyn StripeSource>> {
+    pub fn build(
+        &self,
+    ) -> Result<(Box<dyn StripeSource>, Option<Arc<UpdatableS3Client>>)> {
         // If already fetched all stripes, no need to build a real source
         if self.has_fetched_all_stripes {
             info!("All stripes have been fetched; using NullBlockDevice as stripe source");
-            return Ok(Box::new(BlockDeviceStripeSource::new(
-                NullBlockDevice::new(),
-                self.stripe_sector_count,
-            )?));
+            return Ok((
+                Box::new(BlockDeviceStripeSource::new(
+                    NullBlockDevice::new(),
+                    self.stripe_sector_count,
+                )?),
+                None,
+            ));
         }
 
         if let Some(stripe_source) = self.device_config.stripe_source.as_ref() {
             match stripe_source {
                 v2::stripe_source::StripeSourceConfig::Archive(config) => {
-                    let store = Self::build_archive_store(config, &self.device_config.secrets)?;
+                    let (store, shared_client) =
+                        Self::build_archive_store(config, &self.device_config.secrets)?;
                     let stripe_source = ArchiveStripeSource::new(
                         store,
                         Self::build_archive_kek(config, &self.device_config.secrets)?,
                     )?;
-                    return Ok(Box::new(stripe_source));
+                    return Ok((Box::new(stripe_source), shared_client));
                 }
                 v2::stripe_source::StripeSourceConfig::Remote(config) => {
                     let client = connect_to_stripe_server(config, &self.device_config.secrets)?;
                     let stripe_source =
                         RemoteStripeSource::new(Box::new(client), self.stripe_sector_count)?;
-                    return Ok(Box::new(stripe_source));
+                    return Ok((Box::new(stripe_source), None));
                 }
                 v2::stripe_source::StripeSourceConfig::Raw { .. } => {}
             }
@@ -70,10 +79,13 @@ impl StripeSourceBuilder {
         let source_block_device =
             build_raw_image_device(&self.device_config)?.unwrap_or(NullBlockDevice::new());
 
-        Ok(Box::new(BlockDeviceStripeSource::new(
-            source_block_device,
-            self.stripe_sector_count,
-        )?))
+        Ok((
+            Box::new(BlockDeviceStripeSource::new(
+                source_block_device,
+                self.stripe_sector_count,
+            )?),
+            None,
+        ))
     }
 
     fn resolved_secret_to_string(
@@ -143,10 +155,10 @@ impl StripeSourceBuilder {
     pub fn build_archive_store(
         config: &ArchiveStorageConfig,
         secrets: &std::collections::HashMap<String, ResolvedSecret>,
-    ) -> Result<Box<dyn ArchiveStore>> {
+    ) -> Result<(Box<dyn ArchiveStore>, Option<Arc<UpdatableS3Client>>)> {
         match config {
             ArchiveStorageConfig::Filesystem { path, .. } => {
-                Ok(Box::new(FileSystemStore::new(path.into())?))
+                Ok((Box::new(FileSystemStore::new(path.into())?), None))
             }
             ArchiveStorageConfig::S3 {
                 bucket,
@@ -174,12 +186,20 @@ impl StripeSourceBuilder {
                     decrypted_credentials,
                 )?;
 
-                Ok(Box::new(S3Store::new(
+                let shared_client = Arc::new(UpdatableS3Client::new(
                     client,
+                    endpoint.clone(),
+                    region.clone(),
+                ));
+
+                let store = S3Store::new(
+                    Arc::clone(&shared_client),
                     bucket.to_string(),
                     prefix.clone(),
                     *connections,
-                )?))
+                )?;
+
+                Ok((Box::new(store), Some(shared_client)))
             }
         }
     }
@@ -315,9 +335,10 @@ mod tests {
             "Should successfully build a NullBlockDevice source when all stripes fetched"
         );
 
-        let stripe_source = result.unwrap();
+        let (stripe_source, shared_client) = result.unwrap();
         // NullBlockDevice has sector_count of 0
         assert_eq!(stripe_source.sector_count(), 0);
+        assert!(shared_client.is_none());
     }
 
     fn make_inline_secret(value: &str) -> SecretDef {
@@ -643,5 +664,7 @@ mod tests {
 
         let result = StripeSourceBuilder::build_archive_store(&config, &secrets);
         assert!(result.is_ok());
+        let (_store, shared_client) = result.unwrap();
+        assert!(shared_client.is_none(), "Filesystem store should not have a shared S3 client");
     }
 }

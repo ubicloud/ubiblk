@@ -4,7 +4,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{debug, error, info};
 
 use super::ArchiveStore;
-use crate::Result;
+use crate::{utils::s3::UpdatableS3Client, Result};
 use s3_store_workers::spawn_workers;
 
 type S3Client = aws_sdk_s3::Client;
@@ -42,11 +42,12 @@ pub struct S3Store {
     finished_puts: Vec<(String, Result<()>)>,
     finished_gets: Vec<(String, Result<Vec<u8>>)>,
     workers: Vec<JoinHandle<()>>,
+    shared_client: Arc<UpdatableS3Client>,
 }
 
 impl S3Store {
     pub fn new(
-        client: S3Client,
+        shared_client: Arc<UpdatableS3Client>,
         bucket: String,
         prefix: Option<String>,
         worker_threads: usize,
@@ -64,7 +65,7 @@ impl S3Store {
         let (result_tx, result_rx) = unbounded();
         let bucket = Arc::new(bucket);
         let workers = spawn_workers(
-            client,
+            Arc::clone(&shared_client),
             Arc::clone(&bucket),
             worker_threads,
             request_rx,
@@ -78,7 +79,12 @@ impl S3Store {
             finished_puts: Vec::new(),
             finished_gets: Vec::new(),
             workers,
+            shared_client,
         })
+    }
+
+    pub fn shared_client(&self) -> &Arc<UpdatableS3Client> {
+        &self.shared_client
     }
 
     fn drain_results(&mut self) {
@@ -192,6 +198,11 @@ mod tests {
 
     fn test_store(request_tx: Option<Sender<S3Request>>) -> S3Store {
         let (_, result_rx) = unbounded();
+        let shared_client = Arc::new(UpdatableS3Client::new(
+            mock_client!(aws_sdk_s3, &[]),
+            None,
+            None,
+        ));
         S3Store {
             prefix: None,
             request_tx,
@@ -199,12 +210,18 @@ mod tests {
             finished_puts: Vec::new(),
             finished_gets: Vec::new(),
             workers: Vec::new(),
+            shared_client,
         }
     }
 
     fn prepare_s3_store(bucket: &str, prefix: Option<&str>, rules: &[Rule]) -> S3Store {
-        S3Store::new(
+        let shared_client = Arc::new(UpdatableS3Client::new(
             mock_client!(aws_sdk_s3, rules),
+            None,
+            None,
+        ));
+        S3Store::new(
+            shared_client,
             bucket.to_string(),
             prefix.map(|p| p.to_string()),
             2,

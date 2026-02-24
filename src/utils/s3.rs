@@ -9,31 +9,42 @@ type S3Client = aws_sdk_s3::Client;
 
 /// An S3 client wrapper that supports atomic credential updates via RPC.
 ///
-/// All S3 worker threads share a clone of this (via Arc), and clone the
-/// inner client before each request. When `update_credentials` is called,
-/// a new S3 client is built with the new credentials and swapped in.
+/// Stores the S3 config (not a live client), so each caller can build a fresh
+/// S3 client with its own connection pool. This is necessary because each S3
+/// worker thread runs its own single-threaded tokio runtime, and connection
+/// pools are tied to the runtime that created them.
+///
+/// When `update_credentials` is called, the stored config is replaced so that
+/// subsequent `build_client` calls use the new credentials.
 #[derive(Debug)]
 pub struct UpdatableS3Client {
-    client: RwLock<S3Client>,
+    config: RwLock<aws_sdk_s3::Config>,
     endpoint: Option<String>,
     region: Option<String>,
 }
 
 impl UpdatableS3Client {
     pub fn new(client: S3Client, endpoint: Option<String>, region: Option<String>) -> Self {
+        let config = client.config().clone();
         Self {
-            client: RwLock::new(client),
+            config: RwLock::new(config),
             endpoint,
             region,
         }
     }
 
-    /// Get a clone of the current S3 client. Cheap because S3Client is Arc-based internally.
-    pub fn client(&self) -> S3Client {
-        self.client.read().unwrap().clone()
+    /// Build a new S3 client from the current config. Each caller gets its own
+    /// connection pool, safe to use on any tokio runtime.
+    pub fn build_client(&self) -> S3Client {
+        S3Client::from_conf(self.config.read().unwrap().clone())
     }
 
-    /// Atomically replace the S3 client with one using new credentials.
+    /// Alias for `build_client` for backward compatibility.
+    pub fn client(&self) -> S3Client {
+        self.build_client()
+    }
+
+    /// Atomically replace the S3 config with one using new credentials.
     pub fn update_credentials(
         &self,
         access_key_id: String,
@@ -58,7 +69,7 @@ impl UpdatableS3Client {
             Some(credentials),
         )?;
 
-        *self.client.write().unwrap() = new_client;
+        *self.config.write().unwrap() = new_client.config().clone();
         info!("S3 credentials updated successfully");
         Ok(())
     }

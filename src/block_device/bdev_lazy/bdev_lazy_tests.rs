@@ -72,8 +72,8 @@ mod tests {
             let lazy = LazyBlockDevice::new(
                 Box::new(target_dev),
                 Some(Box::new(image_dev)),
-                bgworker_ch,
-                metadata_state.clone(),
+                Arc::new(RwLock::new(bgworker_ch)),
+                Arc::new(RwLock::new(metadata_state.clone())),
                 track_written,
             )
             .unwrap();
@@ -113,8 +113,8 @@ mod tests {
             let lazy = LazyBlockDevice::new(
                 Box::new(target_dev),
                 None,
-                bgworker_ch,
-                metadata_state.clone(),
+                Arc::new(RwLock::new(bgworker_ch)),
+                Arc::new(RwLock::new(metadata_state.clone())),
                 track_written,
             )
             .unwrap();

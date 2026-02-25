@@ -10,10 +10,16 @@ use super::{
 
 use std::{
     collections::{HashSet, VecDeque},
-    sync::mpsc::Sender,
+    sync::{mpsc::Sender, Arc, RwLock},
 };
 
 use log::{debug, error};
+
+/// Wraps the bgworker sender so it can be atomically swapped during snapshot.
+pub type SwappableSender = Arc<RwLock<Sender<BgWorkerRequest>>>;
+
+/// Wraps SharedMetadataState so it can be atomically swapped during snapshot.
+pub type SwappableMetadataState = Arc<RwLock<SharedMetadataState>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RequestType {
@@ -43,8 +49,8 @@ struct LazyIoChannel {
     image: Option<Box<dyn IoChannel>>,
     queued_rw_requests: VecDeque<RWRequest>,
     finished_requests: Vec<(usize, bool)>,
-    bgworker_ch: Sender<BgWorkerRequest>,
-    metadata_state: SharedMetadataState,
+    bgworker_ch: SwappableSender,
+    metadata_state: SwappableMetadataState,
     stripe_fetches_requested: HashSet<usize>,
     track_written: bool,
 }
@@ -53,8 +59,8 @@ impl LazyIoChannel {
     fn new(
         base: Box<dyn IoChannel>,
         image: Option<Box<dyn IoChannel>>,
-        bgworker_ch: Sender<BgWorkerRequest>,
-        metadata_state: SharedMetadataState,
+        bgworker_ch: SwappableSender,
+        metadata_state: SwappableMetadataState,
         track_written: bool,
     ) -> Self {
         LazyIoChannel {
@@ -72,8 +78,9 @@ impl LazyIoChannel {
 
 impl LazyIoChannel {
     fn request_stripes_fetch_status(&self, request: &RWRequest) -> StripesFetchStatus {
+        let ms = self.metadata_state.read().unwrap();
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            let state = self.metadata_state.stripe_fetch_state(stripe_id);
+            let state = ms.stripe_fetch_state(stripe_id);
             match state {
                 Fetched | NoSource => {
                     continue;
@@ -91,8 +98,9 @@ impl LazyIoChannel {
     }
 
     fn request_stripes_written(&self, request: &RWRequest) -> bool {
+        let ms = self.metadata_state.read().unwrap();
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if !self.metadata_state.stripe_written(stripe_id) {
+            if !ms.stripe_written(stripe_id) {
                 return false;
             }
         }
@@ -100,11 +108,13 @@ impl LazyIoChannel {
     }
 
     fn start_stripe_fetches(&mut self, request: &RWRequest) -> Result<()> {
+        let ms = self.metadata_state.read().unwrap();
+        let sender = self.bgworker_ch.read().unwrap();
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if !self.metadata_state.stripe_fetched_if_needed(stripe_id)
+            if !ms.stripe_fetched_if_needed(stripe_id)
                 && !self.stripe_fetches_requested.contains(&stripe_id)
             {
-                self.bgworker_ch
+                sender
                     .send(BgWorkerRequest::Fetch { stripe_id })
                     .context(format!(
                         "failed to send fetch request for stripe {stripe_id}"
@@ -116,9 +126,11 @@ impl LazyIoChannel {
     }
 
     fn start_stripe_set_written(&mut self, request: &RWRequest) -> Result<()> {
+        let ms = self.metadata_state.read().unwrap();
+        let sender = self.bgworker_ch.read().unwrap();
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
-            if !self.metadata_state.stripe_written(stripe_id) {
-                self.bgworker_ch
+            if !ms.stripe_written(stripe_id) {
+                sender
                     .send(BgWorkerRequest::SetWritten { stripe_id })
                     .context(format!(
                         "failed to send set written request for stripe {stripe_id}"
@@ -195,16 +207,21 @@ impl LazyIoChannel {
 
 impl IoChannel for LazyIoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
+        let (stripe_id_first, stripe_id_last) = {
+            let ms = self.metadata_state.read().unwrap();
+            (
+                ms.sector_to_stripe_id(sector_offset),
+                ms.sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
+            )
+        };
         let request = RWRequest {
             id,
             kind: RequestType::In,
             sector_offset,
             sector_count,
             buf: buf.clone(),
-            stripe_id_first: self.metadata_state.sector_to_stripe_id(sector_offset),
-            stripe_id_last: self
-                .metadata_state
-                .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
+            stripe_id_first,
+            stripe_id_last,
         };
 
         match self.request_stripes_fetch_status(&request) {
@@ -244,16 +261,21 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
+        let (stripe_id_first, stripe_id_last) = {
+            let ms = self.metadata_state.read().unwrap();
+            (
+                ms.sector_to_stripe_id(sector_offset),
+                ms.sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
+            )
+        };
         let request = RWRequest {
             id,
             kind: RequestType::Out,
             sector_offset,
             sector_count,
             buf: buf.clone(),
-            stripe_id_first: self.metadata_state.sector_to_stripe_id(sector_offset),
-            stripe_id_last: self
-                .metadata_state
-                .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
+            stripe_id_first,
+            stripe_id_last,
         };
 
         match self.request_stripes_fetch_status(&request) {
@@ -329,8 +351,8 @@ impl IoChannel for LazyIoChannel {
 pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     image: Option<Box<dyn BlockDevice>>,
-    bgworker_ch: Sender<BgWorkerRequest>,
-    metadata_state: SharedMetadataState,
+    bgworker_ch: SwappableSender,
+    metadata_state: SwappableMetadataState,
     track_written: bool,
 }
 
@@ -338,8 +360,8 @@ impl LazyBlockDevice {
     pub fn new(
         base: Box<dyn BlockDevice>,
         image: Option<Box<dyn BlockDevice>>,
-        bgworker_ch: Sender<BgWorkerRequest>,
-        metadata_state: SharedMetadataState,
+        bgworker_ch: SwappableSender,
+        metadata_state: SwappableMetadataState,
         track_written: bool,
     ) -> Result<Box<Self>> {
         Ok(Box::new(LazyBlockDevice {
@@ -349,6 +371,17 @@ impl LazyBlockDevice {
             metadata_state,
             track_written,
         }))
+    }
+
+    /// Swap bgworker sender and metadata state atomically.
+    /// Called by snapshot layer AFTER draining I/O and stopping old bgworker.
+    pub fn swap_bgworker(
+        &self,
+        new_sender: Sender<BgWorkerRequest>,
+        new_metadata_state: SharedMetadataState,
+    ) {
+        *self.bgworker_ch.write().unwrap() = new_sender;
+        *self.metadata_state.write().unwrap() = new_metadata_state;
     }
 }
 

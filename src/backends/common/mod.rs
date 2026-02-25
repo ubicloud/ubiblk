@@ -3,7 +3,10 @@ use std::{
     fs::{File, OpenOptions},
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Arc, RwLock,
+    },
 };
 
 use log::{error, info};
@@ -213,8 +216,8 @@ impl BackendEnv {
         let lazy_bdev = block_device::LazyBlockDevice::new(
             disk_device,
             raw_image_device,
-            bgworker_sender,
-            shared_state,
+            Arc::new(RwLock::new(bgworker_sender)),
+            Arc::new(RwLock::new(shared_state)),
             config.device.track_written,
         )?;
 

@@ -46,7 +46,7 @@ pub(crate) mod bdev_test;
 
 pub use bdev_lazy::{
     bgworker::{BgWorker, BgWorkerRequest},
-    device::LazyBlockDevice,
+    device::{LazyBlockDevice, SwappableMetadataState, SwappableSender},
     metadata::{
         save::DEFAULT_STRIPE_SECTOR_COUNT_SHIFT,
         shared_state::SharedMetadataState,

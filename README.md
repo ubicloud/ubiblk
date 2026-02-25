@@ -124,7 +124,7 @@ supported:
 - `{"command": "stats"}` – returns cumulative bytes and operation counts per
   queue.
 
-Example using socat to query the status and pretty-print the response:
+Example using `nc` to query the status and pretty-print the response:
 
 ```bash
 $ echo '{"command": "status"}' | nc -U -q 0 /path/to/rpc.sock | jq .

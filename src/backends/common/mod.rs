@@ -4,7 +4,7 @@ use std::{
     os::unix::fs::{OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::{
-        mpsc::{channel, Receiver, Sender},
+        mpsc::{self, channel, Receiver, Sender},
         Arc, RwLock,
     },
 };
@@ -27,6 +27,7 @@ use crate::{
 
 pub mod io_tracking;
 pub mod rpc;
+pub mod snapshot_types;
 
 pub const SECTOR_SIZE: usize = 512;
 
@@ -49,6 +50,10 @@ pub struct BackendEnv {
     config: v2::Config,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<io_tracking::IoTracker>,
+    snapshot_cmd_sender: Option<mpsc::Sender<snapshot_types::SnapshotCommand>>,
+    snapshot_cmd_receiver: Option<mpsc::Receiver<snapshot_types::SnapshotCommand>>,
+    snapshot_status: Option<snapshot_types::SnapshotStatusHandle>,
+    snapshot_status_writer: Option<snapshot_types::SnapshotStatusHandle>,
 }
 
 impl BackendEnv {
@@ -77,6 +82,10 @@ impl BackendEnv {
                 config: config.clone(),
                 status_reporter: None,
                 io_trackers: Self::build_io_trackers(config),
+                snapshot_cmd_sender: None,
+                snapshot_cmd_receiver: None,
+                snapshot_status: None,
+                snapshot_status_writer: None,
             }),
             Some(metadata_dev) => {
                 Self::build_with_bgworker(disk_device, metadata_dev, config, alignment)
@@ -135,6 +144,24 @@ impl BackendEnv {
         self.bdev.clone()
     }
 
+    pub fn snapshot_cmd_sender(&self) -> Option<mpsc::Sender<snapshot_types::SnapshotCommand>> {
+        self.snapshot_cmd_sender.clone()
+    }
+
+    pub fn snapshot_status(&self) -> Option<snapshot_types::SnapshotStatusHandle> {
+        self.snapshot_status.clone()
+    }
+
+    pub fn take_snapshot_cmd_receiver(
+        &mut self,
+    ) -> Option<mpsc::Receiver<snapshot_types::SnapshotCommand>> {
+        self.snapshot_cmd_receiver.take()
+    }
+
+    pub fn take_snapshot_status_writer(&mut self) -> Option<snapshot_types::SnapshotStatusHandle> {
+        self.snapshot_status_writer.take()
+    }
+
     fn build_with_bgworker(
         disk_device: Box<dyn BlockDevice>,
         metadata_device: Box<dyn BlockDevice>,
@@ -173,6 +200,11 @@ impl BackendEnv {
             receiver: bgworker_receiver,
         };
 
+        let (snapshot_cmd_tx, snapshot_cmd_rx) =
+            mpsc::channel::<snapshot_types::SnapshotCommand>();
+        let (snapshot_status_writer, snapshot_status_reader) =
+            snapshot_types::SnapshotStatusHandle::new();
+
         Ok(BackendEnv {
             bdev: bdev_lazy,
             bgworker_config: Some(bgworker_config),
@@ -182,6 +214,10 @@ impl BackendEnv {
             config: config.clone(),
             status_reporter: Some(status_reporter),
             io_trackers: Self::build_io_trackers(config),
+            snapshot_cmd_sender: Some(snapshot_cmd_tx),
+            snapshot_cmd_receiver: Some(snapshot_cmd_rx),
+            snapshot_status: Some(snapshot_status_reader),
+            snapshot_status_writer: Some(snapshot_status_writer),
         })
     }
 
@@ -315,7 +351,15 @@ where
     let _rpc_handle = if let Some(path) = config.device.rpc_socket.as_ref() {
         let status_reporter = backend_env.status_reporter();
         let io_trackers = backend_env.io_trackers().clone();
-        Some(rpc::start_rpc_server(path, status_reporter, io_trackers)?)
+        let snapshot_cmd_sender = backend_env.snapshot_cmd_sender();
+        let snapshot_status = backend_env.snapshot_status();
+        Some(rpc::start_rpc_server(
+            path,
+            status_reporter,
+            io_trackers,
+            snapshot_cmd_sender,
+            snapshot_status,
+        )?)
     } else {
         None
     };

@@ -8,13 +8,16 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        mpsc, Arc,
     },
     thread::JoinHandle,
 };
 
 use crate::{
-    backends::common::io_tracking::{IoKind, IoTracker},
+    backends::common::{
+        io_tracking::{IoKind, IoTracker},
+        snapshot_types::{SnapshotCommand, SnapshotState, SnapshotStatusHandle},
+    },
     utils::umask_guard::UmaskGuard,
     Result,
 };
@@ -31,11 +34,15 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 struct RpcState {
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
+    snapshot_cmd_sender: Option<mpsc::Sender<SnapshotCommand>>,
+    snapshot_status: Option<SnapshotStatusHandle>,
 }
 
 #[derive(Deserialize)]
 struct RpcRequest {
     command: String,
+    new_data_path: Option<String>,
+    new_metadata_path: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -68,6 +75,8 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     path: P,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
+    snapshot_cmd_sender: Option<mpsc::Sender<SnapshotCommand>>,
+    snapshot_status: Option<SnapshotStatusHandle>,
 ) -> Result<RpcServerHandle> {
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
@@ -93,6 +102,8 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     let state = Arc::new(RpcState {
         status_reporter,
         io_trackers,
+        snapshot_cmd_sender,
+        snapshot_status,
     });
 
     info!("RPC server listening on {:?}", path);
@@ -233,6 +244,81 @@ fn process_request(request: RpcRequest, state: &RpcState) -> Value {
                 .collect();
             json!({ "stats": { "queues": queue_stats } })
         }
+        "snapshot" => {
+            let Some(ref sender) = state.snapshot_cmd_sender else {
+                return json!({
+                    "error": "snapshot requires a metadata layer (metadata_path must be configured)"
+                });
+            };
+
+            if let Some(ref status) = state.snapshot_status {
+                let current = status.current_state();
+                if current != SnapshotState::Idle {
+                    return json!({
+                        "error": format!(
+                            "snapshot already in progress (state: {})",
+                            current.as_str()
+                        )
+                    });
+                }
+            }
+
+            let (new_data_path, new_metadata_path) = match (
+                request.new_data_path,
+                request.new_metadata_path,
+            ) {
+                (Some(d), Some(m)) => (PathBuf::from(d), PathBuf::from(m)),
+                _ => {
+                    return json!({
+                        "error": "snapshot command requires 'new_data_path' and 'new_metadata_path' fields"
+                    });
+                }
+            };
+
+            let (result_tx, result_rx) = mpsc::channel();
+            let cmd = SnapshotCommand {
+                new_data_path,
+                new_metadata_path,
+                result_tx,
+            };
+
+            if sender.send(cmd).is_err() {
+                return json!({
+                    "error": "snapshot layer is not running"
+                });
+            }
+
+            match result_rx.recv() {
+                Ok(Ok(snapshot_id)) => json!({
+                    "snapshot": {
+                        "status": "initiated",
+                        "snapshot_id": snapshot_id
+                    }
+                }),
+                Ok(Err(e)) => json!({ "error": e }),
+                Err(_) => json!({ "error": "snapshot layer dropped the response channel" }),
+            }
+        }
+        "snapshot_status" => {
+            let Some(ref status) = state.snapshot_status else {
+                return json!({
+                    "snapshot_status": {
+                        "state": "idle",
+                        "last_snapshot": null
+                    }
+                });
+            };
+
+            let state_str = status.current_state().as_str();
+            let last = status.last_snapshot();
+
+            json!({
+                "snapshot_status": {
+                    "state": state_str,
+                    "last_snapshot": last
+                }
+            })
+        }
         other => json!({
             "error": format!("unknown command: {other}"),
         }),
@@ -307,7 +393,7 @@ mod tests {
         io_trackers: Vec<IoTracker>,
     ) -> Result<RpcServerHandle> {
         let _l = UMASK_LOCK.lock().unwrap();
-        start_rpc_server(path, status_reporter, io_trackers)
+        start_rpc_server(path, status_reporter, io_trackers, None, None)
     }
 
     #[test]
@@ -581,5 +667,223 @@ mod tests {
         let stats = &response["stats"];
         assert!(stats.get("queues").is_some());
         assert_eq!(stats["queues"].as_array().unwrap().len(), 0);
+    }
+
+    fn rpc_call_json(socket_path: &Path, request: Value) -> Value {
+        let mut stream = connect(socket_path);
+        let payload = request.to_string();
+        stream
+            .write_all(payload.as_bytes())
+            .expect("Failed to write to socket");
+        stream.write_all(b"\n").expect("Failed to write newline");
+        read_response(&mut stream)
+    }
+
+    fn start_rpc_with_snapshot(
+        path: &Path,
+        snapshot_cmd_sender: Option<std::sync::mpsc::Sender<SnapshotCommand>>,
+        snapshot_status: Option<SnapshotStatusHandle>,
+    ) -> RpcServerHandle {
+        let _l = UMASK_LOCK.lock().unwrap();
+        start_rpc_server(path, None, vec![], snapshot_cmd_sender, snapshot_status)
+            .expect("Failed to start RPC server")
+    }
+
+    #[test]
+    fn test_rpc_snapshot_status_no_metadata() {
+        let path = test_socket_path("snap_status_no_meta");
+        let handle = start_rpc_with_snapshot(&path, None, None);
+
+        let response = rpc_call(&path, "snapshot_status");
+        handle.stop().expect("Failed to stop RPC server");
+
+        let status = &response["snapshot_status"];
+        assert_eq!(status["state"], "idle");
+        assert!(status["last_snapshot"].is_null());
+    }
+
+    #[test]
+    fn test_rpc_snapshot_status_with_handle() {
+        use SnapshotStatusHandle;
+
+        let path = test_socket_path("snap_status_with_handle");
+        let (writer, reader) = SnapshotStatusHandle::new();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let handle = start_rpc_with_snapshot(&path, Some(tx), Some(reader));
+
+        let response = rpc_call(&path, "snapshot_status");
+
+        assert_eq!(response["snapshot_status"]["state"], "idle");
+        assert!(response["snapshot_status"]["last_snapshot"].is_null());
+
+        // Change state and check again
+        writer.set_state(SnapshotState::Draining);
+        let response = rpc_call(&path, "snapshot_status");
+        assert_eq!(response["snapshot_status"]["state"], "draining");
+
+        handle.stop().expect("Failed to stop RPC server");
+    }
+
+    #[test]
+    fn test_rpc_snapshot_no_metadata() {
+        let path = test_socket_path("snap_no_meta");
+        let handle = start_rpc_with_snapshot(&path, None, None);
+
+        let response = rpc_call_json(
+            &path,
+            json!({
+                "command": "snapshot",
+                "new_data_path": "/tmp/data",
+                "new_metadata_path": "/tmp/meta"
+            }),
+        );
+        handle.stop().expect("Failed to stop RPC server");
+
+        let error = response["error"].as_str().unwrap();
+        assert!(error.contains("metadata layer"));
+    }
+
+    #[test]
+    fn test_rpc_snapshot_missing_paths() {
+        let path = test_socket_path("snap_missing_paths");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let (_writer, reader) = SnapshotStatusHandle::new();
+        let handle = start_rpc_with_snapshot(&path, Some(tx), Some(reader));
+
+        // Missing both paths
+        let response = rpc_call(&path, "snapshot");
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("new_data_path"));
+
+        // Missing metadata path
+        let response = rpc_call_json(
+            &path,
+            json!({
+                "command": "snapshot",
+                "new_data_path": "/tmp/data"
+            }),
+        );
+        assert!(response["error"]
+            .as_str()
+            .unwrap()
+            .contains("new_metadata_path"));
+
+        handle.stop().expect("Failed to stop RPC server");
+    }
+
+    #[test]
+    fn test_rpc_snapshot_already_in_progress() {
+        let path = test_socket_path("snap_in_progress");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let (writer, reader) = SnapshotStatusHandle::new();
+        writer.set_state(SnapshotState::Draining);
+        let handle = start_rpc_with_snapshot(&path, Some(tx), Some(reader));
+
+        let response = rpc_call_json(
+            &path,
+            json!({
+                "command": "snapshot",
+                "new_data_path": "/tmp/data",
+                "new_metadata_path": "/tmp/meta"
+            }),
+        );
+        handle.stop().expect("Failed to stop RPC server");
+
+        let error = response["error"].as_str().unwrap();
+        assert!(error.contains("already in progress"));
+        assert!(error.contains("draining"));
+    }
+
+    #[test]
+    fn test_rpc_snapshot_layer_responds_success() {
+        let path = test_socket_path("snap_success");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (_writer, reader) = SnapshotStatusHandle::new();
+        let handle = start_rpc_with_snapshot(&path, Some(tx), Some(reader));
+
+        // Spawn a thread to respond to the snapshot command
+        let responder = std::thread::spawn(move || {
+            let cmd: SnapshotCommand = rx.recv().unwrap();
+            assert_eq!(cmd.new_data_path, PathBuf::from("/tmp/new-data"));
+            assert_eq!(cmd.new_metadata_path, PathBuf::from("/tmp/new-meta"));
+            cmd.result_tx
+                .send(Ok("snap-123".to_string()))
+                .unwrap();
+        });
+
+        let response = rpc_call_json(
+            &path,
+            json!({
+                "command": "snapshot",
+                "new_data_path": "/tmp/new-data",
+                "new_metadata_path": "/tmp/new-meta"
+            }),
+        );
+
+        responder.join().unwrap();
+        handle.stop().expect("Failed to stop RPC server");
+
+        assert_eq!(response["snapshot"]["status"], "initiated");
+        assert_eq!(response["snapshot"]["snapshot_id"], "snap-123");
+    }
+
+    #[test]
+    fn test_rpc_snapshot_layer_responds_error() {
+        let path = test_socket_path("snap_error");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (_writer, reader) = SnapshotStatusHandle::new();
+        let handle = start_rpc_with_snapshot(&path, Some(tx), Some(reader));
+
+        let responder = std::thread::spawn(move || {
+            let cmd: SnapshotCommand = rx.recv().unwrap();
+            cmd.result_tx
+                .send(Err("disk full".to_string()))
+                .unwrap();
+        });
+
+        let response = rpc_call_json(
+            &path,
+            json!({
+                "command": "snapshot",
+                "new_data_path": "/tmp/data",
+                "new_metadata_path": "/tmp/meta"
+            }),
+        );
+
+        responder.join().unwrap();
+        handle.stop().expect("Failed to stop RPC server");
+
+        assert_eq!(response["error"], "disk full");
+    }
+
+    #[test]
+    fn test_rpc_snapshot_layer_drops_channel() {
+        let path = test_socket_path("snap_dropped");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (_writer, reader) = SnapshotStatusHandle::new();
+        let handle = start_rpc_with_snapshot(&path, Some(tx), Some(reader));
+
+        // Drop the receiver end immediately so the send succeeds but recv fails
+        let responder = std::thread::spawn(move || {
+            let cmd: SnapshotCommand = rx.recv().unwrap();
+            drop(cmd); // drop result_tx without sending
+        });
+
+        let response = rpc_call_json(
+            &path,
+            json!({
+                "command": "snapshot",
+                "new_data_path": "/tmp/data",
+                "new_metadata_path": "/tmp/meta"
+            }),
+        );
+
+        responder.join().unwrap();
+        handle.stop().expect("Failed to stop RPC server");
+
+        let error = response["error"].as_str().unwrap();
+        assert!(error.contains("dropped"));
     }
 }

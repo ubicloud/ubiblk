@@ -172,6 +172,12 @@ impl SnapshotIoChannel {
     }
 }
 
+impl Drop for SnapshotIoChannel {
+    fn drop(&mut self) {
+        self.shared.num_channels.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl IoChannel for SnapshotIoChannel {
     fn add_read(
         &mut self,
@@ -572,6 +578,64 @@ mod tests {
         ch.poll();
 
         // Coordinator should complete.
+        let result = coord.join().unwrap();
+        assert!(result.is_ok());
+        assert_eq!(shared.state(), STATE_IDLE);
+    }
+
+    #[test]
+    fn test_num_channels_decremented_on_drop() {
+        let base = TestBlockDevice::new(4096);
+        let snapshot_dev = SnapshotBlockDevice::new(Box::new(base));
+
+        let ch1 = snapshot_dev.create_channel().unwrap();
+        let ch2 = snapshot_dev.create_channel().unwrap();
+        assert_eq!(snapshot_dev.shared.num_channels.load(Ordering::Acquire), 2);
+
+        drop(ch1);
+        assert_eq!(snapshot_dev.shared.num_channels.load(Ordering::Acquire), 1);
+
+        drop(ch2);
+        assert_eq!(snapshot_dev.shared.num_channels.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn test_snapshot_after_channel_drop() {
+        // Create 2 channels, drop 1, trigger snapshot with only the surviving channel.
+        let base = TestBlockDevice::new(4096);
+        let snapshot_dev = SnapshotBlockDevice::new(Box::new(base));
+
+        let ch1 = snapshot_dev.create_channel().unwrap();
+        let mut ch2 = snapshot_dev.create_channel().unwrap();
+        assert_eq!(snapshot_dev.shared.num_channels.load(Ordering::Acquire), 2);
+
+        // Drop ch1 — num_channels should be 1.
+        drop(ch1);
+        assert_eq!(snapshot_dev.shared.num_channels.load(Ordering::Acquire), 1);
+
+        let handle = snapshot_dev.snapshot_handle();
+        let shared = snapshot_dev.shared.clone();
+
+        // trigger_snapshot should only wait for 1 channel (the surviving one).
+        let coord = std::thread::spawn(move || handle.trigger_snapshot(|| Ok(())));
+
+        // Wait until state is DRAINING.
+        while shared.state() == STATE_IDLE {
+            std::thread::yield_now();
+        }
+        assert_eq!(shared.state(), STATE_DRAINING);
+
+        // Only ch2 needs to drain.
+        ch2.poll();
+
+        // Wait for RESUMING.
+        while shared.state() != STATE_RESUMING {
+            std::thread::yield_now();
+        }
+
+        // ch2 resumes.
+        ch2.poll();
+
         let result = coord.join().unwrap();
         assert!(result.is_ok());
         assert_eq!(shared.state(), STATE_IDLE);

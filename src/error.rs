@@ -212,6 +212,14 @@ ubiblk_error_variants! {
         source: libublk::UblkError,
         meta: ErrorMeta,
     } => "{meta}Ublk error: {source} {meta:#}",
+    SnapshotTimeout {
+        description: String,
+        meta: ErrorMeta,
+    } => "{meta}Snapshot timeout: {description} {meta:#}",
+    SnapshotError {
+        description: String,
+        meta: ErrorMeta,
+    } => "{meta}Snapshot error: {description} {meta:#}",
 }
 
 /// Internal helper to conditionally convert a field value.

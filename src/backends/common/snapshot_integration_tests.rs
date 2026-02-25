@@ -472,6 +472,153 @@ mod tests {
         .unwrap();
     }
 
+    /// Helper to build a test config with encryption enabled.
+    fn test_config_encrypted(
+        data_path: &Path,
+        metadata_path: Option<&Path>,
+        rpc_socket: Option<&Path>,
+    ) -> v2::Config {
+        use crate::config::v2::secrets::{
+            resolve_secrets, SecretDef, SecretEncoding, SecretRef, SecretSource,
+        };
+        use base64::Engine;
+        use std::collections::HashMap;
+
+        // Create a 64-byte XTS key (2x32 bytes) as base64-encoded inline secret
+        let xts_key_b64 = base64::engine::general_purpose::STANDARD.encode([0x42u8; 64]);
+        let secret_defs = HashMap::from([(
+            "xts-key".to_string(),
+            SecretDef {
+                source: SecretSource::Inline(xts_key_b64),
+                encrypted_by: None,
+                encoding: SecretEncoding::Base64,
+            },
+        )]);
+        let danger_zone = v2::DangerZone {
+            enabled: true,
+            allow_unencrypted_disk: true,
+            allow_inline_plaintext_secrets: true,
+            allow_secret_over_regular_file: true,
+            allow_unencrypted_connection: true,
+            allow_env_secrets: false,
+        };
+        let secrets = resolve_secrets(&secret_defs, &danger_zone).unwrap();
+
+        let mut config = test_config(data_path, metadata_path, rpc_socket);
+        config.encryption = Some(v2::EncryptionSection {
+            xts_key: SecretRef::Ref("xts-key".to_string()),
+        });
+        config.secrets = secrets;
+        config
+    }
+
+    /// Test 6: Encrypted device snapshot lifecycle
+    ///
+    /// Write known data to an encrypted device, trigger snapshot via RPC,
+    /// verify data integrity through the encryption layer (COW reads from
+    /// old disk are decrypted correctly), write new data post-snapshot,
+    /// verify new data is served correctly.
+    #[test]
+    fn test_snapshot_encrypted_device() {
+        let _umask = UMASK_LOCK.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+
+        let data_path = dir.path().join("data.img");
+        let metadata_path = dir.path().join("metadata.bin");
+        let rpc_path = dir.path().join("rpc.sock");
+
+        // Create data and metadata files
+        let data_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&data_path)
+            .unwrap();
+        data_file.set_len(DISK_SIZE).unwrap();
+        data_file.sync_all().unwrap();
+
+        let meta_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&metadata_path)
+            .unwrap();
+        meta_file.set_len(8 * 1024 * 1024).unwrap();
+        meta_file.sync_all().unwrap();
+
+        // Initialize metadata with the encrypted config so the metadata block
+        // device applies the same encryption layer used at runtime.
+        let config =
+            test_config_encrypted(&data_path, Some(&metadata_path), Some(&rpc_path));
+        init_metadata(&config, STRIPE_SHIFT).unwrap();
+
+        let new_data_path = dir.path().join("snap1_data.img");
+        let new_metadata_path = dir.path().join("snap1_metadata.bin");
+
+        run_backend_loop(&config, "test-snap-enc", false, |env| {
+            let bdev = env.bdev();
+            let mut channel = bdev.create_channel().unwrap();
+
+            // Write known data through the encryption layer:
+            // stripe 0 = 0xAA, stripe 1 = 0xBB, stripe 2 = 0xCC
+            write_stripe(&mut channel, 0, 0xAA);
+            write_stripe(&mut channel, 1, 0xBB);
+            write_stripe(&mut channel, 2, 0xCC);
+
+            // Verify writes decrypt correctly
+            assert_eq!(read_stripe(&mut channel, 0), 0xAA);
+            assert_eq!(read_stripe(&mut channel, 1), 0xBB);
+            assert_eq!(read_stripe(&mut channel, 2), 0xCC);
+
+            // Trigger snapshot via RPC
+            let response = trigger_snapshot_with_poll(
+                &rpc_path,
+                &mut channel,
+                &new_data_path,
+                &new_metadata_path,
+            );
+
+            // Verify snapshot success
+            assert!(
+                response.get("snapshot").is_some(),
+                "encrypted snapshot failed: {response}"
+            );
+            assert_eq!(response["snapshot"]["status"], "initiated");
+
+            // Read back data — COW reads from old (encrypted) disk should decrypt correctly
+            assert_eq!(read_stripe(&mut channel, 0), 0xAA);
+            assert_eq!(read_stripe(&mut channel, 1), 0xBB);
+            assert_eq!(read_stripe(&mut channel, 2), 0xCC);
+
+            // Write new data to stripe 0 post-snapshot (goes to new encrypted disk)
+            write_stripe(&mut channel, 0, 0xDD);
+
+            // Stripe 0 should now return new data (decrypted from new disk)
+            assert_eq!(read_stripe(&mut channel, 0), 0xDD);
+            // Stripes 1 and 2 should still return old data (decrypted from COW source)
+            assert_eq!(read_stripe(&mut channel, 1), 0xBB);
+            assert_eq!(read_stripe(&mut channel, 2), 0xCC);
+
+            // Write to another stripe to confirm multiple post-snapshot writes work
+            write_stripe(&mut channel, 1, 0xEE);
+            assert_eq!(read_stripe(&mut channel, 1), 0xEE);
+            // Stripe 2 still from COW source
+            assert_eq!(read_stripe(&mut channel, 2), 0xCC);
+
+            // Verify snapshot_status shows success
+            let status_response = rpc_call(&rpc_path, "snapshot_status");
+            let last = &status_response["snapshot_status"]["last_snapshot"];
+            assert_eq!(last["result"], "success");
+
+            // Verify new files exist
+            assert!(new_data_path.exists(), "new data file not created");
+            assert!(new_metadata_path.exists(), "new metadata file not created");
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
     /// Test 5: Snapshot with invalid paths
     ///
     /// Non-existent directory should fail, device should continue working.

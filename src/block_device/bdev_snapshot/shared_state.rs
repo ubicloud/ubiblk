@@ -31,6 +31,12 @@ pub struct SnapshotSharedState {
     pub(crate) notify: (Mutex<()>, Condvar),
 }
 
+impl Default for SnapshotSharedState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SnapshotSharedState {
     pub fn new() -> Self {
         SnapshotSharedState {

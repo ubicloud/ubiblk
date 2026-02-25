@@ -34,6 +34,7 @@ pub struct SnapshotContext {
 }
 
 impl SnapshotContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: v2::Config,
         alignment: usize,
@@ -153,6 +154,7 @@ pub fn run_snapshot_coordinator(
 }
 
 /// The 17-step swap procedure. Called while all I/O channels are quiesced.
+#[allow(clippy::too_many_arguments)]
 #[error_context("Failed to perform snapshot swap")]
 fn perform_swap(
     bgworker_sender: &mut Sender<BgWorkerRequest>,
@@ -184,7 +186,7 @@ fn perform_swap(
     let stripe_sector_count_shift = old_metadata.stripe_sector_count_shift;
 
     // Step 2: Create new data file (sparse, same size as old disk).
-    info!("Snapshot swap step 2: creating new data file {:?}", new_data_path);
+    info!("Snapshot swap step 2: creating new data file {new_data_path:?}");
     let old_disk_dev = build_block_device(old_data_path, config, true)
         .context("Failed to open old disk as read-only")?;
     let data_size = old_disk_dev.sector_count() * 512;

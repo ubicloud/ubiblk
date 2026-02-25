@@ -640,4 +640,251 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(shared.state(), STATE_IDLE);
     }
+
+    /// Multi-channel snapshot drain integration test.
+    ///
+    /// Exercises the full snapshot lifecycle with 4 channels, each with different
+    /// I/O patterns (some with in-flight I/O, some idle, some queuing I/O during
+    /// drain). The coordinator runs on a separate thread while the main thread
+    /// drives all channels through drain/resume. Verifies that:
+    /// - The coordinator blocks until ALL channels confirm drain
+    /// - I/O queued during drain is replayed correctly on resume
+    /// - Data written before and after the snapshot is consistent
+    /// - The swap_fn executes only after all channels are quiesced
+    #[test]
+    fn test_multi_channel_snapshot_drain() {
+        use std::sync::atomic::AtomicBool;
+
+        let base = TestBlockDevice::new(4096);
+        let snapshot_dev = SnapshotBlockDevice::new(Box::new(base));
+        let handle = snapshot_dev.snapshot_handle();
+        let shared = snapshot_dev.shared.clone();
+
+        // Create 4 channels.
+        let mut ch1 = snapshot_dev.create_channel().unwrap();
+        let mut ch2 = snapshot_dev.create_channel().unwrap();
+        let mut ch3 = snapshot_dev.create_channel().unwrap();
+        let mut ch4 = snapshot_dev.create_channel().unwrap();
+        assert_eq!(shared.num_channels.load(Ordering::Acquire), 4);
+
+        // Write initial data via ch1 before snapshot (0xAA at sector 0).
+        let write_buf = shared_buffer(SECTOR_SIZE);
+        write_buf.borrow_mut().as_mut_slice().fill(0xAA);
+        ch1.add_write(0, 1, write_buf.clone(), 1);
+        ch1.submit().unwrap();
+        let results = ch1.poll();
+        assert_eq!(results, vec![(1, true)]);
+
+        // Track whether swap_fn was called.
+        let swap_called = Arc::new(AtomicBool::new(false));
+        let swap_called2 = swap_called.clone();
+
+        // Coordinator thread triggers snapshot (blocks until all channels drain).
+        let coord = std::thread::spawn(move || {
+            handle.trigger_snapshot(|| {
+                swap_called2.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        // Wait for draining state.
+        while shared.state() == STATE_IDLE {
+            std::thread::yield_now();
+        }
+        assert_eq!(shared.state(), STATE_DRAINING);
+
+        // --- Drain phase: each channel behaves differently ---
+
+        // Channel 1: idle channel, just poll to drain.
+        ch1.poll();
+
+        // Channel 2: queue a write + flush during drain (replayed on resume).
+        let write_buf2 = shared_buffer(SECTOR_SIZE);
+        write_buf2.borrow_mut().as_mut_slice().fill(0xBB);
+        ch2.add_write(1, 1, write_buf2.clone(), 20);
+        ch2.add_flush(21);
+        ch2.poll(); // drain (no in-flight I/O in base)
+
+        // Channel 3: queue a read during drain.
+        let read_buf = shared_buffer(SECTOR_SIZE);
+        ch3.add_read(0, 1, read_buf.clone(), 30);
+        ch3.poll(); // drain
+
+        // Verify: 3 channels drained, coordinator still blocked waiting for ch4.
+        assert_eq!(shared.drain_count.load(Ordering::Acquire), 3);
+        assert!(!swap_called.load(Ordering::SeqCst));
+
+        // Channel 4: last channel drains — this unblocks the coordinator.
+        ch4.poll();
+
+        // Wait for coordinator to finish swap and enter RESUMING.
+        while shared.state() != STATE_RESUMING {
+            std::thread::yield_now();
+        }
+        assert!(swap_called.load(Ordering::SeqCst));
+
+        // --- Resume phase: all channels replay queued I/O ---
+        ch1.poll();
+        ch2.poll();
+        ch3.poll();
+        ch4.poll();
+
+        // Coordinator completes.
+        let result = coord.join().unwrap();
+        assert!(result.is_ok());
+        assert_eq!(shared.state(), STATE_IDLE);
+        assert_eq!(shared.drain_count.load(Ordering::Acquire), 4);
+        assert_eq!(shared.resume_count.load(Ordering::Acquire), 4);
+
+        // --- Post-snapshot verification ---
+
+        // Verify ch2's queued write (0xBB at sector 1) was replayed.
+        let verify_buf = shared_buffer(SECTOR_SIZE);
+        ch2.add_read(1, 1, verify_buf.clone(), 50);
+        ch2.submit().unwrap();
+        let results = ch2.poll();
+        assert_eq!(results, vec![(50, true)]);
+        assert_eq!(verify_buf.borrow().as_slice()[0], 0xBB);
+
+        // Verify ch3's queued read (sector 0, written as 0xAA before snapshot).
+        assert_eq!(read_buf.borrow().as_slice()[0], 0xAA);
+
+        // Verify original data at sector 0 is intact.
+        let verify_buf2 = shared_buffer(SECTOR_SIZE);
+        ch1.add_read(0, 1, verify_buf2.clone(), 60);
+        ch1.submit().unwrap();
+        let results = ch1.poll();
+        assert_eq!(results, vec![(60, true)]);
+        assert_eq!(verify_buf2.borrow().as_slice()[0], 0xAA);
+    }
+
+    /// Multi-channel drain with staggered channel drain timing.
+    ///
+    /// Tests that the coordinator correctly waits for ALL channels even when
+    /// they drain at very different times. Channels 1 and 2 drain immediately,
+    /// while channels 3 and 4 drain later after queuing additional I/O.
+    /// Also verifies that multiple snapshots can be performed in sequence.
+    #[test]
+    fn test_multi_channel_staggered_drain_and_repeat() {
+        let base = TestBlockDevice::new(4 * SECTOR_SIZE as u64);
+        let snapshot_dev = SnapshotBlockDevice::new(Box::new(base));
+        let shared = snapshot_dev.shared.clone();
+
+        let mut ch1 = snapshot_dev.create_channel().unwrap();
+        let mut ch2 = snapshot_dev.create_channel().unwrap();
+        let mut ch3 = snapshot_dev.create_channel().unwrap();
+
+        // --- First snapshot ---
+        let handle = snapshot_dev.snapshot_handle();
+        let swap_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let swap_count2 = swap_count.clone();
+
+        let coord = std::thread::spawn(move || {
+            handle.trigger_snapshot(|| {
+                swap_count2.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        while shared.state() == STATE_IDLE {
+            std::thread::yield_now();
+        }
+
+        // Ch1 drains immediately.
+        ch1.poll();
+        assert_eq!(shared.drain_count.load(Ordering::Acquire), 1);
+
+        // Ch2 queues I/O then drains.
+        let buf = shared_buffer(SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice().fill(0x11);
+        ch2.add_write(0, 1, buf.clone(), 200);
+        ch2.poll();
+        assert_eq!(shared.drain_count.load(Ordering::Acquire), 2);
+
+        // Ch3 queues multiple operations then drains (last to drain).
+        let buf2 = shared_buffer(SECTOR_SIZE);
+        buf2.borrow_mut().as_mut_slice().fill(0x22);
+        ch3.add_write(1, 1, buf2.clone(), 300);
+        ch3.add_write(2, 1, buf2.clone(), 301);
+        ch3.add_flush(302);
+        ch3.poll();
+
+        // All drained.
+        assert_eq!(shared.drain_count.load(Ordering::Acquire), 3);
+
+        // Wait for RESUMING.
+        while shared.state() != STATE_RESUMING {
+            std::thread::yield_now();
+        }
+
+        // Resume all channels.
+        ch1.poll();
+        ch2.poll();
+        ch3.poll();
+
+        let result = coord.join().unwrap();
+        assert!(result.is_ok());
+        assert_eq!(swap_count.load(Ordering::SeqCst), 1);
+        assert_eq!(shared.state(), STATE_IDLE);
+
+        // Verify ch2's queued write landed (0x11 at sector 0).
+        let verify = shared_buffer(SECTOR_SIZE);
+        ch2.add_read(0, 1, verify.clone(), 400);
+        ch2.submit().unwrap();
+        let results = ch2.poll();
+        assert_eq!(results, vec![(400, true)]);
+        assert_eq!(verify.borrow().as_slice()[0], 0x11);
+
+        // Verify ch3's queued writes landed (0x22 at sectors 1 and 2).
+        let verify2 = shared_buffer(SECTOR_SIZE);
+        ch3.add_read(1, 1, verify2.clone(), 401);
+        ch3.submit().unwrap();
+        ch3.poll();
+        assert_eq!(verify2.borrow().as_slice()[0], 0x22);
+
+        let verify3 = shared_buffer(SECTOR_SIZE);
+        ch3.add_read(2, 1, verify3.clone(), 402);
+        ch3.submit().unwrap();
+        ch3.poll();
+        assert_eq!(verify3.borrow().as_slice()[0], 0x22);
+
+        // --- Second snapshot: verify the mechanism resets correctly ---
+        let handle2 = snapshot_dev.snapshot_handle();
+        let swap_count3 = swap_count.clone();
+        let coord2 = std::thread::spawn(move || {
+            handle2.trigger_snapshot(|| {
+                swap_count3.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        while shared.state() == STATE_IDLE {
+            std::thread::yield_now();
+        }
+
+        // All 3 channels drain.
+        ch1.poll();
+        ch2.poll();
+        ch3.poll();
+
+        while shared.state() != STATE_RESUMING {
+            std::thread::yield_now();
+        }
+
+        ch1.poll();
+        ch2.poll();
+        ch3.poll();
+
+        let result = coord2.join().unwrap();
+        assert!(result.is_ok());
+        assert_eq!(swap_count.load(Ordering::SeqCst), 2);
+        assert_eq!(shared.state(), STATE_IDLE);
+
+        // Data from first snapshot is still readable.
+        let verify_final = shared_buffer(SECTOR_SIZE);
+        ch1.add_read(0, 1, verify_final.clone(), 500);
+        ch1.submit().unwrap();
+        ch1.poll();
+        assert_eq!(verify_final.borrow().as_slice()[0], 0x11);
+    }
 }

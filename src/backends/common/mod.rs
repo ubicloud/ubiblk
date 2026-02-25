@@ -30,6 +30,9 @@ pub mod rpc;
 pub mod snapshot_swap;
 pub mod snapshot_types;
 
+#[cfg(test)]
+mod snapshot_integration_tests;
+
 pub const SECTOR_SIZE: usize = 512;
 
 struct BgWorkerConfig {

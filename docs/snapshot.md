@@ -349,3 +349,128 @@ COW source to the active data file. During a snapshot:
    source and the new data file as its target.
 3. As the guest accesses stripes that haven't been copied yet, the
    background worker fetches them from the old data file on demand.
+
+## Testing
+
+The snapshot implementation has both unit tests (in source files) and
+integration tests. All tests run with the standard Cargo test runner.
+
+### Running All Snapshot Tests
+
+```bash
+# Run all tests with "snapshot" in the name
+cargo test snapshot
+
+# Run with output visible (useful for debugging)
+cargo test snapshot -- --nocapture
+```
+
+### Running Specific Test Suites
+
+```bash
+# Unit tests — bdev_snapshot device layer (drain, queue, state machine)
+cargo test --lib bdev_snapshot
+
+# Unit tests — snapshot swap procedure (file creation, bgworker swap)
+cargo test --lib snapshot_swap
+
+# Unit tests — snapshot types (state transitions, serialization)
+cargo test --lib snapshot_types
+
+# Unit tests — RPC snapshot command handling
+cargo test --lib rpc::tests::test_rpc_snapshot
+
+# Integration tests — end-to-end snapshot lifecycle
+cargo test --lib snapshot_integration_tests
+```
+
+### Test Descriptions
+
+#### bdev_snapshot device layer (`src/block_device/bdev_snapshot/device.rs`)
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_passthrough_idle` | I/O passes through to base device in idle state |
+| `test_flush_passthrough` | Flush operations pass through correctly |
+| `test_sector_count_delegation` | Sector count is delegated to base device |
+| `test_num_channels_incremented` | Channel counter tracks created channels |
+| `test_num_channels_decremented_on_drop` | Channel counter decrements when channel is dropped |
+| `test_queuing_when_draining` | New I/O is queued (not forwarded) during drain |
+| `test_queuing_when_snapshotting` | New I/O is queued during snapshot swap |
+| `test_drain_state_machine` | State transitions: idle → draining → drained |
+| `test_resume_replays_queued_io` | Queued I/O replays in order after resume |
+| `test_queued_requests_fifo_order` | Queue maintains FIFO ordering |
+| `test_busy_with_queued_and_base` | `busy()` reports true when queue or base has work |
+| `test_clone_shares_state` | Cloned channels share the same snapshot state |
+| `test_full_snapshot_lifecycle` | Complete single-channel snapshot lifecycle |
+| `test_snapshot_after_channel_drop` | Snapshot works after some channels are dropped |
+| `test_multi_channel_snapshot_drain` | Multiple channels coordinate drain correctly |
+| `test_multi_channel_staggered_drain_and_repeat` | Staggered drain across channels with repeated snapshots |
+
+#### Snapshot shared state (`src/block_device/bdev_snapshot/shared_state.rs`)
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_initial_state` | Shared state starts in idle with zero counters |
+| `test_state_transitions` | Atomic state transitions work correctly |
+| `test_counter_increments` | Drained-channel counter increments atomically |
+| `test_condvar_notification` | Condvar wakes waiters on state change |
+
+#### Snapshot handle (`src/block_device/bdev_snapshot/handle.rs`)
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_snapshot_handle_send_sync` | Handle is Send + Sync (safe for cross-thread use) |
+| `test_trigger_snapshot_no_channels` | Snapshot with zero channels returns error |
+| `test_trigger_snapshot_success` | Full trigger-drain-swap-resume lifecycle |
+| `test_trigger_snapshot_swap_fn_error_still_resumes` | I/O resumes even if swap function fails |
+| `test_trigger_snapshot_drain_timeout` | Drain timeout is enforced |
+
+#### Snapshot swap (`src/backends/common/snapshot_swap.rs`)
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_create_new_file_basic` | New file creation with correct size and permissions |
+| `test_create_new_file_rejects_existing` | Refuses to overwrite existing files |
+| `test_create_new_file_rejects_symlink` | Refuses to follow symlinks |
+| `test_single_level_enforcement` | Rejects snapshot-of-a-snapshot (chaining) |
+| `test_swap_bgworker_not_called_on_startup_failure` | Bgworker swap skipped if new worker fails to start |
+| `test_swap_bgworker_called_on_startup_success` | Bgworker swap proceeds on successful startup |
+| `test_unix_now` | Timestamp helper returns reasonable values |
+
+#### Snapshot types (`src/backends/common/snapshot_types.rs`)
+
+| Test | What it verifies |
+|------|-----------------|
+| `snapshot_state_round_trip` | State enum serializes/deserializes correctly |
+| `snapshot_state_as_str` | State display strings match expected values |
+| `snapshot_status_handle_is_clone_send_sync` | Status handle has correct trait bounds |
+| `snapshot_command_is_send` | Command type is Send (safe for channel use) |
+| `snapshot_status_handle_state_transitions` | Status handle tracks state changes |
+| `snapshot_status_handle_last_snapshot` | Status handle records last snapshot info |
+| `snapshot_info_serializes_success` | SnapshotInfo JSON for success case |
+| `snapshot_info_serializes_failed` | SnapshotInfo JSON for failure case |
+
+#### RPC command handling (`src/backends/common/rpc.rs`)
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_rpc_snapshot_status_no_metadata` | Status returns error without metadata layer |
+| `test_rpc_snapshot_status_with_handle` | Status returns state and last-snapshot info |
+| `test_rpc_snapshot_no_metadata` | Snapshot command returns error without metadata |
+| `test_rpc_snapshot_missing_paths` | Returns error if paths are missing from request |
+| `test_rpc_snapshot_already_in_progress` | Returns error if snapshot is already running |
+| `test_rpc_snapshot_layer_responds_success` | Happy path: RPC triggers snapshot, gets success |
+| `test_rpc_snapshot_layer_responds_error` | RPC returns error from snapshot layer |
+| `test_rpc_snapshot_layer_drops_channel` | Handles dropped response channel gracefully |
+
+#### Integration tests (`src/backends/common/snapshot_integration_tests.rs`)
+
+| Test | What it verifies |
+|------|-----------------|
+| `test_snapshot_basic_lifecycle` | End-to-end: write data, snapshot, verify data accessible through new layer, COW source serves old stripes |
+| `test_snapshot_status_rpc` | Status RPC returns correct state before, during, and after snapshot |
+| `test_snapshot_second_rejected` | Second concurrent snapshot is rejected |
+| `test_snapshot_no_metadata` | Snapshot on a device without metadata returns error |
+| `test_snapshot_encrypted_device` | Snapshot works correctly with encryption enabled — data written pre-snapshot is readable post-snapshot through the COW source |
+| `test_snapshot_invalid_paths` | Invalid paths (existing file, relative path, symlink) are rejected |

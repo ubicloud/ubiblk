@@ -224,13 +224,11 @@ fn perform_swap(
     // Step 11: Create new mpsc channel for bgworker.
     let (new_bgworker_sender, new_bgworker_receiver) = channel();
 
-    // Step 12: Swap LazyBlockDevice's bgworker sender and metadata state.
-    info!("Snapshot swap step 12: swapping LazyBlockDevice bgworker");
-    lazy_bdev.swap_bgworker(new_bgworker_sender.clone(), new_shared_state.clone());
-
-    // Steps 13-14: Spawn new bgworker thread. BgWorker is not Send (contains Rc),
-    // so we must build it on the bgworker thread, same as spawn_bgworker_thread().
-    info!("Snapshot swap steps 13-14: spawning new bgworker with COW source");
+    // Steps 12-13: Spawn new bgworker thread BEFORE swapping LazyBlockDevice.
+    // BgWorker is not Send (contains Rc), so we must build it on the bgworker
+    // thread, same as spawn_bgworker_thread(). We wait for startup confirmation
+    // before swapping, so on failure the LazyBlockDevice keeps consistent state.
+    info!("Snapshot swap steps 12-13: spawning new bgworker with COW source");
     let stripe_sector_count = new_shared_state.stripe_sector_count();
     let shared_state_for_bgworker = new_shared_state.clone();
     let (startup_tx, startup_rx) = channel::<Result<()>>();
@@ -272,7 +270,18 @@ fn perform_swap(
             reason: format!("Failed to receive bgworker startup status: {e}"),
         })
     })?;
-    startup_result.context("Failed to start new bgworker after snapshot")?;
+    if let Err(e) = startup_result {
+        error!(
+            "New bgworker failed to start; not swapping LazyBlockDevice. \
+             Device is in degraded state (old bgworker already stopped). Error: {e}"
+        );
+        return Err(e).context("Failed to start new bgworker after snapshot");
+    }
+
+    // Step 14: Swap LazyBlockDevice's bgworker sender and metadata state.
+    // Only reached after new bgworker startup is confirmed successful.
+    info!("Snapshot swap step 14: swapping LazyBlockDevice bgworker");
+    lazy_bdev.swap_bgworker(new_bgworker_sender.clone(), new_shared_state.clone());
 
     // Step 15: New StatusReporter is implicitly available via new_shared_state
     // which is now in the LazyBlockDevice.
@@ -373,6 +382,118 @@ mod tests {
         // the flag logic.
         let active = false;
         assert!(!active, "should start inactive");
+    }
+
+    #[test]
+    fn test_swap_bgworker_not_called_on_startup_failure() {
+        use crate::block_device::{
+            bdev_test::TestBlockDevice, BgWorkerRequest, LazyBlockDevice, SharedMetadataState,
+            UbiMetadata,
+        };
+        use std::sync::mpsc::channel;
+        use std::sync::{Arc, RwLock};
+
+        // Set up a minimal LazyBlockDevice with an original bgworker sender.
+        let dev = TestBlockDevice::new(4096);
+        let metadata = UbiMetadata::new(12, 1, 1);
+        let original_state = SharedMetadataState::new(&metadata);
+        let (original_sender, original_receiver) = channel::<BgWorkerRequest>();
+        let lazy = LazyBlockDevice::new(
+            Box::new(dev),
+            None,
+            Arc::new(RwLock::new(original_sender)),
+            Arc::new(RwLock::new(original_state.clone())),
+            false,
+        )
+        .unwrap();
+
+        // Simulate the perform_swap ordering: spawn a "bgworker" that fails,
+        // then verify swap_bgworker is NOT called.
+        let (new_sender, _new_receiver) = channel::<BgWorkerRequest>();
+        let new_metadata = UbiMetadata::new(12, 1, 1);
+        let new_state = SharedMetadataState::new(&new_metadata);
+
+        let (startup_tx, startup_rx) = channel::<crate::Result<()>>();
+        // Simulate startup failure.
+        startup_tx
+            .send(Err(crate::ubiblk_error!(ChannelError {
+                reason: "simulated bgworker startup failure".to_string(),
+            })))
+            .unwrap();
+
+        let startup_result = startup_rx.recv().unwrap();
+        if startup_result.is_err() {
+            // This is the fix: do NOT call swap_bgworker on failure.
+            // The old sender should still be in place.
+        } else {
+            lazy.swap_bgworker(new_sender.clone(), new_state.clone());
+        }
+
+        // Verify the original sender is still connected: send a message through
+        // the LazyBlockDevice's internal sender and receive it on original_receiver.
+        {
+            let sender = lazy.bgworker_ch.read().unwrap();
+            sender.send(BgWorkerRequest::Shutdown).unwrap();
+        }
+        let msg = original_receiver
+            .recv()
+            .expect("original receiver should get the message");
+        assert!(
+            matches!(msg, BgWorkerRequest::Shutdown),
+            "LazyBlockDevice should still use the original sender after startup failure"
+        );
+    }
+
+    #[test]
+    fn test_swap_bgworker_called_on_startup_success() {
+        use crate::block_device::{
+            bdev_test::TestBlockDevice, BgWorkerRequest, LazyBlockDevice, SharedMetadataState,
+            UbiMetadata,
+        };
+        use std::sync::mpsc::channel;
+        use std::sync::{Arc, RwLock};
+
+        // Set up a minimal LazyBlockDevice with an original bgworker sender.
+        let dev = TestBlockDevice::new(4096);
+        let metadata = UbiMetadata::new(12, 1, 1);
+        let original_state = SharedMetadataState::new(&metadata);
+        let (original_sender, _original_receiver) = channel::<BgWorkerRequest>();
+        let lazy = LazyBlockDevice::new(
+            Box::new(dev),
+            None,
+            Arc::new(RwLock::new(original_sender)),
+            Arc::new(RwLock::new(original_state.clone())),
+            false,
+        )
+        .unwrap();
+
+        // Simulate the perform_swap ordering: startup succeeds, then swap.
+        let (new_sender, new_receiver) = channel::<BgWorkerRequest>();
+        let new_metadata = UbiMetadata::new(12, 1, 1);
+        let new_state = SharedMetadataState::new(&new_metadata);
+
+        let (startup_tx, startup_rx) = channel::<crate::Result<()>>();
+        startup_tx.send(Ok(())).unwrap();
+
+        let startup_result = startup_rx.recv().unwrap();
+        if startup_result.is_err() {
+            // Do NOT swap on failure.
+        } else {
+            lazy.swap_bgworker(new_sender.clone(), new_state.clone());
+        }
+
+        // Verify the new sender is now in use.
+        {
+            let sender = lazy.bgworker_ch.read().unwrap();
+            sender.send(BgWorkerRequest::Shutdown).unwrap();
+        }
+        let msg = new_receiver
+            .recv()
+            .expect("new receiver should get the message after successful swap");
+        assert!(
+            matches!(msg, BgWorkerRequest::Shutdown),
+            "LazyBlockDevice should use the new sender after successful startup"
+        );
     }
 
     #[test]

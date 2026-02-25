@@ -351,7 +351,7 @@ impl IoChannel for LazyIoChannel {
 pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     image: Option<Box<dyn BlockDevice>>,
-    bgworker_ch: SwappableSender,
+    pub(crate) bgworker_ch: SwappableSender,
     metadata_state: SwappableMetadataState,
     track_written: bool,
 }

@@ -27,6 +27,7 @@ use crate::{
 
 pub mod io_tracking;
 pub mod rpc;
+pub mod snapshot_swap;
 pub mod snapshot_types;
 
 pub const SECTOR_SIZE: usize = 512;
@@ -54,6 +55,8 @@ pub struct BackendEnv {
     snapshot_cmd_receiver: Option<mpsc::Receiver<snapshot_types::SnapshotCommand>>,
     snapshot_status: Option<snapshot_types::SnapshotStatusHandle>,
     snapshot_status_writer: Option<snapshot_types::SnapshotStatusHandle>,
+    snapshot_handle: Option<block_device::SnapshotHandle>,
+    lazy_bdev: Option<Box<block_device::LazyBlockDevice>>,
 }
 
 impl BackendEnv {
@@ -86,6 +89,8 @@ impl BackendEnv {
                 snapshot_cmd_receiver: None,
                 snapshot_status: None,
                 snapshot_status_writer: None,
+                snapshot_handle: None,
+                lazy_bdev: None,
             }),
             Some(metadata_dev) => {
                 Self::build_with_bgworker(disk_device, metadata_dev, config, alignment)
@@ -162,6 +167,14 @@ impl BackendEnv {
         self.snapshot_status_writer.take()
     }
 
+    pub fn take_snapshot_handle(&mut self) -> Option<block_device::SnapshotHandle> {
+        self.snapshot_handle.take()
+    }
+
+    pub fn take_lazy_bdev(&mut self) -> Option<Box<block_device::LazyBlockDevice>> {
+        self.lazy_bdev.take()
+    }
+
     fn build_with_bgworker(
         disk_device: Box<dyn BlockDevice>,
         metadata_device: Box<dyn BlockDevice>,
@@ -180,6 +193,11 @@ impl BackendEnv {
             bgworker_sender.clone(),
             shared_state.clone(),
         )?;
+
+        // Wrap LazyBlockDevice in SnapshotBlockDevice for I/O drain support.
+        let snapshot_dev =
+            block_device::SnapshotBlockDevice::new(bdev_lazy.clone() as Box<dyn BlockDevice>);
+        let snapshot_handle = snapshot_dev.snapshot_handle();
 
         let stripe_source_builder = Box::new(StripeSourceBuilder::new(
             config.clone(),
@@ -206,7 +224,7 @@ impl BackendEnv {
             snapshot_types::SnapshotStatusHandle::new();
 
         Ok(BackendEnv {
-            bdev: bdev_lazy,
+            bdev: Box::new(snapshot_dev),
             bgworker_config: Some(bgworker_config),
             bgworker_sender: Some(bgworker_sender),
             bgworker_thread: None,
@@ -218,6 +236,8 @@ impl BackendEnv {
             snapshot_cmd_receiver: Some(snapshot_cmd_rx),
             snapshot_status: Some(snapshot_status_reader),
             snapshot_status_writer: Some(snapshot_status_writer),
+            snapshot_handle: Some(snapshot_handle),
+            lazy_bdev: Some(bdev_lazy),
         })
     }
 
@@ -238,7 +258,7 @@ impl BackendEnv {
         config: &v2::Config,
         bgworker_sender: Sender<BgWorkerRequest>,
         shared_state: SharedMetadataState,
-    ) -> Result<Box<dyn BlockDevice>> {
+    ) -> Result<Box<block_device::LazyBlockDevice>> {
         let raw_image_device = if config
             .stripe_source
             .as_ref()
@@ -347,6 +367,40 @@ where
 
     let mut backend_env = BackendEnv::build(config)?;
     backend_env.run_bgworker_thread()?;
+
+    // Spawn snapshot coordinator thread if snapshot support is available.
+    // The coordinator takes ownership of the bgworker sender and thread handle,
+    // since it manages the bgworker lifecycle during snapshot swaps.
+    let _snapshot_coordinator = {
+        let cmd_rx = backend_env.take_snapshot_cmd_receiver();
+        let status_writer = backend_env.take_snapshot_status_writer();
+        let snapshot_handle = backend_env.take_snapshot_handle();
+        let lazy_bdev = backend_env.take_lazy_bdev();
+        let bgworker_sender = backend_env.bgworker_sender.take();
+        let bgworker_thread = backend_env.bgworker_thread.take();
+
+        match (cmd_rx, status_writer, snapshot_handle, lazy_bdev, bgworker_sender, bgworker_thread) {
+            (Some(cmd_rx), Some(status_writer), Some(snap_handle), Some(lazy_bdev), Some(sender), Some(thread)) => {
+                let ctx = snapshot_swap::SnapshotContext::new(
+                    config.clone(),
+                    backend_env.alignment(),
+                    config.device.data_path.clone(),
+                    config.device.metadata_path.clone().unwrap_or_default(),
+                    sender,
+                    thread,
+                    snap_handle,
+                    lazy_bdev,
+                );
+                Some(std::thread::Builder::new()
+                    .name("snapshot-coordinator".to_string())
+                    .spawn(move || {
+                        snapshot_swap::run_snapshot_coordinator(ctx, cmd_rx, status_writer);
+                    })
+                    .map_err(|e| crate::ubiblk_error!(ThreadCreation { source: e }))?)
+            }
+            _ => None,
+        }
+    };
 
     let _rpc_handle = if let Some(path) = config.device.rpc_socket.as_ref() {
         let status_reporter = backend_env.status_reporter();

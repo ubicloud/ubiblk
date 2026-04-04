@@ -113,16 +113,10 @@ echo "ublk_drv" | sudo tee /etc/modules-load.d/ublk.conf
 ## RPC Interface
 
 When `rpc_socket` is provided, the backend listens for newline-delimited
-JSON commands on the specified Unix socket. The following commands are
-supported:
+JSON commands on the specified Unix socket.
 
-- `{"command": "version"}` – returns the backend version string.
-- `{"command": "status"}` – returns the background worker status report or
-  `null` when no background worker is active.
-- `{"command": "queues"}` – returns an array of I/O activity snapshots for
-  each queue.
-- `{"command": "stats"}` – returns cumulative bytes and operation counts per
-  queue.
+For the full RPC command reference (including output specs and examples for
+all commands), see [docs/rpc.md](docs/rpc.md).
 
 Example using `nc` to query the status and pretty-print the response:
 

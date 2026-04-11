@@ -2,10 +2,11 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 use log::error;
+use serde::Serialize;
 
 use ubiblk::{
     archive::{ArchiveCompressionAlgorithm, StripeArchiver},
-    backends::build_block_device,
+    backends::{build_block_device, SECTOR_SIZE},
     block_device::UbiMetadata,
     cli::{load_config, CommonArgs},
     config::v2,
@@ -54,12 +55,25 @@ struct Args {
         value_parser = clap::value_parser!(i32).range(1..=22)
     )]
     zstd_level: i32,
+
+    #[arg(
+        long = "stats",
+        value_name = "PATH",
+        help = "Optional path to write archive stats JSON."
+    )]
+    stats_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
 enum CompressionChoice {
     None,
     Zstd,
+}
+
+#[derive(Serialize)]
+struct ArchiveStats {
+    physical_size_bytes: u64,
+    logical_size_bytes: u64,
 }
 
 fn main() {
@@ -119,6 +133,20 @@ fn run() -> Result<()> {
     )?;
 
     archiver.archive_all()?;
+
+    if let Some(stats_path) = args.stats_path {
+        let stats = ArchiveStats {
+            physical_size_bytes: archiver.physical_size_bytes(),
+            logical_size_bytes: disk_dev.sector_count().saturating_mul(SECTOR_SIZE as u64),
+        };
+        let bytes = serde_json::to_vec_pretty(&stats).map_err(|e| {
+            ubiblk::ubiblk_error!(InvalidParameter {
+                description: format!("Failed to serialize stats JSON: {e}"),
+            })
+        })?;
+        std::fs::write(&stats_path, bytes)
+            .map_err(|e| ubiblk::ubiblk_error!(IoError { source: e }))?;
+    }
 
     Ok(())
 }

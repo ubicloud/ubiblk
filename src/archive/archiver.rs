@@ -32,6 +32,7 @@ pub struct StripeArchiver {
     stripe_hashes: StripeContentMap,
     hmac_key: [u8; 32],
     compression: ArchiveCompressionAlgorithm,
+    physical_size_bytes: u64,
 }
 
 impl StripeArchiver {
@@ -78,6 +79,7 @@ impl StripeArchiver {
             stripe_hashes: StripeContentMap::new(),
             hmac_key,
             compression,
+            physical_size_bytes: 0,
         })
     }
 
@@ -107,6 +109,10 @@ impl StripeArchiver {
         self.put_metadata()?;
         self.put_stripe_mapping(&stripe_hashes_bytes)?;
         Ok(())
+    }
+
+    pub fn physical_size_bytes(&self) -> u64 {
+        self.physical_size_bytes
     }
 
     fn maybe_start_next_stripe(&mut self, stripe_id: usize) -> Result<bool> {
@@ -203,8 +209,10 @@ impl StripeArchiver {
 
         self.seen_object_keys.insert(object_key.clone());
 
+        let object_size = object_data.len() as u64;
         self.archive_store
             .start_put_object(&object_key, object_data);
+        self.physical_size_bytes = self.physical_size_bytes.saturating_add(object_size);
         self.inflight_puts += 1;
 
         Ok(())
@@ -270,6 +278,9 @@ impl StripeArchiver {
             metadata_json.as_bytes(),
             DEFAULT_ARCHIVE_TIMEOUT,
         )?;
+        self.physical_size_bytes = self
+            .physical_size_bytes
+            .saturating_add(metadata_json.len() as u64);
         Ok(())
     }
 
@@ -279,6 +290,9 @@ impl StripeArchiver {
             stripe_hashes_bytes,
             DEFAULT_ARCHIVE_TIMEOUT,
         )?;
+        self.physical_size_bytes = self
+            .physical_size_bytes
+            .saturating_add(stripe_hashes_bytes.len() as u64);
         Ok(())
     }
 

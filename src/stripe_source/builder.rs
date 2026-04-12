@@ -11,7 +11,7 @@ use crate::{
         stripe_source::ArchiveStorageConfig,
     },
     stripe_server::connect_to_stripe_server,
-    utils::s3::{build_s3_client, create_runtime},
+    utils::s3::{build_s3_client, create_runtime, S3ClientTuning},
     CipherMethod, KeyEncryptionCipher, Result,
 };
 
@@ -157,6 +157,9 @@ impl StripeSourceBuilder {
                 session_token,
                 connections,
                 endpoint,
+                connect_timeout_ms,
+                operation_attempt_timeout_ms,
+                max_attempts,
                 ..
             } => {
                 let decrypted_credentials = Self::build_aws_credentials(
@@ -172,6 +175,11 @@ impl StripeSourceBuilder {
                     endpoint.as_deref(),
                     region.as_deref(),
                     decrypted_credentials,
+                    S3ClientTuning {
+                        connect_timeout_ms: *connect_timeout_ms,
+                        operation_attempt_timeout_ms: *operation_attempt_timeout_ms,
+                        max_attempts: *max_attempts,
+                    },
                 )?;
 
                 Ok(Box::new(S3Store::new(
@@ -394,6 +402,9 @@ mod tests {
             session_token: None,
             endpoint: None,
             connections: 4,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 3,
             archive_kek: Some(SecretRef::Ref("my_kek".to_string())),
             autofetch: false,
         };

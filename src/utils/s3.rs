@@ -1,8 +1,16 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use aws_config::{BehaviorVersion, Region};
+use aws_sdk_s3::config::timeout::TimeoutConfig;
 
 use crate::Result;
+
+#[derive(Debug, Clone, Copy)]
+pub struct S3ClientTuning {
+    pub connect_timeout_ms: u64,
+    pub operation_attempt_timeout_ms: u64,
+    pub max_attempts: u32,
+}
 
 pub fn create_runtime() -> Result<Arc<tokio::runtime::Runtime>> {
     tokio::runtime::Builder::new_current_thread()
@@ -22,6 +30,7 @@ pub fn build_s3_client(
     endpoint: Option<&str>,
     region: Option<&str>,
     credentials: Option<aws_sdk_s3::config::Credentials>,
+    tuning: S3ClientTuning,
 ) -> Result<aws_sdk_s3::Client> {
     let config = runtime.block_on(async {
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
@@ -42,6 +51,14 @@ pub fn build_s3_client(
     });
 
     let mut builder = aws_sdk_s3::config::Builder::from(&config);
+    let timeout_config = TimeoutConfig::builder()
+        .connect_timeout(Duration::from_millis(tuning.connect_timeout_ms))
+        .operation_attempt_timeout(Duration::from_millis(tuning.operation_attempt_timeout_ms))
+        .build();
+    builder = builder.timeout_config(timeout_config);
+    let retry_config =
+        aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(tuning.max_attempts);
+    builder = builder.retry_config(retry_config);
 
     if let Some(endpoint) = endpoint {
         builder = builder.endpoint_url(endpoint);
@@ -76,6 +93,11 @@ mod tests {
             Some("http://localhost:9000"),
             Some("auto"),
             Some(credentials),
+            S3ClientTuning {
+                connect_timeout_ms: 5_000,
+                operation_attempt_timeout_ms: 20_000,
+                max_attempts: 3,
+            },
         )
         .expect("client should be created");
 
@@ -84,6 +106,22 @@ mod tests {
         assert!(
             endpoint_debug.contains("localhost:9000"),
             "S3 client config should contain the custom endpoint"
+        );
+
+        let timeout_debug = format!("{:?}", conf.timeout_config());
+        assert!(
+            timeout_debug.contains("5s"),
+            "S3 connect timeout should be 5 seconds"
+        );
+        assert!(
+            timeout_debug.contains("20s"),
+            "S3 operation attempt timeout should be 20 seconds"
+        );
+
+        let retry_debug = format!("{:?}", conf.retry_config());
+        assert!(
+            retry_debug.contains("max_attempts: 3"),
+            "S3 retry config should set max_attempts to 3"
         );
     }
 }

@@ -149,6 +149,12 @@ pub enum ArchiveStorageConfig {
         endpoint: Option<String>,
         #[serde(default = "default_connections")]
         connections: usize,
+        #[serde(default = "default_connect_timeout_ms")]
+        connect_timeout_ms: u64,
+        #[serde(default = "default_operation_attempt_timeout_ms")]
+        operation_attempt_timeout_ms: u64,
+        #[serde(default = "default_max_attempts")]
+        max_attempts: u32,
         archive_kek: Option<SecretRef>,
         #[serde(default)]
         autofetch: bool,
@@ -157,6 +163,18 @@ pub enum ArchiveStorageConfig {
 
 fn default_connections() -> usize {
     16
+}
+
+fn default_connect_timeout_ms() -> u64 {
+    5_000
+}
+
+fn default_operation_attempt_timeout_ms() -> u64 {
+    20_000
+}
+
+fn default_max_attempts() -> u32 {
+    3
 }
 
 impl ArchiveStorageConfig {
@@ -172,6 +190,9 @@ impl ArchiveStorageConfig {
             ArchiveStorageConfig::S3 {
                 prefix,
                 connections,
+                connect_timeout_ms,
+                operation_attempt_timeout_ms,
+                max_attempts,
                 access_key_id,
                 secret_access_key,
                 session_token,
@@ -199,7 +220,10 @@ impl ArchiveStorageConfig {
                     )?)?;
                 }
                 Self::validate_prefix(prefix)?;
-                Self::validate_connections(connections)
+                Self::validate_connections(connections)?;
+                Self::validate_connect_timeout_ms(connect_timeout_ms)?;
+                Self::validate_operation_attempt_timeout_ms(operation_attempt_timeout_ms)?;
+                Self::validate_max_attempts(max_attempts)
             }
         }
     }
@@ -222,6 +246,35 @@ impl ArchiveStorageConfig {
         if *connections == 0 {
             return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "S3 connections must be greater than 0".to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_connect_timeout_ms(connect_timeout_ms: &u64) -> crate::Result<()> {
+        if *connect_timeout_ms == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "S3 connect_timeout_ms must be greater than 0".to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_operation_attempt_timeout_ms(
+        operation_attempt_timeout_ms: &u64,
+    ) -> crate::Result<()> {
+        if *operation_attempt_timeout_ms == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "S3 operation_attempt_timeout_ms must be greater than 0".to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_max_attempts(max_attempts: &u32) -> crate::Result<()> {
+        if *max_attempts == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "S3 max_attempts must be greater than 0".to_string(),
             }));
         }
         Ok(())
@@ -365,6 +418,9 @@ mod tests {
                 autofetch: false,
                 connections: 16,
                 endpoint: None,
+                connect_timeout_ms: 5_000,
+                operation_attempt_timeout_ms: 20_000,
+                max_attempts: 3,
             })
         );
     }
@@ -394,6 +450,44 @@ mod tests {
                 autofetch: false,
                 connections: 16,
                 endpoint: None,
+                connect_timeout_ms: 5_000,
+                operation_attempt_timeout_ms: 20_000,
+                max_attempts: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn archive_s3_custom_retry_and_timeout_config() {
+        let toml = r#"
+            type = "archive"
+            storage = "s3"
+            bucket = "encrypted-stripes"
+            region = "eu-west-1"
+            access_key_id.ref = "aws-access-key-id"
+            secret_access_key.ref = "aws-secret-access-key"
+            archive_kek.ref = "archive-kek"
+            connect_timeout_ms = 120
+            operation_attempt_timeout_ms = 45000
+            max_attempts = 7
+        "#;
+        let config: StripeSourceConfig = toml::from_str(toml).unwrap();
+        assert_eq!(
+            config,
+            StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+                bucket: "encrypted-stripes".to_string(),
+                prefix: None,
+                region: Some("eu-west-1".to_string()),
+                access_key_id: SecretRef::Ref("aws-access-key-id".to_string()),
+                secret_access_key: SecretRef::Ref("aws-secret-access-key".to_string()),
+                session_token: None,
+                archive_kek: Some(SecretRef::Ref("archive-kek".to_string())),
+                autofetch: false,
+                connections: 16,
+                endpoint: None,
+                connect_timeout_ms: 120,
+                operation_attempt_timeout_ms: 45_000,
+                max_attempts: 7,
             })
         );
     }
@@ -673,6 +767,9 @@ mod tests {
             autofetch: false,
             connections: 16,
             endpoint: None,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 3,
         });
         let danger_zone = DangerZone::default();
         let result = config.validate(&danger_zone, &valid_s3_secrets());
@@ -715,6 +812,9 @@ mod tests {
             autofetch: false,
             connections: 16,
             endpoint: None,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 3,
         });
 
         let result = config.validate(&DangerZone::default(), &secrets);
@@ -736,11 +836,83 @@ mod tests {
             autofetch: false,
             connections: 0,
             endpoint: None,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 3,
         });
         let danger_zone = DangerZone::default();
         let result = config.validate(&danger_zone, &valid_s3_secrets());
         assert!(result.is_err());
         let error_msg = result.err().unwrap().to_string();
         assert!(error_msg.contains("S3 connections must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_s3_connect_timeout() {
+        let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("key".to_string()),
+            secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: None,
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
+            autofetch: false,
+            connections: 16,
+            endpoint: None,
+            connect_timeout_ms: 0,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 3,
+        });
+        let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("S3 connect_timeout_ms must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_s3_operation_attempt_timeout() {
+        let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("key".to_string()),
+            secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: None,
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
+            autofetch: false,
+            connections: 16,
+            endpoint: None,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 0,
+            max_attempts: 3,
+        });
+        let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("S3 operation_attempt_timeout_ms must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_s3_max_attempts() {
+        let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("key".to_string()),
+            secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: None,
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
+            autofetch: false,
+            connections: 16,
+            endpoint: None,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 0,
+        });
+        let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("S3 max_attempts must be greater than 0"));
     }
 }

@@ -3,6 +3,9 @@
 The `archive` binary captures stripes from a ubiblk block device and stores them
 in either a local directory or an S3-compatible object store.
 
+The `export-archive` binary reads an existing archive and reconstructs it as a
+raw disk image.
+
 ## Usage
 
 ```bash
@@ -16,6 +19,7 @@ archive --config <CONFIG_TOML> --target-config <TARGET_CONFIG_TOML> [options]
 | `--encrypt` | `-e` | no | Encrypt archived stripes with a random AES-XTS key |
 | `--compression` | — | no | Compression algorithm: `none` (default) or `zstd` |
 | `--zstd-level` | — | no | Zstd compression level, 1–22 (default: 3) |
+| `--stats` | — | no | Optional path to write archive stats JSON |
 
 The ubiblk config (`--config`) must include a `metadata_path` in `[device]`.
 
@@ -29,6 +33,9 @@ archive -f config.toml --target-config archive_target.toml --encrypt
 
 # Archive with zstd compression (level 5)
 archive -f config.toml --target-config archive_target.toml --compression zstd --zstd-level 5
+
+# Archive and write stats JSON
+archive -f config.toml --target-config archive_target.toml --stats archive_stats.json
 ```
 
 ## Target Config Reference
@@ -205,3 +212,42 @@ Each archived stripe payload is stored as its own object under
 (after compression and optional encryption). Consumers verify the hash before
 decrypting (if needed) and decompressing (if needed) before returning the
 stripe.
+
+## Export Archive
+
+`export-archive` reconstructs an archive to a raw disk image file.
+
+### Usage
+
+```bash
+export-archive --source <EXPORT_ARCHIVE_CONFIG_TOML> --target <OUTPUT_RAW_IMAGE>
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--source` | yes | Path to export archive config TOML |
+| `--target` | yes | Path to output raw disk image |
+
+**Examples:**
+```bash
+# Export a filesystem archive to raw image
+export-archive --source export_archive.toml --target disk.raw
+```
+
+### Export Config Reference
+
+The export config is a standalone Config v2 TOML file loaded by
+`ExportArchiveConfig::load`. It supports the include system (see
+[config.md](config.md#include-system)).
+
+
+| Section | Required | Description |
+|---------|----------|-------------|
+| `[archive]` | yes | Archive storage backend to read from |
+| `[secrets.*]` | no | Named secret definitions |
+| `[danger_zone]` | no | Safety overrides |
+
+No other top-level keys are allowed.
+
+`[archive]` uses the same field schema as the archive storage definitions in
+[config.md#archive-filesystem](config.md#archive-filesystem) and [config.md#archive-s3](config.md#archive-s3).

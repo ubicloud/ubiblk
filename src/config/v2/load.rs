@@ -10,7 +10,7 @@ use crate::{
         includes::resolve_includes,
         secrets::{parse_secrets, resolve_secrets, ResolvedSecret, SecretSource},
         stripe_source::{ArchiveStorageConfig, RemoteStripeConfig, StripeSourceConfig},
-        ArchiveTargetConfig, DangerZone, RemoteStripeServerConfig,
+        ArchiveTargetConfig, DangerZone, ExportArchiveConfig, RemoteStripeServerConfig,
     },
     ubiblk_error, Result, ResultExt,
 };
@@ -113,6 +113,35 @@ impl ArchiveTargetConfig {
 
     fn allowed_top_level_keys() -> [&'static str; 3] {
         ["target", "danger_zone", "secrets"]
+    }
+}
+
+impl ExportArchiveConfig {
+    pub fn load(path: &Path) -> Result<Self> {
+        let root = load_root_toml(path, "Loading export archive config failed")?;
+        let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
+        Self::load_from_value(root, config_dir)
+    }
+
+    fn load_from_value(value: toml::Value, config_dir: &Path) -> Result<Self> {
+        let merged = load_merged(value, config_dir, &Self::allowed_top_level_keys())?;
+        let common = load_common(&merged, config_dir)?;
+
+        let mut archive: ArchiveStorageConfig = parse_required_section(&merged, "archive")?;
+        if let ArchiveStorageConfig::Filesystem { path, .. } = &mut archive {
+            *path = resolve_path(path.clone(), config_dir);
+        }
+        archive.validate(&common.secrets)?;
+
+        Ok(ExportArchiveConfig {
+            archive,
+            danger_zone: common.danger_zone,
+            secrets: common.secrets,
+        })
+    }
+
+    fn allowed_top_level_keys() -> [&'static str; 3] {
+        ["archive", "danger_zone", "secrets"]
     }
 }
 

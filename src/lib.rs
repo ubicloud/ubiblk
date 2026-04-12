@@ -11,6 +11,7 @@ pub mod cli;
 pub mod config;
 pub mod crypt;
 pub mod error;
+pub mod export_archive;
 pub mod stripe_server;
 pub mod stripe_source;
 pub mod utils;

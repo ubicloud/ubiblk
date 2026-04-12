@@ -53,7 +53,7 @@ jobs:
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf ubiblk-${{ matrix.arch }}.tar.gz vhost-backend ublk-backend init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata
+          tar --owner=0 --group=0 --numeric-owner --mode='a=rX,u+w' -czf ubiblk-${{ matrix.arch }}.tar.gz vhost-backend ublk-backend init-metadata archive remote-stripe-server remote-stripe-shell dump-metadata export-archive
           cd -
 
       - name: Package debug symbols
@@ -68,6 +68,7 @@ jobs:
             remote-stripe-server.dwp
             remote-stripe-shell.dwp
             dump-metadata.dwp
+            export-archive.dwp
           )
           missing=0
           for f in "${debug_files[@]}"; do

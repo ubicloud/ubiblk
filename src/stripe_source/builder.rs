@@ -157,6 +157,7 @@ impl StripeSourceBuilder {
                 session_token,
                 connections,
                 endpoint,
+                operation_timeout_ms,
                 ..
             } => {
                 let decrypted_credentials = Self::build_aws_credentials(
@@ -172,6 +173,7 @@ impl StripeSourceBuilder {
                     endpoint.as_deref(),
                     region.as_deref(),
                     decrypted_credentials,
+                    *operation_timeout_ms,
                 )?;
 
                 Ok(Box::new(S3Store::new(
@@ -394,6 +396,7 @@ mod tests {
             session_token: None,
             endpoint: None,
             connections: 4,
+            operation_timeout_ms: 60,
             archive_kek: Some(SecretRef::Ref("my_kek".to_string())),
             autofetch: false,
         };

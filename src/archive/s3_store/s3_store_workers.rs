@@ -9,6 +9,7 @@ use log::{debug, error, info, warn};
 
 use super::{S3ByteStream, S3Client, S3Request, S3Result};
 use crate::Result;
+
 struct WorkerContext {
     client: S3Client,
     bucket: Arc<String>,

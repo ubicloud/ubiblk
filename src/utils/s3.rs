@@ -1,6 +1,7 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use aws_config::{BehaviorVersion, Region};
+use aws_sdk_s3::config::timeout::TimeoutConfig;
 
 use crate::Result;
 
@@ -22,6 +23,7 @@ pub fn build_s3_client(
     endpoint: Option<&str>,
     region: Option<&str>,
     credentials: Option<aws_sdk_s3::config::Credentials>,
+    operation_timeout_ms: u64,
 ) -> Result<aws_sdk_s3::Client> {
     let config = runtime.block_on(async {
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
@@ -42,6 +44,10 @@ pub fn build_s3_client(
     });
 
     let mut builder = aws_sdk_s3::config::Builder::from(&config);
+    let timeout_config = TimeoutConfig::builder()
+        .operation_timeout(Duration::from_millis(operation_timeout_ms))
+        .build();
+    builder = builder.timeout_config(timeout_config);
 
     if let Some(endpoint) = endpoint {
         builder = builder.endpoint_url(endpoint);
@@ -76,6 +82,7 @@ mod tests {
             Some("http://localhost:9000"),
             Some("auto"),
             Some(credentials),
+            60,
         )
         .expect("client should be created");
 
@@ -84,6 +91,12 @@ mod tests {
         assert!(
             endpoint_debug.contains("localhost:9000"),
             "S3 client config should contain the custom endpoint"
+        );
+
+        let timeout_debug = format!("{:?}", conf.timeout_config());
+        assert!(
+            timeout_debug.contains("60s"),
+            "S3 client timeout config should contain 60 seconds operation timeout"
         );
     }
 }

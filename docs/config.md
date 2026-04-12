@@ -262,6 +262,7 @@ autofetch = false                           # optional, default: false
 | `endpoint` | string | no | — | Custom S3 endpoint URL |
 | `connections` | integer | no | 16 | Number of S3 connections (must be > 0) |
 | `autofetch` | boolean | no | false | Fetch stripes in the background |
+| `operation_timeout_ms` | integer | no | 60000 | S3 operation timeout in milliseconds |
 
 ### Remote
 

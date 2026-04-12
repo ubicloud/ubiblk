@@ -61,6 +61,10 @@ impl ArchiveStripeSource {
         })
     }
 
+    pub fn stripe_sector_count(&self) -> u64 {
+        self.stripe_sector_count
+    }
+
     #[error_context("Failed to fetch archive metadata")]
     fn fetch_metadata(store: &mut dyn ArchiveStore) -> Result<ArchiveMetadata> {
         let bytes = store.get_object("metadata.json", DEFAULT_ARCHIVE_TIMEOUT)?;

@@ -41,6 +41,15 @@ pub struct ArchiveTargetConfig {
 }
 
 #[derive(Debug, Clone)]
+pub struct ExportArchiveConfig {
+    pub archive: ArchiveStorageConfig,
+    pub danger_zone: DangerZone,
+
+    // Resolved secret values keyed by name.
+    pub secrets: HashMap<String, secrets::ResolvedSecret>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RemoteStripeServerConfig {
     pub server: RemoteStripeConfig,
     pub danger_zone: DangerZone,

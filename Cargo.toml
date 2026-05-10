@@ -43,7 +43,7 @@ aes-gcm = "0.10.3"
 static_assertions = "1.1.0"
 serde_json = "1.0.145"
 rustyline = "13.0.0"
-openssl = { version = "0.10.75", features = ["vendored"] }
+openssl = { version = "0.10.79", features = ["vendored"] }
 sha2 = "0.10.9"
 hmac = "0.12.1"
 ciborium = "0.2.2"

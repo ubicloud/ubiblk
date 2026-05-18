@@ -528,6 +528,33 @@ mod tests {
     }
 
     #[test]
+    fn archive_s3_custom_backoff_config() {
+        let toml = r#"
+            type = "archive"
+            storage = "s3"
+            bucket = "encrypted-stripes"
+            region = "eu-west-1"
+            access_key_id.ref = "aws-access-key-id"
+            secret_access_key.ref = "aws-secret-access-key"
+            archive_kek.ref = "archive-kek"
+            initial_backoff_ms = 2_000
+            max_backoff_ms = 60_000
+        "#;
+        let config: StripeSourceConfig = toml::from_str(toml).unwrap();
+        match config {
+            StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+                initial_backoff_ms,
+                max_backoff_ms,
+                ..
+            }) => {
+                assert_eq!(initial_backoff_ms, 2_000);
+                assert_eq!(max_backoff_ms, 60_000);
+            }
+            _ => panic!("expected archive/s3 config"),
+        }
+    }
+
+    #[test]
     fn remote_stripe_source() {
         let toml = r#"
             type = "remote"
@@ -963,4 +990,53 @@ mod tests {
         assert!(error_msg.contains("S3 max_attempts must be greater than 0"));
     }
 
+    #[test]
+    fn validate_rejects_zero_initial_backoff() {
+        let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("key".to_string()),
+            secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: None,
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
+            autofetch: false,
+            connections: 16,
+            endpoint: None,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 3,
+            initial_backoff_ms: 0,
+            max_backoff_ms: 30_000,
+        });
+        let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("S3 initial_backoff_ms must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_max_backoff_smaller_than_initial() {
+        let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("key".to_string()),
+            secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: None,
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
+            autofetch: false,
+            connections: 16,
+            endpoint: None,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 3,
+            initial_backoff_ms: 10_000,
+            max_backoff_ms: 5_000,
+        });
+        let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("S3 max_backoff_ms must be >= initial_backoff_ms"));
+    }
 }

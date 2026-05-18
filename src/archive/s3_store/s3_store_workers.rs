@@ -3,12 +3,32 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+use aws_sdk_s3::error::{DisplayErrorContext, ProvideErrorMetadata};
 use crossbeam_channel::{Receiver, Sender};
 
 use log::{debug, error, info, warn};
 
 use super::{S3ByteStream, S3Client, S3Request, S3Result};
 use crate::Result;
+
+fn format_s3_error<E>(operation: &str, key: &str, err: &E, status: Option<u16>) -> String
+where
+    E: ProvideErrorMetadata + std::error::Error + 'static,
+{
+    let mut msg = format!("{operation} failed for key '{key}': {err}");
+    if let Some(status) = status {
+        msg.push_str(&format!(" (status={status})"));
+    }
+    let meta = err.meta();
+    if let Some(code) = meta.code() {
+        msg.push_str(&format!(" code={code}"));
+    }
+    if let Some(message) = meta.message() {
+        msg.push_str(&format!(" message={message:?}"));
+    }
+    msg.push_str(&format!(" — {}", DisplayErrorContext(err)));
+    msg
+}
 
 struct WorkerContext {
     client: S3Client,
@@ -107,8 +127,9 @@ async fn upload_object(ctx: &WorkerContext, key: &str, data: Vec<u8>) -> Result<
         .send()
         .await
         .map_err(|err| {
+            let status = err.raw_response().map(|r| r.status().as_u16());
             crate::ubiblk_error!(ArchiveError {
-                description: format!("Failed to upload object to S3: {err}"),
+                description: format_s3_error("PutObject", key, &err, status),
             })
         })?;
     Ok(())
@@ -123,8 +144,9 @@ async fn fetch_object(ctx: &WorkerContext, key: &str) -> Result<Vec<u8>> {
         .send()
         .await
         .map_err(|err| {
+            let status = err.raw_response().map(|r| r.status().as_u16());
             crate::ubiblk_error!(ArchiveError {
-                description: format!("Failed to fetch object from S3: {err}"),
+                description: format_s3_error("GetObject", key, &err, status),
             })
         })?;
 
@@ -141,11 +163,62 @@ async fn fetch_object(ctx: &WorkerContext, key: &str) -> Result<Vec<u8>> {
 mod tests {
     use std::time::Duration;
 
+    use aws_sdk_s3::error::ErrorMetadata;
     use aws_sdk_s3::operation::{get_object::GetObjectOutput, put_object::PutObjectOutput};
     use aws_smithy_mocks::{mock, mock_client, Rule};
     use crossbeam_channel::unbounded;
 
     use super::*;
+
+    #[derive(Debug)]
+    struct FakeServiceError {
+        meta: ErrorMetadata,
+    }
+
+    impl std::fmt::Display for FakeServiceError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("fake service error")
+        }
+    }
+
+    impl std::error::Error for FakeServiceError {}
+
+    impl ProvideErrorMetadata for FakeServiceError {
+        fn meta(&self) -> &ErrorMetadata {
+            &self.meta
+        }
+    }
+
+    #[test]
+    fn format_s3_error_includes_status_code_and_message() {
+        let err = FakeServiceError {
+            meta: ErrorMetadata::builder()
+                .code("SlowDown")
+                .message("Please reduce your request rate.")
+                .build(),
+        };
+        let msg = format_s3_error("PutObject", "data/abc", &err, Some(503));
+        assert!(msg.contains("PutObject"), "missing op: {msg}");
+        assert!(msg.contains("data/abc"), "missing key: {msg}");
+        assert!(msg.contains("status=503"), "missing status: {msg}");
+        assert!(msg.contains("code=SlowDown"), "missing code: {msg}");
+        assert!(
+            msg.contains("Please reduce your request rate."),
+            "missing message: {msg}"
+        );
+    }
+
+    #[test]
+    fn format_s3_error_handles_missing_metadata() {
+        let err = FakeServiceError {
+            meta: ErrorMetadata::builder().build(),
+        };
+        let msg = format_s3_error("GetObject", "metadata.json", &err, None);
+        assert!(msg.contains("GetObject"), "missing op: {msg}");
+        assert!(msg.contains("metadata.json"), "missing key: {msg}");
+        assert!(!msg.contains("status="), "should omit status: {msg}");
+        assert!(!msg.contains("code="), "should omit code: {msg}");
+    }
 
     fn spawn_test_workers(
         rules: &[Rule],

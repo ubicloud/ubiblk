@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use log::{debug, info};
+use log::{debug, error, info};
 
 use super::ArchiveStore;
 use crate::{
@@ -12,6 +12,7 @@ use crate::{
     backends::SECTOR_SIZE,
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedBuffer, UbiMetadata},
     crypt::XtsBlockCipher,
+    error::ResultExt,
     stripe_source::StripeSource,
     utils::{aligned_buffer::BUFFER_ALIGNMENT, hash::sha256_bytes, AlignedBufferPool},
     KeyEncryptionCipher, Result,
@@ -84,6 +85,21 @@ impl StripeArchiver {
     }
 
     pub fn archive_all(&mut self) -> crate::Result<()> {
+        match self.archive_all_inner() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                error!(
+                    "Archive aborted: {e}. The manifest (metadata.json and \
+                     stripe-mapping) may be incomplete or missing; the destination \
+                     may contain orphaned data objects from completed and in-flight \
+                     stripe uploads."
+                );
+                Err(e)
+            }
+        }
+    }
+
+    fn archive_all_inner(&mut self) -> crate::Result<()> {
         let mut next_stripe_id = 0;
         while next_stripe_id < self.stripe_count {
             if !self.stripe_should_be_archived(next_stripe_id) {
@@ -221,7 +237,7 @@ impl StripeArchiver {
     fn poll_uploads(&mut self) -> Result<()> {
         let results = self.archive_store.poll_puts();
         for (obj_name, result) in results {
-            result?;
+            result.context(format!("Upload failed for object {}", obj_name))?;
             debug!("Completed uploading object {}", obj_name);
             self.inflight_puts = self.inflight_puts.checked_sub(1).ok_or_else(|| {
                 crate::ubiblk_error!(ArchiveError {

@@ -160,6 +160,8 @@ impl StripeSourceBuilder {
                 connect_timeout_ms,
                 operation_attempt_timeout_ms,
                 max_attempts,
+                initial_backoff_ms,
+                max_backoff_ms,
                 ..
             } => {
                 let decrypted_credentials = Self::build_aws_credentials(
@@ -179,6 +181,8 @@ impl StripeSourceBuilder {
                         connect_timeout_ms: *connect_timeout_ms,
                         operation_attempt_timeout_ms: *operation_attempt_timeout_ms,
                         max_attempts: *max_attempts,
+                        initial_backoff_ms: *initial_backoff_ms,
+                        max_backoff_ms: *max_backoff_ms,
                     },
                 )?;
 
@@ -405,6 +409,8 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            initial_backoff_ms: 5_000,
+            max_backoff_ms: 30_000,
             archive_kek: Some(SecretRef::Ref("my_kek".to_string())),
             autofetch: false,
         };

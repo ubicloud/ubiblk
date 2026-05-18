@@ -10,6 +10,8 @@ pub struct S3ClientTuning {
     pub connect_timeout_ms: u64,
     pub operation_attempt_timeout_ms: u64,
     pub max_attempts: u32,
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
 }
 
 pub fn create_runtime() -> Result<Arc<tokio::runtime::Runtime>> {
@@ -56,8 +58,10 @@ pub fn build_s3_client(
         .operation_attempt_timeout(Duration::from_millis(tuning.operation_attempt_timeout_ms))
         .build();
     builder = builder.timeout_config(timeout_config);
-    let retry_config =
-        aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(tuning.max_attempts);
+    let retry_config = aws_sdk_s3::config::retry::RetryConfig::standard()
+        .with_max_attempts(tuning.max_attempts)
+        .with_initial_backoff(Duration::from_millis(tuning.initial_backoff_ms))
+        .with_max_backoff(Duration::from_millis(tuning.max_backoff_ms));
     builder = builder.retry_config(retry_config);
 
     if let Some(endpoint) = endpoint {
@@ -97,6 +101,8 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                initial_backoff_ms: 5_000,
+                max_backoff_ms: 30_000,
             },
         )
         .expect("client should be created");

@@ -155,6 +155,10 @@ pub enum ArchiveStorageConfig {
         operation_attempt_timeout_ms: u64,
         #[serde(default = "default_max_attempts")]
         max_attempts: u32,
+        #[serde(default = "default_initial_backoff_ms")]
+        initial_backoff_ms: u64,
+        #[serde(default = "default_max_backoff_ms")]
+        max_backoff_ms: u64,
         archive_kek: Option<SecretRef>,
         #[serde(default)]
         autofetch: bool,
@@ -177,6 +181,14 @@ fn default_max_attempts() -> u32 {
     3
 }
 
+fn default_initial_backoff_ms() -> u64 {
+    5_000
+}
+
+fn default_max_backoff_ms() -> u64 {
+    30_000
+}
+
 impl ArchiveStorageConfig {
     pub fn validate(&self, resolved_secrets: &HashMap<String, ResolvedSecret>) -> Result<()> {
         match self {
@@ -193,6 +205,8 @@ impl ArchiveStorageConfig {
                 connect_timeout_ms,
                 operation_attempt_timeout_ms,
                 max_attempts,
+                initial_backoff_ms,
+                max_backoff_ms,
                 access_key_id,
                 secret_access_key,
                 session_token,
@@ -223,7 +237,8 @@ impl ArchiveStorageConfig {
                 Self::validate_connections(connections)?;
                 Self::validate_connect_timeout_ms(connect_timeout_ms)?;
                 Self::validate_operation_attempt_timeout_ms(operation_attempt_timeout_ms)?;
-                Self::validate_max_attempts(max_attempts)
+                Self::validate_max_attempts(max_attempts)?;
+                Self::validate_backoff(*initial_backoff_ms, *max_backoff_ms)
             }
         }
     }
@@ -275,6 +290,20 @@ impl ArchiveStorageConfig {
         if *max_attempts == 0 {
             return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "S3 max_attempts must be greater than 0".to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_backoff(initial_backoff_ms: u64, max_backoff_ms: u64) -> crate::Result<()> {
+        if initial_backoff_ms == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "S3 initial_backoff_ms must be greater than 0".to_string(),
+            }));
+        }
+        if max_backoff_ms < initial_backoff_ms {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "S3 max_backoff_ms must be >= initial_backoff_ms".to_string(),
             }));
         }
         Ok(())
@@ -421,6 +450,8 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                initial_backoff_ms: 5_000,
+                max_backoff_ms: 30_000,
             })
         );
     }
@@ -453,6 +484,8 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                initial_backoff_ms: 5_000,
+                max_backoff_ms: 30_000,
             })
         );
     }
@@ -488,6 +521,8 @@ mod tests {
                 connect_timeout_ms: 120,
                 operation_attempt_timeout_ms: 45_000,
                 max_attempts: 7,
+                initial_backoff_ms: 5_000,
+                max_backoff_ms: 30_000,
             })
         );
     }
@@ -770,6 +805,8 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            initial_backoff_ms: 5_000,
+            max_backoff_ms: 30_000,
         });
         let danger_zone = DangerZone::default();
         let result = config.validate(&danger_zone, &valid_s3_secrets());
@@ -815,6 +852,8 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            initial_backoff_ms: 5_000,
+            max_backoff_ms: 30_000,
         });
 
         let result = config.validate(&DangerZone::default(), &secrets);
@@ -839,6 +878,8 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            initial_backoff_ms: 5_000,
+            max_backoff_ms: 30_000,
         });
         let danger_zone = DangerZone::default();
         let result = config.validate(&danger_zone, &valid_s3_secrets());
@@ -863,6 +904,8 @@ mod tests {
             connect_timeout_ms: 0,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            initial_backoff_ms: 5_000,
+            max_backoff_ms: 30_000,
         });
         let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
         assert!(result.is_err());
@@ -886,6 +929,8 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 0,
             max_attempts: 3,
+            initial_backoff_ms: 5_000,
+            max_backoff_ms: 30_000,
         });
         let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
         assert!(result.is_err());
@@ -909,10 +954,13 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 0,
+            initial_backoff_ms: 5_000,
+            max_backoff_ms: 30_000,
         });
         let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
         assert!(result.is_err());
         let error_msg = result.err().unwrap().to_string();
         assert!(error_msg.contains("S3 max_attempts must be greater than 0"));
     }
+
 }

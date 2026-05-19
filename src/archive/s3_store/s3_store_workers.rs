@@ -273,6 +273,46 @@ mod tests {
         }
     }
 
+    fn policy(max_attempts: u32, initial_ms: u64, max_ms: u64) -> RetryPolicy {
+        RetryPolicy {
+            max_attempts,
+            initial_backoff: Duration::from_millis(initial_ms),
+            max_backoff: Duration::from_millis(max_ms),
+        }
+    }
+
+    #[test]
+    fn parse_retry_after_only_accepts_delta_seconds() {
+        assert_eq!(parse_retry_after_seconds("5"), Some(Duration::from_secs(5)));
+        // HTTP-date form is unsupported and currently falls back to the
+        // exponential schedule.
+        assert_eq!(
+            parse_retry_after_seconds("Wed, 21 Oct 2026 07:28:00 GMT"),
+            None
+        );
+    }
+
+    #[test]
+    fn retry_delay_grows_clamps_and_honors_hint() {
+        let p = policy(5, 1_000, 10_000);
+        // Exponential growth: initial * 2^(n-1).
+        assert_eq!(retry_delay(&p, 1, None), Duration::from_millis(1_000));
+        assert_eq!(retry_delay(&p, 2, None), Duration::from_millis(2_000));
+        assert_eq!(retry_delay(&p, 3, None), Duration::from_millis(4_000));
+        // Capped at max_backoff once 2^(n-1) overshoots.
+        assert_eq!(retry_delay(&p, 5, None), Duration::from_millis(10_000));
+        // Server hint takes precedence over the exponential schedule,
+        // but is still clamped by max_backoff.
+        assert_eq!(
+            retry_delay(&p, 1, Some(Duration::from_secs(3))),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            retry_delay(&p, 1, Some(Duration::from_secs(86_400))),
+            Duration::from_millis(10_000)
+        );
+    }
+
     #[test]
     fn format_s3_error_includes_status_code_and_message() {
         let err = FakeServiceError {
@@ -307,18 +347,21 @@ mod tests {
     fn spawn_test_workers(
         rules: &[Rule],
     ) -> (Sender<S3Request>, Receiver<S3Result>, Vec<JoinHandle<()>>) {
+        // Single attempt so tests don't sleep on transient errors.
+        spawn_test_workers_with(rules, policy(1, 1, 1))
+    }
+
+    fn spawn_test_workers_with(
+        rules: &[Rule],
+        retry: RetryPolicy,
+    ) -> (Sender<S3Request>, Receiver<S3Result>, Vec<JoinHandle<()>>) {
         let (request_tx, request_rx) = unbounded();
         let (result_tx, result_rx) = unbounded();
         let workers = spawn_workers(
             mock_client!(aws_sdk_s3, rules),
             Arc::new("test-bucket".to_string()),
             1,
-            // Single attempt so tests don't sleep on transient errors.
-            RetryPolicy {
-                max_attempts: 1,
-                initial_backoff: Duration::from_millis(1),
-                max_backoff: Duration::from_millis(1),
-            },
+            retry,
             request_rx,
             result_tx,
         )
@@ -385,6 +428,111 @@ mod tests {
                 assert!(result.is_ok());
             }
             _ => panic!("expected put result second after sort"),
+        }
+
+        drop(request_tx);
+        join_workers(workers);
+    }
+
+    #[test]
+    fn worker_retries_put_on_5xx_then_succeeds() {
+        let rule = mock!(S3Client::put_object)
+            .sequence()
+            .http_status(503, None)
+            .output(|| PutObjectOutput::builder().build())
+            .build();
+        let (request_tx, result_rx, workers) = spawn_test_workers_with(&[rule], policy(3, 1, 1));
+
+        request_tx
+            .send(S3Request::Put {
+                name: "obj".to_string(),
+                key: "prefix/obj".to_string(),
+                data: b"payload".to_vec(),
+            })
+            .expect("send");
+
+        match result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("result")
+        {
+            S3Result::Put { name, result } => {
+                assert_eq!(name, "obj");
+                assert!(
+                    result.is_ok(),
+                    "expected ok after retry, got {:?}",
+                    result.err()
+                );
+            }
+            _ => panic!("expected Put result"),
+        }
+
+        drop(request_tx);
+        join_workers(workers);
+    }
+
+    #[test]
+    fn worker_retries_get_on_5xx_then_succeeds() {
+        let rule = mock!(S3Client::get_object)
+            .sequence()
+            .http_status(503, None)
+            .output(|| {
+                GetObjectOutput::builder()
+                    .body(S3ByteStream::from_static(b"hello"))
+                    .build()
+            })
+            .build();
+        let (request_tx, result_rx, workers) = spawn_test_workers_with(&[rule], policy(3, 1, 1));
+
+        request_tx
+            .send(S3Request::Get {
+                name: "obj".to_string(),
+                key: "prefix/obj".to_string(),
+            })
+            .expect("send");
+
+        match result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("result")
+        {
+            S3Result::Get { name, result } => {
+                assert_eq!(name, "obj");
+                assert_eq!(result.expect("expected ok after retry"), b"hello");
+            }
+            _ => panic!("expected Get result"),
+        }
+
+        drop(request_tx);
+        join_workers(workers);
+    }
+
+    #[test]
+    fn worker_gives_up_put_on_permanent_4xx() {
+        let rule = mock!(S3Client::put_object)
+            .sequence()
+            .http_status(403, None)
+            .times(10)
+            .build();
+        let (request_tx, result_rx, workers) = spawn_test_workers_with(&[rule], policy(3, 1, 1));
+
+        request_tx
+            .send(S3Request::Put {
+                name: "obj".to_string(),
+                key: "prefix/obj".to_string(),
+                data: b"payload".to_vec(),
+            })
+            .expect("send");
+
+        match result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("result")
+        {
+            S3Result::Put { name, result } => {
+                assert_eq!(name, "obj");
+                let err = result.expect_err("expected permanent failure");
+                let msg = err.to_string();
+                assert!(msg.contains("status=403"), "expected 403 in error: {msg}");
+            }
+            _ => panic!("expected Put result"),
         }
 
         drop(request_tx);

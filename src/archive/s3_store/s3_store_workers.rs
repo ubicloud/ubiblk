@@ -1,15 +1,40 @@
 use std::{
     sync::Arc,
     thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use aws_sdk_s3::error::{DisplayErrorContext, ProvideErrorMetadata};
+use bytes::Bytes;
 use crossbeam_channel::{Receiver, Sender};
 
 use log::{debug, error, info, warn};
 
-use super::{S3ByteStream, S3Client, S3Request, S3Result};
+use super::{RetryPolicy, S3ByteStream, S3Client, S3Request, S3Result};
 use crate::Result;
+
+/// Parse a Retry-After header value in delta-seconds form.
+///
+/// RFC 9110 §10.2.3 also permits an HTTP-date form (e.g.
+/// `"Wed, 21 Oct 2026 07:28:00 GMT"`). We do not parse that here; if a peer
+/// emits it, callers fall back to the exponential schedule. R2 and AWS S3
+/// both use delta-seconds in practice.
+fn parse_retry_after_seconds(value: &str) -> Option<Duration> {
+    value.parse::<u64>().ok().map(Duration::from_secs)
+}
+
+/// Sleep duration before the (1-indexed) `attempt`-th retry. Honors a
+/// server-supplied Retry-After hint when present; otherwise grows as
+/// `initial_backoff * 2^(attempt - 1)`. Either way, clamps to `max_backoff`
+/// so a misbehaving peer can't stall the worker indefinitely.
+fn retry_delay(policy: &RetryPolicy, attempt: u32, hint: Option<Duration>) -> Duration {
+    let exp = {
+        let shift = attempt.saturating_sub(1).min(32);
+        let base_ms = policy.initial_backoff.as_millis() as u64;
+        Duration::from_millis(base_ms.saturating_mul(1u64 << shift))
+    };
+    hint.unwrap_or(exp).min(policy.max_backoff)
+}
 
 fn format_s3_error<E>(operation: &str, key: &str, err: &E, status: Option<u16>) -> String
 where
@@ -33,12 +58,14 @@ where
 struct WorkerContext {
     client: S3Client,
     bucket: Arc<String>,
+    retry: RetryPolicy,
 }
 
 pub(super) fn spawn_workers(
     client: S3Client,
     bucket: Arc<String>,
     mut worker_threads: usize,
+    retry: RetryPolicy,
     request_rx: Receiver<S3Request>,
     result_tx: Sender<S3Result>,
 ) -> Result<Vec<JoinHandle<()>>> {
@@ -59,6 +86,7 @@ pub(super) fn spawn_workers(
         let ctx = WorkerContext {
             client: S3Client::from_conf(client_config.clone()),
             bucket: Arc::clone(&bucket),
+            retry,
         };
         let rx = request_rx.clone();
         let tx = result_tx.clone();
@@ -97,7 +125,10 @@ async fn process_request(ctx: &WorkerContext, req: S3Request, tx: &Sender<S3Resu
     match req {
         S3Request::Put { name, key, data } => {
             debug!("Uploading object to S3: {}", name);
-            let result = upload_object(ctx, &key, data).await;
+            // Vec<u8> -> Bytes is O(1) and lets retry attempts share the buffer
+            // via cheap refcount clones.
+            let body = Bytes::from(data);
+            let result = upload_object(ctx, &key, body).await;
             if let Err(e) = tx.send(S3Result::Put {
                 name: name.clone(),
                 result,
@@ -118,37 +149,90 @@ async fn process_request(ctx: &WorkerContext, req: S3Request, tx: &Sender<S3Resu
     }
 }
 
-async fn upload_object(ctx: &WorkerContext, key: &str, data: Vec<u8>) -> Result<()> {
-    ctx.client
-        .put_object()
-        .bucket(ctx.bucket.as_str())
-        .key(key)
-        .body(S3ByteStream::from(data))
-        .send()
-        .await
-        .map_err(|err| {
-            let status = err.raw_response().map(|r| r.status().as_u16());
-            crate::ubiblk_error!(ArchiveError {
-                description: format_s3_error("PutObject", key, &err, status),
-            })
-        })?;
-    Ok(())
+async fn upload_object(ctx: &WorkerContext, key: &str, body: Bytes) -> Result<()> {
+    let mut attempt: u32 = 0;
+    let err = loop {
+        attempt += 1;
+        let send_result = ctx
+            .client
+            .put_object()
+            .bucket(ctx.bucket.as_str())
+            .key(key)
+            .body(S3ByteStream::from(body.clone()))
+            .send()
+            .await;
+        let err = match send_result {
+            Ok(_) => return Ok(()),
+            Err(e) => e,
+        };
+        let raw = err.raw_response();
+        let retryable = matches!(
+            raw.map(|r| r.status().as_u16()),
+            Some(408) | Some(429) | Some(500..=599) | None
+        );
+        if !retryable || attempt >= ctx.retry.max_attempts {
+            break err;
+        }
+        let hint = raw
+            .and_then(|r| r.headers().get("retry-after"))
+            .and_then(parse_retry_after_seconds);
+        let delay = retry_delay(&ctx.retry, attempt, hint);
+        warn!(
+            "S3 PutObject for {} failed (attempt {}/{}), retrying in {:?}: {}",
+            key,
+            attempt,
+            ctx.retry.max_attempts,
+            delay,
+            DisplayErrorContext(&err)
+        );
+        tokio::time::sleep(delay).await;
+    };
+    let status = err.raw_response().map(|r| r.status().as_u16());
+    Err(crate::ubiblk_error!(ArchiveError {
+        description: format_s3_error("PutObject", key, &err, status),
+    }))
 }
 
 async fn fetch_object(ctx: &WorkerContext, key: &str) -> Result<Vec<u8>> {
-    let output = ctx
-        .client
-        .get_object()
-        .bucket(ctx.bucket.as_str())
-        .key(key)
-        .send()
-        .await
-        .map_err(|err| {
-            let status = err.raw_response().map(|r| r.status().as_u16());
-            crate::ubiblk_error!(ArchiveError {
+    let mut attempt: u32 = 0;
+    let output = loop {
+        attempt += 1;
+        let send_result = ctx
+            .client
+            .get_object()
+            .bucket(ctx.bucket.as_str())
+            .key(key)
+            .send()
+            .await;
+        let err = match send_result {
+            Ok(o) => break o,
+            Err(e) => e,
+        };
+        let raw = err.raw_response();
+        let retryable = matches!(
+            raw.map(|r| r.status().as_u16()),
+            Some(408) | Some(429) | Some(500..=599) | None
+        );
+        if !retryable || attempt >= ctx.retry.max_attempts {
+            let status = raw.map(|r| r.status().as_u16());
+            return Err(crate::ubiblk_error!(ArchiveError {
                 description: format_s3_error("GetObject", key, &err, status),
-            })
-        })?;
+            }));
+        }
+        let hint = raw
+            .and_then(|r| r.headers().get("retry-after"))
+            .and_then(parse_retry_after_seconds);
+        let delay = retry_delay(&ctx.retry, attempt, hint);
+        warn!(
+            "S3 GetObject for {} failed (attempt {}/{}), retrying in {:?}: {}",
+            key,
+            attempt,
+            ctx.retry.max_attempts,
+            delay,
+            DisplayErrorContext(&err)
+        );
+        tokio::time::sleep(delay).await;
+    };
 
     let bytes = output.body.collect().await.map_err(|err| {
         crate::ubiblk_error!(ArchiveError {
@@ -229,6 +313,12 @@ mod tests {
             mock_client!(aws_sdk_s3, rules),
             Arc::new("test-bucket".to_string()),
             1,
+            // Single attempt so tests don't sleep on transient errors.
+            RetryPolicy {
+                max_attempts: 1,
+                initial_backoff: Duration::from_millis(1),
+                max_backoff: Duration::from_millis(1),
+            },
             request_rx,
             result_tx,
         )

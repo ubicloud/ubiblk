@@ -49,6 +49,7 @@ hmac = "0.12.1"
 ciborium = "0.2.2"
 aws-config = "1.8.12"
 aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
+bytes = "1.7"
 tokio = { version = "1.48.0", features = ["rt"] }
 crossbeam-channel = "0.5.15"
 libublk = "0.4.5"

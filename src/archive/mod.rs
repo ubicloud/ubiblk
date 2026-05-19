@@ -150,7 +150,7 @@ pub use fs_store::FileSystemStore;
 #[cfg(test)]
 pub use hmac::compute_metadata_hmac_tag;
 pub use hmac::{compute_hmac_tag, verify_hmac_tag, verify_metadata_hmac_tag};
-pub use s3_store::S3Store;
+pub use s3_store::{RetryPolicy, S3Store};
 pub use stripe_hashes::{
     deserialize_stripe_mapping, serialize_stripe_mapping, StripeContentMap, StripeContentSpecifier,
 };

@@ -1,4 +1,4 @@
-use std::{sync::Arc, thread::JoinHandle};
+use std::{sync::Arc, thread::JoinHandle, time::Duration};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{debug, error, info};
@@ -11,6 +11,20 @@ type S3Client = aws_sdk_s3::Client;
 type S3ByteStream = aws_sdk_s3::primitives::ByteStream;
 
 mod s3_store_workers;
+
+/// Retry policy applied by the S3 worker. The AWS SDK is configured with
+/// `RetryConfig::disabled()`, so this is the only retry layer.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Total number of attempts including the first one.
+    pub max_attempts: u32,
+    /// Delay before the first retry; later retries grow geometrically up to
+    /// `max_backoff`.
+    pub initial_backoff: Duration,
+    /// Cap on the delay between retries, including server-supplied
+    /// `Retry-After` hints.
+    pub max_backoff: Duration,
+}
 
 enum S3Request {
     Put {
@@ -50,6 +64,7 @@ impl S3Store {
         bucket: String,
         prefix: Option<String>,
         worker_threads: usize,
+        retry: RetryPolicy,
     ) -> Result<Self> {
         let normalized_prefix = prefix.and_then(|p| {
             let p = p.trim_matches('/');
@@ -67,6 +82,7 @@ impl S3Store {
             client,
             Arc::clone(&bucket),
             worker_threads,
+            retry,
             request_rx,
             result_tx,
         )?;
@@ -208,6 +224,12 @@ mod tests {
             bucket.to_string(),
             prefix.map(|p| p.to_string()),
             2,
+            // Single attempt so tests don't sleep on transient errors.
+            RetryPolicy {
+                max_attempts: 1,
+                initial_backoff: Duration::from_millis(1),
+                max_backoff: Duration::from_millis(1),
+            },
         )
         .unwrap()
     }

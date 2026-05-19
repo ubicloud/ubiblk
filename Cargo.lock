@@ -3666,6 +3666,7 @@ dependencies = [
  "aws-smithy-mocks",
  "base64",
  "bindgen 0.72.1",
+ "bytes",
  "ciborium",
  "clap",
  "crc32fast",

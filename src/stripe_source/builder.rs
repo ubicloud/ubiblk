@@ -1,8 +1,10 @@
 use log::info;
 use ubiblk_macros::error_context;
 
+use std::time::Duration;
+
 use crate::{
-    archive::{ArchiveStore, FileSystemStore, S3Store},
+    archive::{ArchiveStore, FileSystemStore, RetryPolicy, S3Store},
     backends::build_raw_image_device,
     block_device::NullBlockDevice,
     config::v2::{
@@ -180,17 +182,20 @@ impl StripeSourceBuilder {
                     S3ClientTuning {
                         connect_timeout_ms: *connect_timeout_ms,
                         operation_attempt_timeout_ms: *operation_attempt_timeout_ms,
-                        max_attempts: *max_attempts,
-                        initial_backoff_ms: *initial_backoff_ms,
-                        max_backoff_ms: *max_backoff_ms,
                     },
                 )?;
+                let retry = RetryPolicy {
+                    max_attempts: *max_attempts,
+                    initial_backoff: Duration::from_millis(*initial_backoff_ms),
+                    max_backoff: Duration::from_millis(*max_backoff_ms),
+                };
 
                 Ok(Box::new(S3Store::new(
                     client,
                     bucket.to_string(),
                     prefix.clone(),
                     *connections,
+                    retry,
                 )?))
             }
         }

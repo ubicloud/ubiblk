@@ -9,9 +9,6 @@ use crate::Result;
 pub struct S3ClientTuning {
     pub connect_timeout_ms: u64,
     pub operation_attempt_timeout_ms: u64,
-    pub max_attempts: u32,
-    pub initial_backoff_ms: u64,
-    pub max_backoff_ms: u64,
 }
 
 pub fn create_runtime() -> Result<Arc<tokio::runtime::Runtime>> {
@@ -58,11 +55,10 @@ pub fn build_s3_client(
         .operation_attempt_timeout(Duration::from_millis(tuning.operation_attempt_timeout_ms))
         .build();
     builder = builder.timeout_config(timeout_config);
-    let retry_config = aws_sdk_s3::config::retry::RetryConfig::standard()
-        .with_max_attempts(tuning.max_attempts)
-        .with_initial_backoff(Duration::from_millis(tuning.initial_backoff_ms))
-        .with_max_backoff(Duration::from_millis(tuning.max_backoff_ms));
-    builder = builder.retry_config(retry_config);
+    // Retries are handled in the S3 worker (see `archive::s3_store`) so that we
+    // can honor Retry-After hints and apply a deterministic backoff. Disable the
+    // SDK's built-in retry to avoid stacking two retry layers.
+    builder = builder.retry_config(aws_sdk_s3::config::retry::RetryConfig::disabled());
 
     if let Some(endpoint) = endpoint {
         builder = builder.endpoint_url(endpoint);
@@ -100,9 +96,6 @@ mod tests {
             S3ClientTuning {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
-                max_attempts: 3,
-                initial_backoff_ms: 5_000,
-                max_backoff_ms: 30_000,
             },
         )
         .expect("client should be created");
@@ -124,10 +117,8 @@ mod tests {
             "S3 operation attempt timeout should be 20 seconds"
         );
 
-        let retry_debug = format!("{:?}", conf.retry_config());
-        assert!(
-            retry_debug.contains("max_attempts: 3"),
-            "S3 retry config should set max_attempts to 3"
-        );
+        // SDK retry is disabled — the S3 worker performs retries itself.
+        let retry_config = conf.retry_config().expect("retry config present");
+        assert_eq!(retry_config.max_attempts(), 1);
     }
 }

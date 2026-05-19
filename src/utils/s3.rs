@@ -2,6 +2,12 @@ use std::{sync::Arc, time::Duration};
 
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::config::timeout::TimeoutConfig;
+use aws_smithy_runtime_api::client::{
+    interceptors::context::InterceptorContext,
+    retries::classifiers::{
+        ClassifyRetry, RetryAction, RetryClassifierPriority, SharedRetryClassifier,
+    },
+};
 
 use crate::Result;
 
@@ -10,6 +16,52 @@ pub struct S3ClientTuning {
     pub connect_timeout_ms: u64,
     pub operation_attempt_timeout_ms: u64,
     pub max_attempts: u32,
+    pub initial_backoff_ms: u64,
+    pub max_backoff_ms: u64,
+}
+
+/// The SDK's default `HttpStatusCodeClassifier` only marks 500/502/503/504 as
+/// retryable. Cloudflare R2 returns HTTP 429 for its per-object rate limit and
+/// includes a `Retry-After` header; without this classifier the SDK gives up
+/// on the first throttle response.
+#[derive(Debug)]
+struct Retry429Classifier;
+
+impl ClassifyRetry for Retry429Classifier {
+    fn classify_retry(&self, ctx: &InterceptorContext) -> RetryAction {
+        let Some(response) = ctx.response() else {
+            return RetryAction::NoActionIndicated;
+        };
+        if response.status().as_u16() != 429 {
+            return RetryAction::NoActionIndicated;
+        }
+        // Honor Retry-After (delta-seconds form) when the server provides it.
+        // HTTP-date form is uncommon for S3-compatible peers; if it appears we
+        // fall back to the standard exponential schedule.
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(Duration::from_secs);
+        match retry_after {
+            Some(d) => RetryAction::retryable_error_with_explicit_delay(
+                aws_smithy_runtime_api::client::retries::ErrorKind::ThrottlingError,
+                d,
+            ),
+            None => RetryAction::throttling_error(),
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "Retry429"
+    }
+
+    fn priority(&self) -> RetryClassifierPriority {
+        // Run after the SDK's built-in classifiers so a `ThrottlingError` decision
+        // here overrides any equal-priority `transient_error` they might produce
+        // on the same 429. Equal-priority ordering is unspecified by the SDK.
+        RetryClassifierPriority::run_after(RetryClassifierPriority::transient_error_classifier())
+    }
 }
 
 pub fn create_runtime() -> Result<Arc<tokio::runtime::Runtime>> {
@@ -56,9 +108,12 @@ pub fn build_s3_client(
         .operation_attempt_timeout(Duration::from_millis(tuning.operation_attempt_timeout_ms))
         .build();
     builder = builder.timeout_config(timeout_config);
-    let retry_config =
-        aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(tuning.max_attempts);
+    let retry_config = aws_sdk_s3::config::retry::RetryConfig::standard()
+        .with_max_attempts(tuning.max_attempts)
+        .with_initial_backoff(Duration::from_millis(tuning.initial_backoff_ms))
+        .with_max_backoff(Duration::from_millis(tuning.max_backoff_ms));
     builder = builder.retry_config(retry_config);
+    builder.push_retry_classifier(SharedRetryClassifier::new(Retry429Classifier));
 
     if let Some(endpoint) = endpoint {
         builder = builder.endpoint_url(endpoint);
@@ -97,6 +152,8 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                initial_backoff_ms: 2_000,
+                max_backoff_ms: 30_000,
             },
         )
         .expect("client should be created");
@@ -118,10 +175,60 @@ mod tests {
             "S3 operation attempt timeout should be 20 seconds"
         );
 
-        let retry_debug = format!("{:?}", conf.retry_config());
-        assert!(
-            retry_debug.contains("max_attempts: 3"),
-            "S3 retry config should set max_attempts to 3"
+        let retry_config = conf.retry_config().expect("retry config present");
+        assert_eq!(retry_config.max_attempts(), 3);
+        assert_eq!(retry_config.initial_backoff(), Duration::from_millis(2_000));
+        assert_eq!(retry_config.max_backoff(), Duration::from_millis(30_000));
+    }
+
+    #[test]
+    fn retry_429_classifier_marks_throttle_response_retryable() {
+        use aws_sdk_s3::primitives::SdkBody;
+        use aws_smithy_runtime_api::client::interceptors::context::{Input, InterceptorContext};
+        use aws_smithy_runtime_api::http::{Response, StatusCode};
+
+        let classifier = Retry429Classifier;
+
+        // No response yet -> no opinion.
+        let ctx = InterceptorContext::new(Input::doesnt_matter());
+        assert_eq!(
+            classifier.classify_retry(&ctx),
+            RetryAction::NoActionIndicated
+        );
+
+        // 200 -> no opinion.
+        let mut ctx = InterceptorContext::new(Input::doesnt_matter());
+        ctx.set_response(Response::new(
+            StatusCode::try_from(200).unwrap(),
+            SdkBody::empty(),
+        ));
+        assert_eq!(
+            classifier.classify_retry(&ctx),
+            RetryAction::NoActionIndicated
+        );
+
+        // 429 without Retry-After -> throttling retry, no explicit delay.
+        let mut ctx = InterceptorContext::new(Input::doesnt_matter());
+        ctx.set_response(Response::new(
+            StatusCode::try_from(429).unwrap(),
+            SdkBody::empty(),
+        ));
+        assert_eq!(
+            classifier.classify_retry(&ctx),
+            RetryAction::throttling_error()
+        );
+
+        // 429 with Retry-After: 5 -> throttling retry with explicit 5s delay.
+        let mut response = Response::new(StatusCode::try_from(429).unwrap(), SdkBody::empty());
+        response.headers_mut().append("retry-after", "5");
+        let mut ctx = InterceptorContext::new(Input::doesnt_matter());
+        ctx.set_response(response);
+        assert_eq!(
+            classifier.classify_retry(&ctx),
+            RetryAction::retryable_error_with_explicit_delay(
+                aws_smithy_runtime_api::client::retries::ErrorKind::ThrottlingError,
+                Duration::from_secs(5)
+            )
         );
     }
 }

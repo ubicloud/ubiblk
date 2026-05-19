@@ -3664,6 +3664,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "aws-smithy-mocks",
+ "aws-smithy-runtime-api",
  "base64",
  "bindgen 0.72.1",
  "ciborium",

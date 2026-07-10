@@ -155,6 +155,8 @@ pub enum ArchiveStorageConfig {
         operation_attempt_timeout_ms: u64,
         #[serde(default = "default_max_attempts")]
         max_attempts: u32,
+        #[serde(default)]
+        deterministic_retry_backoff_ms: Option<u64>,
         archive_kek: Option<SecretRef>,
         #[serde(default)]
         autofetch: bool,
@@ -193,6 +195,7 @@ impl ArchiveStorageConfig {
                 connect_timeout_ms,
                 operation_attempt_timeout_ms,
                 max_attempts,
+                deterministic_retry_backoff_ms,
                 access_key_id,
                 secret_access_key,
                 session_token,
@@ -223,9 +226,21 @@ impl ArchiveStorageConfig {
                 Self::validate_connections(connections)?;
                 Self::validate_connect_timeout_ms(connect_timeout_ms)?;
                 Self::validate_operation_attempt_timeout_ms(operation_attempt_timeout_ms)?;
-                Self::validate_max_attempts(max_attempts)
+                Self::validate_max_attempts(max_attempts)?;
+                Self::validate_deterministic_retry_backoff_ms(deterministic_retry_backoff_ms)
             }
         }
+    }
+
+    fn validate_deterministic_retry_backoff_ms(
+        deterministic_retry_backoff_ms: &Option<u64>,
+    ) -> crate::Result<()> {
+        if let Some(0) = deterministic_retry_backoff_ms {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "S3 deterministic_retry_backoff_ms must be greater than 0".to_string(),
+            }));
+        }
+        Ok(())
     }
 
     fn validate_prefix(prefix: &Option<String>) -> crate::Result<()> {
@@ -421,6 +436,7 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                deterministic_retry_backoff_ms: None,
             })
         );
     }
@@ -453,6 +469,7 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                deterministic_retry_backoff_ms: None,
             })
         );
     }
@@ -488,6 +505,7 @@ mod tests {
                 connect_timeout_ms: 120,
                 operation_attempt_timeout_ms: 45_000,
                 max_attempts: 7,
+                deterministic_retry_backoff_ms: None,
             })
         );
     }
@@ -770,6 +788,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            deterministic_retry_backoff_ms: None,
         });
         let danger_zone = DangerZone::default();
         let result = config.validate(&danger_zone, &valid_s3_secrets());
@@ -815,6 +834,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            deterministic_retry_backoff_ms: None,
         });
 
         let result = config.validate(&DangerZone::default(), &secrets);
@@ -839,6 +859,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            deterministic_retry_backoff_ms: None,
         });
         let danger_zone = DangerZone::default();
         let result = config.validate(&danger_zone, &valid_s3_secrets());
@@ -863,6 +884,7 @@ mod tests {
             connect_timeout_ms: 0,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            deterministic_retry_backoff_ms: None,
         });
         let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
         assert!(result.is_err());
@@ -886,6 +908,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 0,
             max_attempts: 3,
+            deterministic_retry_backoff_ms: None,
         });
         let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
         assert!(result.is_err());
@@ -909,10 +932,73 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 0,
+            deterministic_retry_backoff_ms: None,
         });
         let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
         assert!(result.is_err());
         let error_msg = result.err().unwrap().to_string();
         assert!(error_msg.contains("S3 max_attempts must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_deterministic_retry_backoff() {
+        let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("key".to_string()),
+            secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: None,
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
+            autofetch: false,
+            connections: 16,
+            endpoint: None,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 3,
+            deterministic_retry_backoff_ms: Some(0),
+        });
+        let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("S3 deterministic_retry_backoff_ms must be greater than 0"));
+    }
+
+    #[test]
+    fn archive_s3_deterministic_retry_backoff_config() {
+        // Defaults to None (jittered backoff) when omitted.
+        let default_toml = r#"
+            type = "archive"
+            storage = "s3"
+            bucket = "encrypted-stripes"
+            access_key_id.ref = "aws-access-key-id"
+            secret_access_key.ref = "aws-secret-access-key"
+            archive_kek.ref = "archive-kek"
+        "#;
+        match toml::from_str::<StripeSourceConfig>(default_toml).unwrap() {
+            StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+                deterministic_retry_backoff_ms,
+                ..
+            }) => assert_eq!(deterministic_retry_backoff_ms, None),
+            _ => panic!("expected archive/s3 config"),
+        }
+
+        // Explicit value parses through.
+        let set_toml = r#"
+            type = "archive"
+            storage = "s3"
+            bucket = "encrypted-stripes"
+            access_key_id.ref = "aws-access-key-id"
+            secret_access_key.ref = "aws-secret-access-key"
+            archive_kek.ref = "archive-kek"
+            deterministic_retry_backoff_ms = 1500
+        "#;
+        match toml::from_str::<StripeSourceConfig>(set_toml).unwrap() {
+            StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+                deterministic_retry_backoff_ms,
+                ..
+            }) => assert_eq!(deterministic_retry_backoff_ms, Some(1500)),
+            _ => panic!("expected archive/s3 config"),
+        }
     }
 }

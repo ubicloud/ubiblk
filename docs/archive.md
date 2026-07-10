@@ -118,6 +118,25 @@ source.env = "UBIBLK_ARCHIVE_KEK"
 | `connect_timeout_ms` | integer | no | 5000 | S3 connection timeout in milliseconds |
 | `operation_attempt_timeout_ms` | integer | no | 20000 | S3 operation attempt timeout in milliseconds |
 | `max_attempts` | integer | no | 3 | Max S3 operation attempts (initial attempt + retries) |
+| `deterministic_retry_backoff_ms` | integer | no | — (unset) | When set, use a deterministic retry backoff of this many ms; unset uses jittered backoff. Must be > 0. See below. |
+
+#### Retry backoff behavior
+
+Failed S3 operations are retried (up to `max_attempts` total tries) with an
+exponential backoff. `deterministic_retry_backoff_ms` chooses the mode:
+
+- **Unset (default) — jittered backoff.** Retry _n_ waits a random duration in
+  `[0, initial * 2ⁿ)` (the AWS SDK's default full jitter, `initial` = 1s).
+  Jitter avoids synchronized retries, but the first retry can fire almost
+  immediately.
+- **Set to `t` — deterministic backoff.** Retry _n_ waits `t * 2ⁿ` ms
+  (`t`, `2t`, `4t`, …, capped at the SDK's default 20s maximum backoff) with no
+  jitter, so **every retry is at least `t`**.
+
+Set this when archiving to an object store that rate-limits rapid retries to
+the same object: after a transient `5xx` on a PUT, a sub-second jittered retry
+can be rejected and fail the whole archive. A deterministic `t` of
+`1500`–`2000` keeps every retry spaced out, at the cost of jitter.
 
 ### `[secrets.*]` and `[danger_zone]`
 

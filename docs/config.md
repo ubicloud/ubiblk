@@ -265,6 +265,27 @@ autofetch = false                           # optional, default: false
 | `connect_timeout_ms` | integer | no | 5000 | S3 connection timeout in milliseconds |
 | `operation_attempt_timeout_ms` | integer | no | 20000 | S3 operation attempt timeout in milliseconds |
 | `max_attempts` | integer | no | 3 | Max S3 operation attempts (initial attempt + retries) |
+| `deterministic_retry_backoff_ms` | integer | no | — (unset) | When set, use a deterministic retry backoff of this many ms; unset uses jittered backoff. Must be > 0. See below. |
+
+#### Retry backoff behavior
+
+Retries (up to `max_attempts` total tries) are delayed by an exponential backoff.
+`deterministic_retry_backoff_ms` selects between two modes:
+
+- **Unset (default) — jittered backoff.** Retry _n_ waits a random duration in
+  `[0, initial * 2ⁿ)` (the AWS SDK's default full jitter, `initial` = 1s). Jitter
+  spreads retries across keys to avoid thundering-herd effects, but because the
+  lower bound is 0 the first retry can fire almost immediately.
+- **Set to `t` — deterministic backoff.** Retry _n_ waits `t * 2ⁿ` ms
+  (`t`, `2t`, `4t`, …, capped at the SDK's default 20s maximum backoff) with no
+  jitter, so **every retry is at least `t`**. Use this when the object store
+  rate-limits rapid retries to the same object and may reject a too-fast retry
+  after a transient error, which can fail the whole operation. A deterministic
+  minimum keeps retries spaced out. The trade-off is the loss of jitter.
+
+Set it on the **archive target** config to protect the archiving (PUT) path,
+where such per-object write limits apply. The read (GET) path is not affected
+this way, so leaving it unset there keeps jitter.
 
 ### Remote
 

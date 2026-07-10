@@ -10,6 +10,12 @@ pub struct S3ClientTuning {
     pub connect_timeout_ms: u64,
     pub operation_attempt_timeout_ms: u64,
     pub max_attempts: u32,
+    /// Retry backoff mode. `None` keeps the SDK default (exponential backoff
+    /// with full jitter). `Some(t)` uses a deterministic exponential backoff
+    /// starting at `t` ms with no jitter, so retry N waits `t * 2^N` (capped at
+    /// the SDK's default 20s maximum backoff) and the first retry is guaranteed
+    /// to be at least `t`.
+    pub deterministic_retry_backoff_ms: Option<u64>,
 }
 
 pub fn create_runtime() -> Result<Arc<tokio::runtime::Runtime>> {
@@ -56,8 +62,18 @@ pub fn build_s3_client(
         .operation_attempt_timeout(Duration::from_millis(tuning.operation_attempt_timeout_ms))
         .build();
     builder = builder.timeout_config(timeout_config);
-    let retry_config =
+    let mut retry_config =
         aws_sdk_s3::config::retry::RetryConfig::standard().with_max_attempts(tuning.max_attempts);
+    if let Some(backoff_ms) = tuning.deterministic_retry_backoff_ms {
+        // Deterministic exponential backoff (t, 2t, 4t, ...) with no jitter. The
+        // SDK's default full jitter lets the first retry fire in [0, t), which
+        // can trip object stores that rate-limit rapid retries to the same key.
+        // Pinning the exponential base disables jitter so every retry waits at
+        // least t.
+        retry_config = retry_config
+            .with_initial_backoff(Duration::from_millis(backoff_ms))
+            .with_use_static_exponential_base(true);
+    }
     builder = builder.retry_config(retry_config);
 
     if let Some(endpoint) = endpoint {
@@ -97,6 +113,7 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                deterministic_retry_backoff_ms: None,
             },
         )
         .expect("client should be created");
@@ -118,10 +135,37 @@ mod tests {
             "S3 operation attempt timeout should be 20 seconds"
         );
 
-        let retry_debug = format!("{:?}", conf.retry_config());
-        assert!(
-            retry_debug.contains("max_attempts: 3"),
-            "S3 retry config should set max_attempts to 3"
-        );
+        let retry_config = conf.retry_config().expect("retry config present");
+        assert_eq!(retry_config.max_attempts(), 3);
+        // Default (None) keeps the SDK's jittered exponential backoff.
+        assert!(!retry_config.use_static_exponential_base());
+    }
+
+    #[test]
+    fn deterministic_backoff_disables_jitter_with_floor() {
+        let runtime = create_runtime().expect("runtime should be created");
+        let client = build_s3_client(
+            &runtime,
+            None,
+            None,
+            Some("auto"),
+            None,
+            S3ClientTuning {
+                connect_timeout_ms: 5_000,
+                operation_attempt_timeout_ms: 20_000,
+                max_attempts: 3,
+                deterministic_retry_backoff_ms: Some(1_500),
+            },
+        )
+        .expect("client should be created");
+
+        let retry_config = client
+            .config()
+            .retry_config()
+            .expect("retry config present");
+        // Deterministic mode: no jitter, first retry floored at the configured value.
+        assert!(retry_config.use_static_exponential_base());
+        assert_eq!(retry_config.initial_backoff(), Duration::from_millis(1_500));
+        assert_eq!(retry_config.max_attempts(), 3);
     }
 }

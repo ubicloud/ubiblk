@@ -265,6 +265,38 @@ autofetch = false                           # optional, default: false
 | `connect_timeout_ms` | integer | no | 5000 | S3 connection timeout in milliseconds |
 | `operation_attempt_timeout_ms` | integer | no | 20000 | S3 operation attempt timeout in milliseconds |
 | `max_attempts` | integer | no | 3 | Max S3 operation attempts (initial attempt + retries) |
+| `rate_limited_retry` | table | no | disabled | Jittered retry delay for rate-limited responses. See below. |
+
+#### `rate_limited_retry`
+
+By default, retries use the AWS SDK's jittered exponential backoff: retry _n_
+waits a random duration in `[0, min(1s · 2ⁿ, 20s))`, so the first retry can fire
+almost immediately. When the object store rate-limits rapid retries to the same
+key, that near-instant retry can be rejected (some return `429`, which the SDK
+does not retry by default) and fail the whole archive.
+
+When `enabled`, a response with a transient status (`500`/`502`/`503`/`504`) or a
+throttling status (`429`) is instead retried after `min_delay_ms + rand[0,
+jitter_ms)` — a constant floor plus jitter, rather than exponential backoff.
+
+```toml
+[stripe_source.rate_limited_retry]
+enabled      = true
+min_delay_ms = 1500
+jitter_ms    = 1500
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | false | Turn the rate-limited retry delay on |
+| `min_delay_ms` | integer | 0 | Floor: minimum delay before a retry (must be > 0 when enabled) |
+| `jitter_ms` | integer | 0 | Width of the random jitter added on top of `min_delay_ms` (0 = no jitter) |
+
+It applies to every S3 operation of the client it is set on. Only responses with
+an HTTP status are delayed — client-side
+timeouts and connection failures use the SDK's normal backoff. The delay is flat,
+not exponential: a retry classifier cannot see the attempt number, so it cannot
+grow the delay per attempt — but a constant floor is what avoids the rate limit.
 
 ### Remote
 

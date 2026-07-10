@@ -116,6 +116,20 @@ source.env = "UBIBLK_ARCHIVE_KEK"
 | `archive_kek.ref` | string | no | — | Reference to a 32-byte AES-256-GCM KEK secret |
 | `autofetch` | boolean | no | false | Fetch stripes in the background |
 | `max_attempts` | integer | no | 3 | Max S3 operation attempts (initial attempt + retries) |
+| `rate_limited_retry` | table | no | disabled | Jittered retry delay for rate-limited responses. See below. |
+
+#### `[target.rate_limited_retry]`
+
+An optional jittered retry delay for rate-limited responses, documented in
+full at [config.md](config.md#rate_limited_retry). For an archive target it lives
+under `[target]`:
+
+```toml
+[target.rate_limited_retry]
+enabled      = true
+min_delay_ms = 1500
+jitter_ms    = 1500
+```
 
 ### `[secrets.*]` and `[danger_zone]`
 

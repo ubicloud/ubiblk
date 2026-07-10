@@ -155,10 +155,27 @@ pub enum ArchiveStorageConfig {
         operation_attempt_timeout_ms: u64,
         #[serde(default = "default_max_attempts")]
         max_attempts: u32,
+        #[serde(default)]
+        rate_limited_retry: RateLimitedRetryConfig,
         archive_kek: Option<SecretRef>,
         #[serde(default)]
         autofetch: bool,
     },
+}
+
+/// Retries of transient (5xx) / throttling (429) responses wait a jittered
+/// delay of `min_delay_ms + rand[0, jitter_ms)` instead of the SDK's exponential
+/// backoff. Use it when the object store rate-limits rapid retries to the same
+/// key. Disabled by default.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimitedRetryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub min_delay_ms: u64,
+    #[serde(default)]
+    pub jitter_ms: u64,
 }
 
 fn default_connections() -> usize {
@@ -193,6 +210,7 @@ impl ArchiveStorageConfig {
                 connect_timeout_ms,
                 operation_attempt_timeout_ms,
                 max_attempts,
+                rate_limited_retry,
                 access_key_id,
                 secret_access_key,
                 session_token,
@@ -223,9 +241,20 @@ impl ArchiveStorageConfig {
                 Self::validate_connections(connections)?;
                 Self::validate_connect_timeout_ms(connect_timeout_ms)?;
                 Self::validate_operation_attempt_timeout_ms(operation_attempt_timeout_ms)?;
-                Self::validate_max_attempts(max_attempts)
+                Self::validate_max_attempts(max_attempts)?;
+                Self::validate_rate_limited_retry(rate_limited_retry)
             }
         }
+    }
+
+    fn validate_rate_limited_retry(cfg: &RateLimitedRetryConfig) -> crate::Result<()> {
+        if cfg.enabled && cfg.min_delay_ms == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "rate_limited_retry.min_delay_ms must be greater than 0 when enabled"
+                    .to_string(),
+            }));
+        }
+        Ok(())
     }
 
     fn validate_prefix(prefix: &Option<String>) -> crate::Result<()> {
@@ -421,6 +450,7 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                rate_limited_retry: RateLimitedRetryConfig::default(),
             })
         );
     }
@@ -453,6 +483,7 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                rate_limited_retry: RateLimitedRetryConfig::default(),
             })
         );
     }
@@ -488,6 +519,7 @@ mod tests {
                 connect_timeout_ms: 120,
                 operation_attempt_timeout_ms: 45_000,
                 max_attempts: 7,
+                rate_limited_retry: RateLimitedRetryConfig::default(),
             })
         );
     }
@@ -770,6 +802,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            rate_limited_retry: RateLimitedRetryConfig::default(),
         });
         let danger_zone = DangerZone::default();
         let result = config.validate(&danger_zone, &valid_s3_secrets());
@@ -815,6 +848,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            rate_limited_retry: RateLimitedRetryConfig::default(),
         });
 
         let result = config.validate(&DangerZone::default(), &secrets);
@@ -839,6 +873,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            rate_limited_retry: RateLimitedRetryConfig::default(),
         });
         let danger_zone = DangerZone::default();
         let result = config.validate(&danger_zone, &valid_s3_secrets());
@@ -863,6 +898,7 @@ mod tests {
             connect_timeout_ms: 0,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            rate_limited_retry: RateLimitedRetryConfig::default(),
         });
         let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
         assert!(result.is_err());
@@ -886,6 +922,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 0,
             max_attempts: 3,
+            rate_limited_retry: RateLimitedRetryConfig::default(),
         });
         let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
         assert!(result.is_err());
@@ -909,10 +946,85 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 0,
+            rate_limited_retry: RateLimitedRetryConfig::default(),
         });
         let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
         assert!(result.is_err());
         let error_msg = result.err().unwrap().to_string();
         assert!(error_msg.contains("S3 max_attempts must be greater than 0"));
+    }
+
+    #[test]
+    fn archive_s3_rate_limited_retry_config() {
+        // Defaults to disabled when the table is omitted.
+        let default_toml = r#"
+            type = "archive"
+            storage = "s3"
+            bucket = "encrypted-stripes"
+            access_key_id.ref = "aws-access-key-id"
+            secret_access_key.ref = "aws-secret-access-key"
+            archive_kek.ref = "archive-kek"
+        "#;
+        match toml::from_str::<StripeSourceConfig>(default_toml).unwrap() {
+            StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+                rate_limited_retry, ..
+            }) => assert_eq!(rate_limited_retry, RateLimitedRetryConfig::default()),
+            _ => panic!("expected archive/s3 config"),
+        }
+
+        // Nested table parses through.
+        let set_toml = r#"
+            type = "archive"
+            storage = "s3"
+            bucket = "encrypted-stripes"
+            access_key_id.ref = "aws-access-key-id"
+            secret_access_key.ref = "aws-secret-access-key"
+            archive_kek.ref = "archive-kek"
+            rate_limited_retry = { enabled = true, min_delay_ms = 1500, jitter_ms = 1000 }
+        "#;
+        match toml::from_str::<StripeSourceConfig>(set_toml).unwrap() {
+            StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+                rate_limited_retry, ..
+            }) => assert_eq!(
+                rate_limited_retry,
+                RateLimitedRetryConfig {
+                    enabled: true,
+                    min_delay_ms: 1500,
+                    jitter_ms: 1000,
+                }
+            ),
+            _ => panic!("expected archive/s3 config"),
+        }
+    }
+
+    #[test]
+    fn validate_rejects_enabled_rate_limited_retry_without_min_delay() {
+        let config = StripeSourceConfig::Archive(ArchiveStorageConfig::S3 {
+            bucket: "bucket".to_string(),
+            prefix: None,
+            region: Some("us-east-1".to_string()),
+            access_key_id: SecretRef::Ref("key".to_string()),
+            secret_access_key: SecretRef::Ref("secret".to_string()),
+            session_token: None,
+            archive_kek: Some(SecretRef::Ref("kek".to_string())),
+            autofetch: false,
+            connections: 16,
+            endpoint: None,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
+            max_attempts: 3,
+            rate_limited_retry: RateLimitedRetryConfig {
+                enabled: true,
+                min_delay_ms: 0,
+                jitter_ms: 0,
+            },
+        });
+        let result = config.validate(&DangerZone::default(), &valid_s3_secrets());
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("rate_limited_retry.min_delay_ms must be greater than 0 when enabled"));
     }
 }

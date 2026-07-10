@@ -11,7 +11,7 @@ use crate::{
         stripe_source::ArchiveStorageConfig,
     },
     stripe_server::connect_to_stripe_server,
-    utils::s3::{build_s3_client, create_runtime, S3ClientTuning},
+    utils::s3::{build_s3_client, create_runtime, RateLimitedRetry, S3ClientTuning},
     CipherMethod, KeyEncryptionCipher, Result,
 };
 
@@ -160,6 +160,7 @@ impl StripeSourceBuilder {
                 connect_timeout_ms,
                 operation_attempt_timeout_ms,
                 max_attempts,
+                rate_limited_retry,
                 ..
             } => {
                 let decrypted_credentials = Self::build_aws_credentials(
@@ -179,6 +180,12 @@ impl StripeSourceBuilder {
                         connect_timeout_ms: *connect_timeout_ms,
                         operation_attempt_timeout_ms: *operation_attempt_timeout_ms,
                         max_attempts: *max_attempts,
+                        rate_limited_retry: rate_limited_retry.enabled.then(|| RateLimitedRetry {
+                            min_delay: std::time::Duration::from_millis(
+                                rate_limited_retry.min_delay_ms,
+                            ),
+                            jitter: std::time::Duration::from_millis(rate_limited_retry.jitter_ms),
+                        }),
                     },
                 )?;
 
@@ -197,7 +204,9 @@ impl StripeSourceBuilder {
 mod tests {
     use super::*;
     use crate::config::v2::secrets::{resolve_secrets, SecretDef, SecretEncoding, SecretSource};
-    use crate::config::v2::stripe_source::{ArchiveStorageConfig, StripeSourceConfig};
+    use crate::config::v2::stripe_source::{
+        ArchiveStorageConfig, RateLimitedRetryConfig, StripeSourceConfig,
+    };
     use crate::config::v2::{DangerZone, DeviceSection};
     use base64::Engine;
     use std::collections::HashMap;
@@ -405,6 +414,7 @@ mod tests {
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
             max_attempts: 3,
+            rate_limited_retry: RateLimitedRetryConfig::default(),
             archive_kek: Some(SecretRef::Ref("my_kek".to_string())),
             autofetch: false,
         };

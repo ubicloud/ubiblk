@@ -10,6 +10,17 @@ pub struct S3ClientTuning {
     pub connect_timeout_ms: u64,
     pub operation_attempt_timeout_ms: u64,
     pub max_attempts: u32,
+    /// When `Some`, retryable responses use a fixed jittered delay instead of the
+    /// SDK's exponential backoff. `None` keeps the default backoff.
+    pub rate_limited_retry: Option<RateLimitedRetry>,
+}
+
+/// Rate-limited-retry delay: a retryable response waits `min_delay + rand[0,
+/// jitter)` before the next attempt.
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitedRetry {
+    pub min_delay: Duration,
+    pub jitter: Duration,
 }
 
 pub fn create_runtime() -> Result<Arc<tokio::runtime::Runtime>> {
@@ -97,6 +108,7 @@ mod tests {
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
                 max_attempts: 3,
+                rate_limited_retry: None,
             },
         )
         .expect("client should be created");

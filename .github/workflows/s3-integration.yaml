@@ -1,0 +1,96 @@
+name: S3 integration
+
+# Archives a ubiblk device to a real S3-compatible bucket and reads it back,
+# with fault injection through an r2proxy MITM proxy standing in front of the
+# bucket. Needs upstream object-store credentials (R2/S3). Fork PRs have no
+# access to secrets, so the guard step below skips them cleanly.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+# A cancelled run still cleans up its bucket objects (see the runner script), so
+# it is safe to supersede in-progress runs for the same ref.
+concurrency:
+  group: s3-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ISA_L_CRYPTO_VERSION: "v2.25.0"
+
+jobs:
+  s3-integration:
+    runs-on: ubicloud-standard-4
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # No-op cleanly when the object-store secrets are not configured (e.g. a
+      # fork or a repo that has not set them up) instead of hard-failing.
+      - name: Check for object-store secrets
+        id: guard
+        env:
+          ACCESS_KEY_ID: ${{ secrets.S3_INTEGRATION_TESTS_ACCESS_KEY_ID }}
+        run: |
+          if [ -n "$ACCESS_KEY_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "R2/S3 secrets not configured; skipping S3 integration tests."
+          fi
+
+      - name: Install build dependencies
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf libtool nasm clang build-essential
+
+      - name: Install Rust
+        if: steps.guard.outputs.enabled == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust (registry, git deps, target/)
+        if: steps.guard.outputs.enabled == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install prebuilt isa-l_crypto
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          archive="isa-l_crypto-${ISA_L_CRYPTO_VERSION}-${arch}.tar.gz"
+          url="https://github.com/ubicloud/ubiblk/releases/download/prebuilt-ci-deps/${archive}"
+          curl -fL -o "${archive}" "${url}"
+          sudo tar -xzf "${archive}" -C /
+
+      - name: Set up Go
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build r2proxy
+        if: steps.guard.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/pykello/r2proxy "$RUNNER_TEMP/r2proxy-src"
+          go build -C "$RUNNER_TEMP/r2proxy-src" -o "$RUNNER_TEMP/bin/r2proxy" .
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # The runner script starts r2proxy in front of the bucket, points the tests
+      # at it, and tears it down. It reads the real store credentials from these
+      # variables; everything proxy-related is derived internally.
+      - name: Run S3 integration tests
+        if: steps.guard.outputs.enabled == 'true'
+        env:
+          S3_INTEGRATION_TESTS_ENDPOINT: ${{ secrets.S3_INTEGRATION_TESTS_ENDPOINT }}
+          S3_INTEGRATION_TESTS_BUCKET: ${{ secrets.S3_INTEGRATION_TESTS_BUCKET }}
+          S3_INTEGRATION_TESTS_ACCESS_KEY_ID: ${{ secrets.S3_INTEGRATION_TESTS_ACCESS_KEY_ID }}
+          S3_INTEGRATION_TESTS_SECRET_ACCESS_KEY: ${{ secrets.S3_INTEGRATION_TESTS_SECRET_ACCESS_KEY }}
+          S3_INTEGRATION_TESTS_REGION: ${{ secrets.S3_INTEGRATION_TESTS_REGION }}
+        run: scripts/s3-integration-tests.sh -- --nocapture

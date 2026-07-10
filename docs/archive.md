@@ -115,6 +115,7 @@ source.env = "UBIBLK_ARCHIVE_KEK"
 | `session_token.ref` | string | no | — | Reference to AWS session token secret (for temporary credentials) |
 | `archive_kek.ref` | string | no | — | Reference to a 32-byte AES-256-GCM KEK secret |
 | `autofetch` | boolean | no | false | Fetch stripes in the background |
+| `max_attempts` | integer | no | 3 | Max S3 operation attempts (initial attempt + retries) |
 
 ### `[secrets.*]` and `[danger_zone]`
 

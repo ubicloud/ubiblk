@@ -218,6 +218,22 @@ inject_rule '{"op":"*","delay_ms":200}'
 roundtrip "latency_injection_still_round_trips" "$(store_prefix latency)"
 clear_rules
 
+# A read-path error surfaces: archive succeeds, then a 500 on GetObject fails
+# the export.
+clear_rules
+p="$(store_prefix get-err)"
+if ! do_archive "$p" ""; then
+  notok "get_object_error_fails_export" "archive failed"
+else
+  inject_rule '{"op":"GetObject","status":500}'
+  if do_export "$p" "$WORK/get-err.raw"; then
+    notok "get_object_error_fails_export" "export unexpectedly succeeded"
+  else
+    ok "get_object_error_fails_export"
+  fi
+  clear_rules
+fi
+
 echo
 echo "# $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

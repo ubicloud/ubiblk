@@ -212,6 +212,12 @@ else
   notok "access_denied_fails_fast" "rc=$a_rc, elapsed=${e}s"
 fi
 
+# Injected latency should not break the round-trip.
+clear_rules
+inject_rule '{"op":"*","delay_ms":200}'
+roundtrip "latency_injection_still_round_trips" "$(store_prefix latency)"
+clear_rules
+
 echo
 echo "# $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

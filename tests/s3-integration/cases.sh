@@ -187,6 +187,17 @@ else
     "default rc=$d_rc (${d}s), rate_limited rc=$r_rc (${r}s)"
 fi
 
+# A persistent 500 fails the archive; once cleared, a re-run round-trips.
+clear_rules
+p="$(store_prefix t500)"
+inject_rule '{"op":"PutObject","status":500}'
+if do_archive "$p" ""; then
+  notok "transient_500_fails_then_recovers" "archive unexpectedly succeeded under 500"
+else
+  clear_rules
+  roundtrip "transient_500_fails_then_recovers" "$p"
+fi
+
 echo
 echo "# $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

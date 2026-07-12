@@ -199,6 +199,16 @@ else
   roundtrip "transient_500_fails_then_recovers" "$p"
 fi
 
+# Transient errors that clear within the retry budget must not fail the archive.
+# Fail PutObject with probability 0.3, capped at 2 failures per object so every
+# object still succeeds within max_attempts. Across ~34 objects that is a >99.99%
+# chance of at least one retry (1 - 0.7^34), while staying fast -- far cheaper
+# than failing every object.
+clear_rules
+inject_rule '{"op":"PutObject","status":500,"probability":0.3,"max_failures_per_object":2}'
+roundtrip "transient_errors_recovered_by_retries" "$(store_prefix retry-heal)"
+clear_rules
+
 # A non-retryable 403 fails fast (not retried into a long backoff).
 clear_rules
 inject_rule '{"op":"PutObject","status":403,"code":"AccessDenied"}'

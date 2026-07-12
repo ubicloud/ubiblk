@@ -208,11 +208,24 @@ class Cases:
         self.clear_rules()
         self.roundtrip("transient_500_fails_then_recovers", prefix)
 
+    def case_access_denied_fails_fast(self):
+        # A non-retryable 403 fails fast (not retried into a long backoff).
+        self.clear_rules()
+        self.inject_rule({"op": "PutObject", "status": 403, "code": "AccessDenied"})
+        ok, elapsed = self.archive(self.store_prefix("t403"))
+        self.clear_rules()
+        name = "access_denied_fails_fast"
+        if not ok and elapsed < 10:
+            self.ok(name)
+        else:
+            self.notok(name, f"ok={ok}, elapsed={elapsed:.2f}s")
+
     CASES = [
         case_roundtrip_plain,
         case_roundtrip_encrypted_zstd,
         case_rate_limited_retry_429,
         case_transient_500_recovers,
+        case_access_denied_fails_fast,
     ]
 
     def run(self):

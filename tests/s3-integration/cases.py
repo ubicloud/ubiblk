@@ -175,8 +175,16 @@ class Cases:
         self.clear_rules()
         self.roundtrip("archive_export_roundtrip_plain", self.store_prefix("plain"))
 
+    def case_roundtrip_encrypted_zstd(self):
+        self.roundtrip(
+            "archive_export_roundtrip_encrypted_zstd",
+            self.store_prefix("enc-zstd"),
+            extra=["--encrypt", "--compression", "zstd", "--zstd-level", "1"],
+        )
+
     CASES = [
         case_roundtrip_plain,
+        case_roundtrip_encrypted_zstd,
     ]
 
     def run(self):

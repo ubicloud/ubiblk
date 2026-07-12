@@ -198,6 +198,20 @@ else
   roundtrip "transient_500_fails_then_recovers" "$p"
 fi
 
+# A non-retryable 403 fails fast (not retried into a long backoff).
+clear_rules
+inject_rule '{"op":"PutObject","status":403,"code":"AccessDenied"}'
+t=$(now)
+do_archive "$(store_prefix t403)" ""
+a_rc=$?
+e=$(since "$t")
+clear_rules
+if [ "$a_rc" -ne 0 ] && awk -v e="$e" 'BEGIN { exit !(e < 10) }'; then
+  ok "access_denied_fails_fast"
+else
+  notok "access_denied_fails_fast" "rc=$a_rc, elapsed=${e}s"
+fi
+
 echo
 echo "# $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

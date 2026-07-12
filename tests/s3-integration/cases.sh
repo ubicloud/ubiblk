@@ -36,7 +36,8 @@ INIT="${INIT_BIN:-$ROOT/target/debug/init-metadata}"
 INIT_DIR="$(dirname "$INIT")"
 export PATH="$INIT_DIR:$PATH"
 
-DEVICE_MB=4 # four 1 MiB stripes
+DEVICE_MB=4        # with 128K stripes below -> 32 stripes (32 data objects)
+STRIPE_SIZE="128K" # ubiblk-init --stripe-size choice
 ARCHIVE_KEK="0123456789abcdef0123456789abcdef"
 
 # Work on a real filesystem: the binaries open image files with O_DIRECT, which
@@ -69,7 +70,7 @@ since() { awk -v a="$1" -v b="$(date +%s.%N)" 'BEGIN { printf "%.3f", b - a }'; 
 make_fixture() {
   head -c "$((DEVICE_MB * 1024 * 1024))" /dev/urandom >"$WORK/base.raw"
   python3 "$ROOT/scripts/ubiblk-init" --size "${DEVICE_MB}M" --dir "$WORK" \
-    --base "$WORK/base.raw" --stripe-size 1M --io-engine io_uring --force >/dev/null 2>&1
+    --base "$WORK/base.raw" --stripe-size "$STRIPE_SIZE" --io-engine io_uring --force >/dev/null 2>&1
 }
 
 # --- config + archive/export drivers -----------------------------------------

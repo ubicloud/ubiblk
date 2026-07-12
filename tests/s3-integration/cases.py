@@ -208,6 +208,17 @@ class Cases:
         self.clear_rules()
         self.roundtrip("transient_500_fails_then_recovers", prefix)
 
+    def case_transient_errors_recovered_by_retries(self):
+        # Transient errors that clear within the retry budget must not fail the
+        # archive. Fail PutObject with probability 0.3, capped at 2 failures per
+        # object so every object still succeeds within max_attempts. Across ~34
+        # objects that is a >99.99% chance of at least one retry (1 - 0.7^34),
+        # while staying fast -- far cheaper than failing every object.
+        self.clear_rules()
+        self.inject_rule({"op": "PutObject", "status": 500, "probability": 0.3, "max_failures_per_object": 2})
+        self.roundtrip("transient_errors_recovered_by_retries", self.store_prefix("retry-heal"))
+        self.clear_rules()
+
     def case_access_denied_fails_fast(self):
         # A non-retryable 403 fails fast (not retried into a long backoff).
         self.clear_rules()
@@ -249,6 +260,7 @@ class Cases:
         case_roundtrip_encrypted_zstd,
         case_rate_limited_retry_429,
         case_transient_500_recovers,
+        case_transient_errors_recovered_by_retries,
         case_access_denied_fails_fast,
         case_latency_round_trips,
         case_get_object_error_fails_export,

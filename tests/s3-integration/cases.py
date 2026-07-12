@@ -182,9 +182,24 @@ class Cases:
             extra=["--encrypt", "--compression", "zstd", "--zstd-level", "1"],
         )
 
+    def case_rate_limited_retry_429(self):
+        # A 429 isn't retried by default, so the default run fails fast;
+        # rate_limited_retry does two 3s retries, ~6s slower. Require +4s margin.
+        self.clear_rules()
+        self.inject_rule({"op": "PutObject", "status": 429})
+        default_ok, default_s = self.archive(self.store_prefix("t429-default"))
+        retry_ok, retry_s = self.archive(self.store_prefix("t429-rlr"), retry=(3000, 0))
+        self.clear_rules()
+        name = "rate_limited_retry_retries_429_default_does_not"
+        if not default_ok and not retry_ok and retry_s >= default_s + 4:
+            self.ok(name)
+        else:
+            self.notok(name, f"default ok={default_ok} ({default_s:.2f}s), retry ok={retry_ok} ({retry_s:.2f}s)")
+
     CASES = [
         case_roundtrip_plain,
         case_roundtrip_encrypted_zstd,
+        case_rate_limited_retry_429,
     ]
 
     def run(self):

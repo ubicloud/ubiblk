@@ -227,6 +227,23 @@ class Cases:
         self.roundtrip("latency_injection_still_round_trips", self.store_prefix("latency"))
         self.clear_rules()
 
+    def case_get_object_error_fails_export(self):
+        # A read-path error surfaces: archive succeeds, then a 500 on GetObject
+        # fails the export.
+        self.clear_rules()
+        prefix = self.store_prefix("get-err")
+        ok, _ = self.archive(prefix)
+        if not ok:
+            self.notok("get_object_error_fails_export", "archive failed")
+            return
+        self.inject_rule({"op": "GetObject", "status": 500})
+        ok, _ = self.export(prefix)
+        self.clear_rules()
+        if ok:
+            self.notok("get_object_error_fails_export", "export unexpectedly succeeded")
+        else:
+            self.ok("get_object_error_fails_export")
+
     CASES = [
         case_roundtrip_plain,
         case_roundtrip_encrypted_zstd,
@@ -234,6 +251,7 @@ class Cases:
         case_transient_500_recovers,
         case_access_denied_fails_fast,
         case_latency_round_trips,
+        case_get_object_error_fails_export,
     ]
 
     def run(self):

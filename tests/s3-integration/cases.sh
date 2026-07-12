@@ -162,6 +162,10 @@ make_fixture
 clear_rules
 roundtrip "archive_export_roundtrip_plain" "$(store_prefix plain)"
 
+# With encryption + zstd compression.
+roundtrip "archive_export_roundtrip_encrypted_zstd" "$(store_prefix enc-zstd)" \
+  --encrypt --compression zstd --zstd-level 1
+
 echo
 echo "# $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -166,6 +166,27 @@ roundtrip "archive_export_roundtrip_plain" "$(store_prefix plain)"
 roundtrip "archive_export_roundtrip_encrypted_zstd" "$(store_prefix enc-zstd)" \
   --encrypt --compression zstd --zstd-level 1
 
+# The default client drops R2's 429; rate_limited_retry retries it after a delay,
+# so the (still failing, rule is persistent) run takes measurably longer.
+clear_rules
+inject_rule '{"op":"PutObject","status":429}'
+t=$(now)
+do_archive "$(store_prefix t429-default)" ""
+d_rc=$?
+d=$(since "$t")
+t=$(now)
+do_archive "$(store_prefix t429-rlr)" "1000,0"
+r_rc=$?
+r=$(since "$t")
+clear_rules
+if [ "$d_rc" -ne 0 ] && [ "$r_rc" -ne 0 ] &&
+  awk -v r="$r" -v d="$d" 'BEGIN { exit !(r >= d + 1.2) }'; then
+  ok "rate_limited_retry_retries_429_default_does_not"
+else
+  notok "rate_limited_retry_retries_429_default_does_not" \
+    "default rc=$d_rc (${d}s), rate_limited rc=$r_rc (${r}s)"
+fi
+
 echo
 echo "# $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

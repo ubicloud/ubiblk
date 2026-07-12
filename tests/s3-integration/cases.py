@@ -220,12 +220,20 @@ class Cases:
         else:
             self.notok(name, f"ok={ok}, elapsed={elapsed:.2f}s")
 
+    def case_latency_round_trips(self):
+        # Injected latency should not break the round-trip.
+        self.clear_rules()
+        self.inject_rule({"op": "*", "delay_ms": 200})
+        self.roundtrip("latency_injection_still_round_trips", self.store_prefix("latency"))
+        self.clear_rules()
+
     CASES = [
         case_roundtrip_plain,
         case_roundtrip_encrypted_zstd,
         case_rate_limited_retry_429,
         case_transient_500_recovers,
         case_access_denied_fails_fast,
+        case_latency_round_trips,
     ]
 
     def run(self):

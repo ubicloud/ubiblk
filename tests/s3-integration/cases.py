@@ -196,10 +196,23 @@ class Cases:
         else:
             self.notok(name, f"default ok={default_ok} ({default_s:.2f}s), retry ok={retry_ok} ({retry_s:.2f}s)")
 
+    def case_transient_500_recovers(self):
+        # A persistent 500 fails the archive; once cleared, a re-run round-trips.
+        self.clear_rules()
+        prefix = self.store_prefix("t500")
+        self.inject_rule({"op": "PutObject", "status": 500})
+        ok, _ = self.archive(prefix)
+        if ok:
+            self.notok("transient_500_fails_then_recovers", "archive unexpectedly succeeded under 500")
+            return
+        self.clear_rules()
+        self.roundtrip("transient_500_fails_then_recovers", prefix)
+
     CASES = [
         case_roundtrip_plain,
         case_roundtrip_encrypted_zstd,
         case_rate_limited_retry_429,
+        case_transient_500_recovers,
     ]
 
     def run(self):

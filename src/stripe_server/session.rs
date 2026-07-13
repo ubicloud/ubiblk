@@ -41,6 +41,9 @@ impl StripeServerSession {
         self.stream.read_exact(&mut opcode)?;
 
         match opcode[0] {
+            HELLO_CMD => {
+                self.handle_hello_request()?;
+            }
             METADATA_CMD => {
                 self.handle_metadata_request()?;
             }
@@ -59,6 +62,14 @@ impl StripeServerSession {
             }
         }
 
+        Ok(())
+    }
+
+    fn handle_hello_request(&mut self) -> Result<()> {
+        info!("Handling hello request");
+        self.stream.write_all(&[STATUS_OK])?;
+        self.stream.write_all(&PROTOCOL_VERSION.to_le_bytes())?;
+        self.stream.flush()?;
         Ok(())
     }
 
@@ -207,6 +218,19 @@ mod tests {
         let server = StripeServer::new(device, metadata);
         let session = server.start_session(Box::new(stream)).unwrap();
         (session, writes)
+    }
+
+    #[test]
+    fn test_handle_hello_request() {
+        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, 1, 0));
+        let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
+        let (mut session, writes) = make_session(vec![HELLO_CMD], metadata, device);
+
+        session.handle_single_request().unwrap();
+
+        let mut expected = vec![STATUS_OK];
+        expected.extend_from_slice(&PROTOCOL_VERSION.to_le_bytes());
+        assert_eq!(*writes.lock().unwrap(), expected);
     }
 
     #[test]

@@ -116,6 +116,30 @@ little-endian.
 If PSK credentials are supplied, the connection is wrapped in TLS using the
 `PSK-AES256-GCM-SHA384` cipher suite.
 
+### Hello Request
+
+The client issues a hello on connect, before any other request, to check that
+the server speaks a compatible protocol version.
+
+**Client -> Server**
+
+| Field | Size | Description |
+|-------|------|-------------|
+| opcode | 1 byte | `0x02` (`HELLO_CMD`) |
+
+**Server -> Client**
+
+| Field | Size | Description |
+|-------|------|-------------|
+| status | 1 byte | `0x00` (`STATUS_OK`) |
+| protocol_version | 4 bytes | Protocol version (u32), currently `1` |
+
+The client rejects the connection if `protocol_version` does not match its own
+`PROTOCOL_VERSION`. A server that predates the hello command replies `0xFE`
+(`STATUS_INVALID_COMMAND`), which the client reports as an incompatible
+(too old) server. The check is advisory and client-side: the server does not
+require a hello and does not inspect the client's version.
+
 ### Metadata Request
 
 **Client -> Server**

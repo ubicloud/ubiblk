@@ -15,6 +15,11 @@ pub type DynStream = Box<dyn ReadWrite + Send>;
 
 pub const METADATA_CMD: u8 = 0x00;
 pub const READ_STRIPE_CMD: u8 = 0x01;
+pub const HELLO_CMD: u8 = 0x02;
+
+/// Remote stripe protocol version, reported by the hello command so a client can
+/// detect a server it is not compatible with. Bump on incompatible wire changes.
+pub const PROTOCOL_VERSION: u32 = 1;
 
 pub const STATUS_OK: u8 = 0x00;
 pub const STATUS_INVALID_STRIPE: u8 = 0x01;

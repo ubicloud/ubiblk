@@ -1,0 +1,113 @@
+name: blkbench
+
+# Runs blkbench (https://github.com/ubicloud/blkbench) data-integrity
+# verification against ubiblk's vhost-user backend.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+env:
+  ISA_L_CRYPTO_VERSION: "v2.25.0"
+
+jobs:
+  blkbench:
+    runs-on: ubicloud-standard-4
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf libtool nasm clang build-essential meson docutils
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust (registry, git deps, target/)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Clone and build libblkio
+        run: |
+          git clone --depth 1 https://gitlab.com/libblkio/libblkio.git
+          cd libblkio
+          meson setup build --prefix=/usr/local
+          meson compile -C build
+          sudo --preserve-env=PATH,RUSTUP_HOME,CARGO_HOME,HOME meson install -C build
+
+      - name: Install prebuilt isa-l_crypto
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          archive="isa-l_crypto-${ISA_L_CRYPTO_VERSION}-${arch}.tar.gz"
+          url="https://github.com/ubicloud/ubiblk/releases/download/prebuilt-ci-deps/${archive}"
+          curl -fL -o "${archive}" "${url}"
+          sudo tar -xzf "${archive}" -C /
+
+      - name: Build blkbench
+        run: |
+          git clone --depth 1 https://github.com/ubicloud/blkbench blkbench-src
+          make -C blkbench-src -j"$(nproc)" LDFLAGS="-Wl,-rpath,/usr/local/lib/x86_64-linux-gnu"
+
+      - name: Build ubiblk and set up the device
+        run: |
+          set -euo pipefail
+          cargo build --bin vhost-backend --bin init-metadata
+          export PATH="$PWD/target/debug:$PATH"
+          work="$PWD/target/tests/blkbench"
+          rm -rf "$work" && mkdir -p "$work"
+          python3 scripts/ubiblk-init --size 256M --dir "$work" \
+            --num-queues 4 --queue-size 256 --force
+          init-metadata --config "$work/config.toml" --stripe-sector-count-shift 11
+
+      - name: Verify (verify-flush)
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/target/debug:$PATH"
+          blkbench="$PWD/blkbench-src/blkbench"
+          cd target/tests/blkbench
+          vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 50); do [ -S vhost.sock ] && break; sleep 0.1; done
+          if [ ! -S vhost.sock ]; then
+            echo "error: vhost-backend did not create vhost.sock" >&2
+            kill -9 "$pid" 2>/dev/null || true
+            exit 1
+          fi
+          rc=0
+          timeout 120 "$blkbench" --path vhost.sock --rw verify-flush \
+            --bs 4k --iodepth 32 --numjobs 4 --size 64M || rc=$?
+          kill -9 "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          exit "$rc"
+
+      - name: Verify (verify-pipeline)
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/target/debug:$PATH"
+          blkbench="$PWD/blkbench-src/blkbench"
+          cd target/tests/blkbench
+          vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
+          pid=$!
+          for _ in $(seq 1 50); do [ -S vhost.sock ] && break; sleep 0.1; done
+          if [ ! -S vhost.sock ]; then
+            echo "error: vhost-backend did not create vhost.sock" >&2
+            kill -9 "$pid" 2>/dev/null || true
+            exit 1
+          fi
+          rc=0
+          timeout 120 "$blkbench" --path vhost.sock --rw verify-pipeline \
+            --bs 4k --iodepth 32 --numjobs 4 --size 64M || rc=$?
+          kill -9 "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          exit "$rc"
+
+      - name: Dump vhost-backend log
+        if: ${{ always() }}
+        run: cat target/tests/blkbench/vhost-backend.log 2>/dev/null || echo "no log"

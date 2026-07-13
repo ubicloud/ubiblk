@@ -6,7 +6,9 @@ use std::{collections::HashMap, io, path::PathBuf};
 use ubiblk::{
     block_device::metadata_flags,
     config::v2,
-    stripe_server::{connect_to_stripe_server, RemoteStripeProvider},
+    stripe_server::{
+        connect_reconnecting_stripe_client, connect_to_stripe_server, RemoteStripeProvider,
+    },
     Result,
 };
 
@@ -19,6 +21,11 @@ struct Args {
     /// Config TOML file containing remote stripe server connection details.
     #[arg(long = "server-config", value_name = "CONFIG_TOML")]
     server_config_path: PathBuf,
+
+    /// Reconnect automatically, with exponential backoff, if the server
+    /// connection drops during the session.
+    #[arg(long)]
+    reconnect: bool,
 }
 
 fn main() {
@@ -31,14 +38,26 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let Args { server_config_path } = Args::parse();
+    let Args {
+        server_config_path,
+        reconnect,
+    } = Args::parse();
 
     let server_config = v2::RemoteStripeServerConfig::load(&server_config_path)?;
-    let mut client = connect_to_stripe_server(&server_config.server, &server_config.secrets)?;
+    let mut client: Box<dyn RemoteStripeProvider> = if reconnect {
+        Box::new(connect_reconnecting_stripe_client(
+            &server_config.server,
+            &server_config.secrets,
+        )?)
+    } else {
+        Box::new(connect_to_stripe_server(
+            &server_config.server,
+            &server_config.secrets,
+        )?)
+    };
 
     let metadata = client
-        .metadata
-        .as_ref()
+        .get_metadata()
         .expect("metadata should be fetched")
         .clone();
     let stripe_len_bytes = metadata.stripe_size();

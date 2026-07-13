@@ -70,6 +70,44 @@ impl StripeServerClient {
         Ok(())
     }
 
+    #[error_context("Failed to complete hello handshake with stripe server")]
+    fn hello(&mut self) -> Result<()> {
+        info!("Performing hello handshake with server");
+
+        // Send hello opcode
+        self.stream.write_all(&[HELLO_CMD])?;
+        self.stream.flush()?;
+
+        // Read response status
+        let mut status = [0u8; 1];
+        self.stream.read_exact(&mut status)?;
+        if status[0] == STATUS_INVALID_COMMAND {
+            // An old server that predates HELLO_CMD rejects the unknown opcode.
+            return Err(crate::ubiblk_error!(ProtocolError {
+                description:
+                    "Remote stripe server does not support protocol-version negotiation (server too old)"
+                        .to_string(),
+            }));
+        }
+        if status[0] != STATUS_OK {
+            return Err(crate::ubiblk_error!(RemoteStatus { status: status[0] }));
+        }
+
+        // Read and check the server's protocol version
+        let mut version_bytes = [0u8; 4];
+        self.stream.read_exact(&mut version_bytes)?;
+        let version = u32::from_le_bytes(version_bytes);
+        if version != PROTOCOL_VERSION {
+            return Err(crate::ubiblk_error!(ProtocolError {
+                description: format!(
+                    "Remote stripe server protocol version {version} is incompatible with client version {PROTOCOL_VERSION}"
+                ),
+            }));
+        }
+
+        Ok(())
+    }
+
     #[cfg(test)]
     fn send_invalid_command(&mut self) -> Result<u8> {
         self.stream.write_all(&[0xFF])?;
@@ -181,6 +219,7 @@ pub fn connect_to_stripe_server(
     };
 
     let mut client = StripeServerClient::new(stream);
+    client.hello()?;
     client.fetch_metadata()?;
 
     Ok(client)
@@ -188,6 +227,7 @@ pub fn connect_to_stripe_server(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Read, Write};
     use std::{os::unix::net::UnixStream, sync::Arc, thread};
 
     use crate::backends::SECTOR_SIZE;
@@ -407,6 +447,84 @@ mod tests {
         });
 
         assert_eq!(status, STATUS_INVALID_COMMAND);
+    }
+
+    #[test]
+    fn hello_succeeds_with_matching_version() {
+        let stripe_count = 1;
+        let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
+        let stripe_device = Arc::new(TestBlockDevice::new(
+            (stripe_count as u64) * SECTOR_SIZE as u64,
+        ));
+
+        run_client_with_server(metadata, stripe_device, None, |client| {
+            client.hello().expect("hello handshake should succeed");
+        });
+    }
+
+    struct CannedStream {
+        read: Cursor<Vec<u8>>,
+    }
+
+    impl Read for CannedStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.read.read(buf)
+        }
+    }
+
+    impl Write for CannedStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn hello_rejects_incompatible_version() {
+        let mut response = vec![STATUS_OK];
+        response.extend_from_slice(&(PROTOCOL_VERSION + 1).to_le_bytes());
+        let stream: DynStream = Box::new(CannedStream {
+            read: Cursor::new(response),
+        });
+        let mut client = StripeServerClient::new(stream);
+
+        let err = client
+            .hello()
+            .expect_err("incompatible version should be rejected");
+        assert!(matches!(err, UbiblkError::ProtocolError { .. }));
+    }
+
+    #[test]
+    fn hello_rejects_old_server() {
+        // An old server that predates HELLO_CMD replies STATUS_INVALID_COMMAND.
+        let stream: DynStream = Box::new(CannedStream {
+            read: Cursor::new(vec![STATUS_INVALID_COMMAND]),
+        });
+        let mut client = StripeServerClient::new(stream);
+
+        let err = client
+            .hello()
+            .expect_err("an old server should be rejected");
+        assert!(matches!(err, UbiblkError::ProtocolError { .. }));
+    }
+
+    #[test]
+    fn hello_propagates_error_status() {
+        let stream: DynStream = Box::new(CannedStream {
+            read: Cursor::new(vec![STATUS_SERVER_ERROR]),
+        });
+        let mut client = StripeServerClient::new(stream);
+
+        let err = client
+            .hello()
+            .expect_err("a server error status should be rejected");
+        assert!(matches!(
+            err,
+            UbiblkError::RemoteStatus { status, .. } if status == STATUS_SERVER_ERROR
+        ));
     }
 
     #[test]

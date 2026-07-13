@@ -11,26 +11,28 @@ use super::*;
 
 impl StripeServerSession {
     pub fn handle_requests(&mut self) {
-        let mut done = false;
-        while !done {
+        loop {
             if let Err(e) = self.handle_single_request() {
-                match e {
-                    UbiblkError::IoError { source, .. } => {
-                        let kind = source.kind();
-                        if kind == ErrorKind::UnexpectedEof || kind == ErrorKind::ConnectionReset {
-                            info!("Connection closed by peer");
-                            done = true;
-                            continue;
-                        } else {
-                            error!("I/O error: {}", source);
-                            continue;
-                        }
+                match &e {
+                    UbiblkError::IoError { source, .. }
+                        if matches!(
+                            source.kind(),
+                            ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset
+                        ) =>
+                    {
+                        info!("Connection closed by peer");
                     }
-                    _ => {
-                        error!("Error handling request: {}", e);
-                        continue;
+                    UbiblkError::IoError { source, .. }
+                        if matches!(source.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                    {
+                        info!("Closing idle connection after read/write timeout");
                     }
+                    _ => error!("Terminating session after error: {}", e),
                 }
+                // Any error leaves the stream in an unknown state — a partially
+                // written response desyncs framing, and retrying a failing read
+                // would busy-loop — so end the session.
+                return;
             }
         }
     }
@@ -218,6 +220,36 @@ mod tests {
         let server = StripeServer::new(device, metadata);
         let session = server.start_session(Box::new(stream)).unwrap();
         (session, writes)
+    }
+
+    struct ErroringStream;
+
+    impl Read for ErroringStream {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "boom"))
+        }
+    }
+
+    impl Write for ErroringStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn handle_requests_terminates_on_persistent_error() {
+        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, 1, 0));
+        let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
+        let server = StripeServer::new(device, metadata);
+        let mut session = server.start_session(Box::new(ErroringStream)).unwrap();
+
+        // A non-EOF error that would repeat forever must end the session rather
+        // than busy-loop; returning here is the assertion.
+        session.handle_requests();
     }
 
     #[test]

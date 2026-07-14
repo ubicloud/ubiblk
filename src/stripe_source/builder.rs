@@ -227,6 +227,8 @@ mod tests {
                         address: remote,
                         psk: None,
                         autofetch: false,
+                        connect_timeout_ms: 5_000,
+                        operation_attempt_timeout_ms: 20_000,
                     })
                 })
             });

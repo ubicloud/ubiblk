@@ -93,6 +93,10 @@ pub struct RemoteStripeConfig {
     pub psk: Option<PskConfig>,
     #[serde(default)]
     pub autofetch: bool,
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u64,
+    #[serde(default = "default_operation_attempt_timeout_ms")]
+    pub operation_attempt_timeout_ms: u64,
 }
 
 impl RemoteStripeConfig {
@@ -543,6 +547,8 @@ mod tests {
                     secret: SecretRef::Ref("psk-secret".to_string()),
                 }),
                 autofetch: false,
+                connect_timeout_ms: 5_000,
+                operation_attempt_timeout_ms: 20_000,
             })
         );
     }
@@ -565,6 +571,8 @@ mod tests {
                     secret: SecretRef::Ref("psk-secret".to_string()),
                 }),
                 autofetch: false,
+                connect_timeout_ms: 5_000,
+                operation_attempt_timeout_ms: 20_000,
             })
         );
     }
@@ -724,6 +732,8 @@ mod tests {
             address: "127.0.0.1:1234".to_string(),
             psk: None,
             autofetch: false,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
         });
         let danger_zone = DangerZone {
             enabled: false,

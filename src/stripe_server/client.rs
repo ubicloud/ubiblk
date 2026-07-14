@@ -559,6 +559,8 @@ mod tests {
             address: "127.0.0.1:9999".to_string(),
             psk: None,
             autofetch: false,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 20_000,
         };
         let result = connect_to_stripe_server(&conf, &HashMap::new());
         assert!(result.is_err());

@@ -193,9 +193,30 @@ class Cases(Suite):
             sh.close()
             self.reset()
 
+    def case_server_survives_broken_sessions(self):
+        # A peer that resets mid-protocol must not take the server down: the
+        # session ends (terminate-on-error) and the server keeps serving. Reset
+        # several client connections, then confirm a clean fetch still works.
+        self.reset()
+        self.add_toxic({"type": "reset_peer", "stream": "downstream", "attributes": {"timeout": 0}})
+        for _ in range(3):
+            sh = self.shell()
+            sh.command("fetch_stripe 0", timeout=10)  # expected to error out
+            sh.close()
+        self.reset()  # remove the reset_peer toxic
+        sh = self.shell()
+        try:
+            if sh.command("fetch_stripe 0") != "FETCHED":
+                self.notok("server_survives_broken_sessions", "server did not recover after resets")
+                return
+            self.ok("server_survives_broken_sessions")
+        finally:
+            sh.close()
+
     CASES = [
         case_baseline_fetch_matches_source,
         case_fetch_tolerates_latency,
         case_reconnect_after_connection_drop,
         case_no_reconnect_fails_after_drop,
+        case_server_survives_broken_sessions,
     ]

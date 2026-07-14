@@ -173,8 +173,29 @@ class Cases(Suite):
             sh.close()
             self.reset()
 
+    def case_no_reconnect_fails_after_drop(self):
+        # Contrast: without --reconnect, a dropped connection is not recovered,
+        # so the next fetch fails -- confirming the drop is real and that the
+        # previous case's success came from the reconnect logic.
+        self.reset()
+        sh = self.shell(reconnect=False)
+        try:
+            if sh.command("fetch_stripe 0") != "FETCHED":
+                self.notok("no_reconnect_fails_after_drop", "initial fetch failed")
+                return
+            self.set_enabled(False)
+            line = sh.command("fetch_stripe 2", timeout=15)
+            if line == "FETCHED":
+                self.notok("no_reconnect_fails_after_drop", "fetch unexpectedly succeeded after drop")
+                return
+            self.ok("no_reconnect_fails_after_drop")
+        finally:
+            sh.close()
+            self.reset()
+
     CASES = [
         case_baseline_fetch_matches_source,
         case_fetch_tolerates_latency,
         case_reconnect_after_connection_drop,
+        case_no_reconnect_fails_after_drop,
     ]

@@ -21,19 +21,18 @@ cargo build --bin archive --bin export-archive --bin init-metadata); also needs
 r2proxy (https://github.com/ubicloud/r2proxy), python3, and the aws CLI (cleanup).
 """
 
-import atexit
 import json
 import os
 import pathlib
 import secrets
-import signal
-import socket
 import subprocess
 import sys
 import tempfile
-import time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "common"))
 
 from util import CommandFail, http, r
+from harness import free_port, install_exit_handler, wait_for
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
@@ -43,24 +42,6 @@ def require(name):
     if not value:
         sys.exit(f"{name} must be set")
     return value
-
-
-def free_port():
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
-
-
-def wait_for_admin(admin):
-    for _ in range(40):
-        try:
-            http("GET", f"{admin}/api/serverinfo")
-            return
-        except Exception:
-            time.sleep(0.5)
-    sys.exit("r2proxy did not become ready in time")
 
 
 def check_binaries():
@@ -119,10 +100,7 @@ def main():
             except subprocess.TimeoutExpired:
                 proc.kill()
 
-    atexit.register(cleanup)
-    # Turn termination signals into a normal exit so atexit (cleanup) runs.
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
-    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+    install_exit_handler(cleanup)
 
     # Start r2proxy in front of the real bucket, on loopback. The IP host makes
     # the AWS SDK use path-style addressing, which r2proxy requires.
@@ -144,7 +122,7 @@ def main():
         state["proc"] = subprocess.Popen([r2proxy_bin, "serve"], env=proxy_env, stdout=log, stderr=log)
 
     admin = f"http://127.0.0.1:{admin_port}"
-    wait_for_admin(admin)
+    wait_for(lambda: http("GET", f"{admin}/api/serverinfo"), "r2proxy", attempts=40, delay=0.5)
 
     # The proxy mints its own client-facing credentials; read them back and point
     # the tests at the proxy (the real credentials stay with the proxy).

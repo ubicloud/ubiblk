@@ -213,10 +213,32 @@ class Cases(Suite):
         finally:
             sh.close()
 
+    def case_unreachable_server_fails_fast(self):
+        # With the server unreachable, the client fails to start rather than
+        # hanging, and exits non-zero within a bounded time.
+        self.reset()
+        self.set_enabled(False)
+        try:
+            start = time.monotonic()
+            sh = self.shell()
+            sh.p.stdin.close()
+            code = sh.p.wait(timeout=20)
+            elapsed = time.monotonic() - start
+            sh.log.close()
+            if code != 0 and elapsed < 15:
+                self.ok("unreachable_server_fails_fast")
+            else:
+                self.notok("unreachable_server_fails_fast", f"exit={code}, elapsed={elapsed:.2f}s")
+        except subprocess.TimeoutExpired:
+            self.notok("unreachable_server_fails_fast", "client hung with server unreachable")
+        finally:
+            self.reset()
+
     CASES = [
         case_baseline_fetch_matches_source,
         case_fetch_tolerates_latency,
         case_reconnect_after_connection_drop,
         case_no_reconnect_fails_after_drop,
         case_server_survives_broken_sessions,
+        case_unreachable_server_fails_fast,
     ]

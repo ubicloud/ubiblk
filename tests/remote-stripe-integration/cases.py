@@ -144,7 +144,37 @@ class Cases(Suite):
             sh.close()
             self.reset()
 
+    def case_reconnect_after_connection_drop(self):
+        # The headline: with --reconnect, a fetch whose connection was dropped
+        # reconnects (with backoff) once the server is reachable again and still
+        # returns the right bytes.
+        self.reset()
+        sh = self.shell(reconnect=True)
+        healer = None
+        try:
+            if sh.command("fetch_stripe 0") != "FETCHED":
+                self.notok("reconnect_after_connection_drop", "initial fetch failed")
+                return
+            # Drop the connection, then heal it while the next fetch is retrying.
+            self.set_enabled(False)
+            healer = threading.Timer(1.5, self.set_enabled, args=(True,))
+            healer.start()
+            line = sh.command("fetch_stripe 2", timeout=30)
+            if line != "FETCHED":
+                self.notok("reconnect_after_connection_drop", f"fetch after drop returned {line!r}")
+                return
+            if sh.command("dump_stripe 2 0 64") != self.expected_hex(2, 0, 64):
+                self.notok("reconnect_after_connection_drop", "bytes differ after reconnect")
+                return
+            self.ok("reconnect_after_connection_drop")
+        finally:
+            if healer is not None:
+                healer.join()
+            sh.close()
+            self.reset()
+
     CASES = [
         case_baseline_fetch_matches_source,
         case_fetch_tolerates_latency,
+        case_reconnect_after_connection_drop,
     ]

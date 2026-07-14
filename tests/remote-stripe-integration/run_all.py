@@ -122,6 +122,7 @@ def main():
     os.environ.update({
         "REMOTE_STRIPE_TESTS_ADMIN": admin,
         "REMOTE_STRIPE_TESTS_PROXY": proxy_name,
+        "REMOTE_STRIPE_TESTS_PROXY_ADDR": f"127.0.0.1:{proxy_port}",
         "REMOTE_STRIPE_TESTS_SHELL_CONFIG": str(work / "shell.toml"),
         "REMOTE_STRIPE_TESTS_DATA": str(work / "data.raw"),
         "REMOTE_STRIPE_TESTS_WORK": str(work),

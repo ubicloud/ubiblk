@@ -9,6 +9,7 @@ these variables (all set by that launcher):
 
     REMOTE_STRIPE_TESTS_ADMIN          toxiproxy admin API URL
     REMOTE_STRIPE_TESTS_PROXY          proxy name
+    REMOTE_STRIPE_TESTS_PROXY_ADDR     proxy host:port (for custom client configs)
     REMOTE_STRIPE_TESTS_SHELL_CONFIG   client config pointing at the proxy
     REMOTE_STRIPE_TESTS_DATA           the served image, for byte verification
     REMOTE_STRIPE_TESTS_STRIPE_SIZE    stripe size in bytes
@@ -27,7 +28,7 @@ import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "common"))
 
-from util import http
+from util import http, toml_dump
 from harness import Suite
 
 SHELL = os.environ.get("SHELL_BIN", str(pathlib.Path(__file__).resolve().parents[2] / "target/debug/remote-stripe-shell"))
@@ -83,14 +84,26 @@ class Cases(Suite):
         env = os.environ
         self.admin = env["REMOTE_STRIPE_TESTS_ADMIN"]
         self.proxy = env["REMOTE_STRIPE_TESTS_PROXY"]
+        self.proxy_addr = env["REMOTE_STRIPE_TESTS_PROXY_ADDR"]
         self.config = env["REMOTE_STRIPE_TESTS_SHELL_CONFIG"]
         self.data = pathlib.Path(env["REMOTE_STRIPE_TESTS_DATA"]).read_bytes()
         self.stripe_size = int(env["REMOTE_STRIPE_TESTS_STRIPE_SIZE"])
         self.work = pathlib.Path(env["REMOTE_STRIPE_TESTS_WORK"])
 
-    def shell(self, reconnect=False):
+    def shell(self, reconnect=False, config=None):
         self._n += 1
-        return Shell(self.config, str(self.work / f"shell-{self._n}.log"), reconnect=reconnect)
+        return Shell(config or self.config, str(self.work / f"shell-{self._n}.log"), reconnect=reconnect)
+
+    def shell_config(self, tag, **server_fields):
+        """Write a client config pointing at the proxy with extra [server]
+        fields (e.g. a short operation_attempt_timeout_ms) and return its path."""
+        path = self.work / f"shell-{tag}.toml"
+        path.write_text(toml_dump([
+            ("server", {"address": self.proxy_addr, **server_fields}),
+            ("danger_zone", {"enabled": True, "allow_unencrypted_connection": True}),
+        ]))
+        os.chmod(path, 0o600)
+        return str(path)
 
     def expected_hex(self, stripe, offset, length):
         start = stripe * self.stripe_size + offset
@@ -234,6 +247,35 @@ class Cases(Suite):
         finally:
             self.reset()
 
+    def case_read_timeout_aborts_stalled_fetch(self):
+        # A `timeout` toxic holds the connection open but stops forwarding data,
+        # so a fetch's response never arrives. operation_attempt_timeout_ms bounds
+        # each socket read, so a short value aborts the stalled read in about that
+        # long instead of hanging; the default (20s) would exceed our read budget.
+        # No --reconnect, so we observe the timeout itself rather than the backoff
+        # retries after it.
+        self.reset()
+        cfg = self.shell_config("fast-timeout", operation_attempt_timeout_ms=2000)
+        sh = self.shell(config=cfg)
+        try:
+            if sh.command("fetch_stripe 0") != "FETCHED":
+                self.notok("read_timeout_aborts_stalled_fetch", "initial fetch failed")
+                return
+            self.add_toxic({"type": "timeout", "stream": "downstream", "attributes": {"timeout": 0}})
+            start = time.monotonic()
+            line = sh.command("fetch_stripe 2", timeout=15)
+            elapsed = time.monotonic() - start
+            if line == "FETCHED":
+                self.notok("read_timeout_aborts_stalled_fetch", "fetch unexpectedly succeeded")
+            elif line is None or elapsed > 10:
+                self.notok("read_timeout_aborts_stalled_fetch",
+                           f"read did not time out promptly ({elapsed:.1f}s, line={line!r})")
+            else:
+                self.ok("read_timeout_aborts_stalled_fetch")
+        finally:
+            sh.close()
+            self.reset()
+
     CASES = [
         case_baseline_fetch_matches_source,
         case_fetch_tolerates_latency,
@@ -241,4 +283,5 @@ class Cases(Suite):
         case_no_reconnect_fails_after_drop,
         case_server_survives_broken_sessions,
         case_unreachable_server_fails_fast,
+        case_read_timeout_aborts_stalled_fetch,
     ]

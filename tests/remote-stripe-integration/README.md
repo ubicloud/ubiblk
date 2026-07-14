@@ -27,6 +27,7 @@ external services**, and the suite always runs.
 | `no_reconnect_fails_after_drop` | Without `--reconnect`, a dropped connection is not recovered — confirming the drop is real and that reconnect is what recovers it. |
 | `server_survives_broken_sessions` | A peer resetting mid-protocol ends only its own session; the server keeps serving. |
 | `unreachable_server_fails_fast` | With the server unreachable the client fails to start rather than hanging. |
+| `read_timeout_aborts_stalled_fetch` | With a short `operation_attempt_timeout_ms`, a `timeout` toxic that stalls the response aborts the read promptly instead of hanging. |
 
 ## Files
 

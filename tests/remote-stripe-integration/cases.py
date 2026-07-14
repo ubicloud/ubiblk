@@ -126,6 +126,25 @@ class Cases(Suite):
         finally:
             sh.close()
 
+    def case_fetch_tolerates_latency(self):
+        # Latency well under the connection timeouts must not break a fetch.
+        self.reset()
+        self.add_toxic({"type": "latency", "stream": "downstream",
+                        "attributes": {"latency": 100, "jitter": 20}})
+        sh = self.shell()
+        try:
+            if sh.command("fetch_stripe 1", timeout=20) != "FETCHED":
+                self.notok("fetch_tolerates_latency", "fetch failed under latency")
+                return
+            if sh.command("dump_stripe 1 0 64") != self.expected_hex(1, 0, 64):
+                self.notok("fetch_tolerates_latency", "bytes differ under latency")
+                return
+            self.ok("fetch_tolerates_latency")
+        finally:
+            sh.close()
+            self.reset()
+
     CASES = [
         case_baseline_fetch_matches_source,
+        case_fetch_tolerates_latency,
     ]

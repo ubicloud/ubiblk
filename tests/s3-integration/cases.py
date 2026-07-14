@@ -20,12 +20,15 @@ Binaries default to target/debug; override with ARCHIVE_BIN / EXPORT_BIN.
 import json
 import os
 import pathlib
-import random
 import subprocess
+import sys
 import tempfile
 import time
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "common"))
+
 from util import http, r, toml_dump
+from harness import Suite
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BIN_DIR = ROOT / "target" / "debug"
@@ -37,8 +40,9 @@ STRIPE_SIZE = "128K"
 ARCHIVE_KEK = "0123456789abcdef0123456789abcdef"
 
 
-class Cases:
+class Cases(Suite):
     def __init__(self):
+        super().__init__()
         env = os.environ
         self.endpoint = env["S3_INTEGRATION_TESTS_ENDPOINT"]
         self.bucket = env["S3_INTEGRATION_TESTS_BUCKET"]
@@ -49,29 +53,13 @@ class Cases:
         # Work on a real filesystem: the binaries open image files with O_DIRECT,
         # which tmpfs (/tmp on many systems) rejects. target/ is on the repo's fs.
         self.work = pathlib.Path(tempfile.mkdtemp(prefix="s3-it-", dir=str(ROOT / "target")))
-        self.results = []
-        self._n = 0
-
-    # --- reporting -----------------------------------------------------------
-
-    def ok(self, name):
-        print(f"ok   - {name}")
-        self.results.append(True)
-
-    def notok(self, name, detail):
-        print(f"FAIL - {name} ({detail})")
-        self.results.append(False)
-
-    def uid(self, tag):
-        self._n += 1
-        return f"{tag}-{self._n}-{random.randrange(1 << 24)}"
 
     def store_prefix(self, tag):
         return f"{self.prefix}{self.uid(tag)}"
 
     # --- device fixture (built once, reused with a fresh prefix per case) -----
 
-    def make_fixture(self):
+    def setup(self):
         """Reuse the project's own initializer to write config.toml, disk.raw,
         and the metadata, with a random image as the raw stripe source. This
         keeps the device-config format in sync with real usage."""
@@ -265,15 +253,3 @@ class Cases:
         case_latency_round_trips,
         case_get_object_error_fails_export,
     ]
-
-    def run(self):
-        self.make_fixture()
-        for case in self.CASES:
-            try:
-                case(self)
-            except Exception as e:  # a case that raises counts as a failure
-                self.notok(case.__name__, f"raised {type(e).__name__}: {e}")
-        passed = sum(self.results)
-        failed = len(self.results) - passed
-        print(f"\n# {passed} passed, {failed} failed")
-        return 1 if failed else 0

@@ -33,6 +33,7 @@ remote-stripe-shell --server-config <SERVER_CONFIG_TOML>
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
 | `--server-config` | — | yes | Path to the server config TOML |
+| `--reconnect` | — | no | Reconnect automatically, with exponential backoff, if the server connection drops during the session |
 
 **Shell commands:**
 

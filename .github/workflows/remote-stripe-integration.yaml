@@ -1,0 +1,69 @@
+name: Remote-stripe integration
+
+# Stands up a real remote-stripe-server, puts a toxiproxy MITM in front of it,
+# and drives the remote-stripe-shell client through injected faults (latency,
+# connection drops, resets) to check the protocol's robustness. Everything runs
+# on loopback, so no secrets are needed and this runs on every PR (forks too).
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: remote-stripe-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ISA_L_CRYPTO_VERSION: "v2.25.0"
+  TOXIPROXY_VERSION: "v2.12.0"
+
+jobs:
+  remote-stripe-integration:
+    runs-on: ubicloud-standard-4
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y autoconf libtool nasm clang build-essential
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust (registry, git deps, target/)
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Install prebuilt isa-l_crypto
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          archive="isa-l_crypto-${ISA_L_CRYPTO_VERSION}-${arch}.tar.gz"
+          url="https://github.com/ubicloud/ubiblk/releases/download/prebuilt-ci-deps/${archive}"
+          curl -fL -o "${archive}" "${url}"
+          sudo tar -xzf "${archive}" -C /
+
+      - name: Install toxiproxy
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) arch=amd64 ;;
+            aarch64) arch=arm64 ;;
+            *) echo "unsupported arch $(uname -m)"; exit 1 ;;
+          esac
+          url="https://github.com/Shopify/toxiproxy/releases/download/${TOXIPROXY_VERSION}/toxiproxy-server-linux-${arch}"
+          curl -fL -o "$RUNNER_TEMP/bin/toxiproxy-server" --create-dirs "${url}"
+          chmod +x "$RUNNER_TEMP/bin/toxiproxy-server"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Build ubiblk binaries
+        run: cargo build --bin remote-stripe-server --bin remote-stripe-shell
+
+      - name: Run remote-stripe integration tests
+        run: python3 tests/remote-stripe-integration/run_all.py

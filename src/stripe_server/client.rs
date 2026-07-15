@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
 
 use log::{info, warn};
 use ubiblk_macros::error_context;
@@ -211,7 +212,15 @@ pub fn connect_to_stripe_server(
         None
     };
 
-    let stream: DynStream = Box::new(TcpStream::connect(server_addr)?);
+    let tcp =
+        TcpStream::connect_timeout(&server_addr, Duration::from_millis(conf.connect_timeout_ms))?;
+    tcp.set_read_timeout(Some(Duration::from_millis(
+        conf.operation_attempt_timeout_ms,
+    )))?;
+    tcp.set_write_timeout(Some(Duration::from_millis(
+        conf.operation_attempt_timeout_ms,
+    )))?;
+    let stream: DynStream = Box::new(tcp);
     let stream = if let Some(creds) = creds {
         wrap_psk_client_stream(stream, &creds)?
     } else {

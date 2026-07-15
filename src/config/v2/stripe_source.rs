@@ -116,6 +116,8 @@ impl RemoteStripeConfig {
         if let Some(psk) = &self.psk {
             Self::validate_psk_secret(get_resolved_secret(&psk.secret, resolved_secrets)?)?;
         }
+        Self::validate_connect_timeout_ms(&self.connect_timeout_ms)?;
+        Self::validate_operation_attempt_timeout_ms(&self.operation_attempt_timeout_ms)?;
         Ok(())
     }
 
@@ -126,6 +128,27 @@ impl RemoteStripeConfig {
                     "PSK secret must be at least 16 bytes (got {} bytes)",
                     secret.as_bytes().len()
                 ),
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_connect_timeout_ms(connect_timeout_ms: &u64) -> crate::Result<()> {
+        if *connect_timeout_ms == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "Remote connect_timeout_ms must be greater than 0".to_string(),
+            }));
+        }
+        Ok(())
+    }
+
+    fn validate_operation_attempt_timeout_ms(
+        operation_attempt_timeout_ms: &u64,
+    ) -> crate::Result<()> {
+        if *operation_attempt_timeout_ms == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "Remote operation_attempt_timeout_ms must be greater than 0"
+                    .to_string(),
             }));
         }
         Ok(())
@@ -751,6 +774,46 @@ mod tests {
         };
         let result_enabled = config.validate(&danger_zone_enabled, &HashMap::new());
         assert!(result_enabled.is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_0_connect_timeout_ms() {
+        let config = StripeSourceConfig::Remote(RemoteStripeConfig {
+            address: "127.0.0.1:1234".to_string(),
+            psk: None,
+            autofetch: false,
+            connect_timeout_ms: 0,
+            operation_attempt_timeout_ms: 20_000,
+        });
+        let danger_zone = DangerZone {
+            enabled: true,
+            allow_unencrypted_connection: true,
+            ..Default::default()
+        };
+        let result = config.validate(&danger_zone, &HashMap::new());
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("Remote connect_timeout_ms must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_0_operation_attempt_timeout_ms() {
+        let config = StripeSourceConfig::Remote(RemoteStripeConfig {
+            address: "127.0.0.1:1234".to_string(),
+            psk: None,
+            autofetch: false,
+            connect_timeout_ms: 5_000,
+            operation_attempt_timeout_ms: 0,
+        });
+        let danger_zone = DangerZone {
+            enabled: true,
+            allow_unencrypted_connection: true,
+            ..Default::default()
+        };
+        let result = config.validate(&danger_zone, &HashMap::new());
+        assert!(result.is_err());
+        let error_msg = result.err().unwrap().to_string();
+        assert!(error_msg.contains("Remote operation_attempt_timeout_ms must be greater than 0"));
     }
 
     fn valid_s3_secrets() -> HashMap<String, ResolvedSecret> {

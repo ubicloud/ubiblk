@@ -1,4 +1,4 @@
-use std::{net::TcpListener, sync::Arc, thread};
+use std::{net::TcpListener, sync::Arc, thread, time::Duration};
 
 use clap::Parser;
 use log::{error, info};
@@ -69,6 +69,9 @@ fn run(args: Args) -> Result<()> {
     let listener = TcpListener::bind(&listen_config.server.address)?;
     info!("listening on {}", listener.local_addr()?);
 
+    let operation_timeout =
+        Duration::from_millis(listen_config.server.operation_attempt_timeout_ms);
+
     loop {
         let (stream, addr) = listener.accept()?;
         info!("accepted connection from {addr}");
@@ -76,6 +79,8 @@ fn run(args: Args) -> Result<()> {
         let psk = psk.clone();
         thread::spawn(move || {
             let result = (|| -> Result<()> {
+                stream.set_read_timeout(Some(operation_timeout))?;
+                stream.set_write_timeout(Some(operation_timeout))?;
                 let stream: DynStream = Box::new(stream);
                 let stream = if let Some(ref creds) = psk {
                     wrap_psk_server_stream(stream, creds)?

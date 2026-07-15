@@ -110,33 +110,25 @@ impl StripeServerSession {
     fn handle_read_stripe_request(&mut self, stripe_id: u64) -> Result<()> {
         info!("Handling read stripe request for stripe_id: {}", stripe_id);
         if stripe_id >= self.metadata.stripe_count() {
-            self.stream.write_all(&[STATUS_INVALID_STRIPE])?;
-            self.stream.flush()?;
-            return Ok(());
+            return self.reply_status(STATUS_INVALID_STRIPE);
         }
 
-        if self.stripe_not_fetched(stripe_id) {
-            info!(
-                "Stripe {} has not been fetched from source, notifying client",
-                stripe_id
-            );
-            self.stream.write_all(&[STATUS_NOT_FETCHED])?;
-            self.stream.flush()?;
-            return Ok(());
-        }
-
-        if !self.stripe_has_data(stripe_id) {
-            info!("Stripe {} cannot be served, notifying client", stripe_id);
-            self.stream.write_all(&[STATUS_NO_DATA])?;
-            self.stream.flush()?;
-            return Ok(());
-        }
-
-        let stripe_data = self.read_stripe(stripe_id).inspect_err(|_| {
-            if let Err(e) = self.stream.write_all(&[STATUS_SERVER_ERROR]) {
-                error!("Failed to notify client of server error: {}", e);
+        let stripe_data = if self.stripe_not_fetched(stripe_id) {
+            // Not yet copied into the local device: the data still lives in the
+            // source, so serve it straight from there.
+            if self.source.is_none() {
+                info!("Stripe {} not fetched and no source available", stripe_id);
+                return self.reply_status(STATUS_NOT_FETCHED);
             }
-        })?;
+            self.read_stripe_from_source(stripe_id)
+                .inspect_err(|_| self.notify_server_error())?
+        } else if !self.stripe_has_data(stripe_id) {
+            info!("Stripe {} cannot be served, notifying client", stripe_id);
+            return self.reply_status(STATUS_NO_DATA);
+        } else {
+            self.read_stripe(stripe_id)
+                .inspect_err(|_| self.notify_server_error())?
+        };
 
         let stripe_len_bytes = self.metadata.stripe_size();
 
@@ -169,6 +161,27 @@ impl StripeServerSession {
         )?;
 
         Ok(buffer)
+    }
+
+    fn read_stripe_from_source(&mut self, stripe_id: u64) -> Result<SharedBuffer> {
+        let buffer = shared_buffer(self.metadata.stripe_size());
+        let source = self.source.as_mut().expect("caller checked source exists");
+        source.request(stripe_id as usize, buffer.clone())?;
+        source.wait_for_stripe(stripe_id as usize, std::time::Duration::from_secs(30))?;
+        Ok(buffer)
+    }
+
+    /// Reply with a single status byte and no payload.
+    fn reply_status(&mut self, status: u8) -> Result<()> {
+        self.stream.write_all(&[status])?;
+        self.stream.flush()?;
+        Ok(())
+    }
+
+    fn notify_server_error(&mut self) {
+        if let Err(e) = self.stream.write_all(&[STATUS_SERVER_ERROR]) {
+            error!("Failed to notify client of server error: {}", e);
+        }
     }
 }
 
@@ -215,7 +228,7 @@ mod tests {
             read: Cursor::new(input),
             writes: writes.clone(),
         };
-        let server = StripeServer::new(device, metadata);
+        let server = StripeServer::new(device, metadata, None);
         let session = server.start_session(Box::new(stream)).unwrap();
         (session, writes)
     }

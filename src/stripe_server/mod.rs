@@ -5,6 +5,7 @@ use std::{
 
 use crate::{
     block_device::{BlockDevice, IoChannel, UbiMetadata},
+    stripe_source::{StripeSource, StripeSourceBuilder},
     Result,
 };
 
@@ -31,12 +32,17 @@ pub const STATUS_SERVER_ERROR: u8 = 0xFF;
 pub struct StripeServer {
     metadata: Arc<UbiMetadata>,
     stripe_device: Arc<dyn BlockDevice>,
+    // A stripe source builder, so each session can build its own source (the
+    // source is not Send, so it cannot be shared across connection threads).
+    // Used to serve stripes that have a source but have not been fetched yet.
+    source_builder: Option<StripeSourceBuilder>,
 }
 
 pub struct StripeServerSession {
     stream: DynStream,
     metadata: Arc<UbiMetadata>,
     stripe_channel: Box<dyn IoChannel>,
+    source: Option<Box<dyn StripeSource>>,
 }
 
 pub struct StripeServerClient {
@@ -50,19 +56,30 @@ pub trait RemoteStripeProvider {
 }
 
 impl StripeServer {
-    pub fn new(stripe_device: Arc<dyn BlockDevice>, metadata: Arc<UbiMetadata>) -> Self {
+    pub fn new(
+        stripe_device: Arc<dyn BlockDevice>,
+        metadata: Arc<UbiMetadata>,
+        source_builder: Option<StripeSourceBuilder>,
+    ) -> Self {
         Self {
             stripe_device,
             metadata,
+            source_builder,
         }
     }
 
     pub fn start_session(&self, stream: DynStream) -> Result<StripeServerSession> {
         let stripe_channel = self.stripe_device.create_channel()?;
+        let source = self
+            .source_builder
+            .as_ref()
+            .map(StripeSourceBuilder::build)
+            .transpose()?;
         Ok(StripeServerSession {
             stream,
             metadata: self.metadata.clone(),
             stripe_channel,
+            source,
         })
     }
 }

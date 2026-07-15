@@ -260,7 +260,7 @@ mod tests {
         T: Send + 'static,
     {
         let server_device: Arc<dyn BlockDevice> = stripe_device.clone();
-        let server = StripeServer::new(server_device, metadata);
+        let server = StripeServer::new(server_device, metadata, None);
         let (server_stream, client_stream) = UnixStream::pair().unwrap();
         let (sender, receiver) = std::sync::mpsc::channel();
         let server_stream: DynStream = Box::new(server_stream);
@@ -575,5 +575,99 @@ mod tests {
         assert!(result.is_err());
         let error_message = result.err().unwrap().to_string();
         assert!(error_message.contains("Failed to connect to stripe server"));
+    }
+
+    #[test]
+    fn serves_unfetched_source_stripe_from_source() -> Result<()> {
+        use crate::config::v2::stripe_source::StripeSourceConfig;
+        use crate::config::v2::{self, DangerZone, DeviceSection};
+        use crate::stripe_source::StripeSourceBuilder;
+        use std::io::Write as _;
+        use tempfile::NamedTempFile;
+
+        let stripe_count = 4usize;
+        let stripe_size = SECTOR_SIZE; // stripe_sector_count_shift = 0 -> one sector
+
+        // Source holds pattern A; the overlay holds a different pattern B. Every
+        // stripe has a source and is NOT fetched, so it must be served from the
+        // source (A) rather than the overlay (B).
+        let source_file = NamedTempFile::new()?;
+        let overlay_file = NamedTempFile::new()?;
+        let pattern_a: Vec<u8> = (0..stripe_count * stripe_size)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let pattern_b = vec![0xBBu8; stripe_count * stripe_size];
+        source_file.as_file().write_all(&pattern_a)?;
+        overlay_file.as_file().write_all(&pattern_b)?;
+
+        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, stripe_count, stripe_count));
+
+        let config = v2::Config {
+            device: DeviceSection {
+                data_path: overlay_file.path().into(),
+                metadata_path: None,
+                vhost_socket: None,
+                rpc_socket: None,
+                device_id: "ubiblk".to_string(),
+                track_written: false,
+            },
+            tuning: v2::tuning::TuningSection {
+                queue_size: 128,
+                ..Default::default()
+            },
+            encryption: None,
+            danger_zone: DangerZone {
+                enabled: true,
+                allow_unencrypted_disk: true,
+                ..Default::default()
+            },
+            stripe_source: Some(StripeSourceConfig::Raw {
+                image_path: source_file.path().into(),
+                autofetch: false,
+                copy_on_read: false,
+            }),
+            secrets: HashMap::new(),
+        };
+
+        let overlay: Arc<dyn BlockDevice> = Arc::from(crate::backends::build_block_device(
+            overlay_file.path(),
+            &config,
+            false,
+        )?);
+        let builder =
+            StripeSourceBuilder::new(config.clone(), metadata.stripe_sector_count(), false);
+        let server = StripeServer::new(overlay, metadata, Some(builder));
+
+        let (server_stream, client_stream) = UnixStream::pair().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let client_stream: DynStream = Box::new(client_stream);
+        thread::spawn(move || {
+            let mut client = StripeServerClient::new(client_stream);
+            client
+                .fetch_metadata()
+                .expect("metadata fetch should succeed");
+            let data = client
+                .fetch_stripe(0)
+                .expect("unfetched source stripe should be served");
+            tx.send(data).unwrap();
+        });
+
+        let mut session = server
+            .start_session(Box::new(server_stream))
+            .expect("session creation should succeed");
+        session.handle_requests();
+        let served = rx.recv().expect("client thread should return data");
+
+        assert_eq!(
+            served,
+            pattern_a[0..stripe_size],
+            "stripe 0 served from the source"
+        );
+        assert_ne!(
+            served,
+            pattern_b[0..stripe_size],
+            "must not be the overlay's data"
+        );
+        Ok(())
     }
 }

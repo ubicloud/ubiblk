@@ -5,17 +5,9 @@ use crate::{
     block_device::{metadata_flags, UbiMetadata, DEFAULT_STRIPE_SECTOR_COUNT_SHIFT},
     config::v2,
     stripe_server::StripeServer,
+    stripe_source::StripeSourceBuilder,
     Result,
 };
-
-fn error_if_incomplete_metadata(metadata: &UbiMetadata) -> Result<()> {
-    if !metadata.has_fetched_all_stripes() {
-        return Err(crate::ubiblk_error!(InvalidParameter {
-            description: "Not all source stripes have been fetched.".to_string()
-        }));
-    }
-    Ok(())
-}
 
 /// A `track_written = false` device does not record guest writes, so a stripe
 /// with no source may still hold written data that the WRITTEN bit does not
@@ -31,30 +23,48 @@ fn mark_no_source_stripes_written(metadata: &mut UbiMetadata) {
 
 pub fn prepare_stripe_server(config: &v2::Config) -> Result<Arc<StripeServer>> {
     let stripe_device = build_block_device(&config.device.data_path, config, false)?;
-    let metadata: Arc<UbiMetadata> = if let Some(metadata_path) =
-        config.device.metadata_path.as_deref()
-    {
-        let metadata_device = build_block_device(metadata_path, config, false)?;
-        let mut metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
-        error_if_incomplete_metadata(&metadata)?;
-        if !config.device.track_written {
-            mark_no_source_stripes_written(&mut metadata);
-        }
-        Arc::from(metadata)
-    } else {
-        let stripe_sector_count_shift = DEFAULT_STRIPE_SECTOR_COUNT_SHIFT;
-        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
-        let stripe_count = stripe_device.stripe_count(stripe_sector_count);
-        let mut metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count);
-        for stripe_header in metadata.stripe_headers.iter_mut() {
-            *stripe_header |= metadata_flags::WRITTEN | metadata_flags::FETCHED;
-        }
-        Arc::from(metadata)
-    };
+    let (metadata, source_builder): (Arc<UbiMetadata>, Option<StripeSourceBuilder>) =
+        if let Some(metadata_path) = config.device.metadata_path.as_deref() {
+            let metadata_device = build_block_device(metadata_path, config, false)?;
+            let mut metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
+            let all_fetched = metadata.has_fetched_all_stripes();
+            // Unfetched source stripes are served from the stripe source, so one
+            // must be configured when the device is not fully fetched; otherwise
+            // reads of those stripes would fail at request time.
+            if !all_fetched && config.stripe_source.is_none() {
+                return Err(crate::ubiblk_error!(InvalidParameter {
+                    description:
+                        "device has unfetched source stripes but no stripe_source is configured"
+                            .to_string(),
+                }));
+            }
+            // The builder yields a null source when everything is already
+            // fetched; otherwise it builds the configured source.
+            let source_builder = StripeSourceBuilder::new(
+                config.clone(),
+                metadata.stripe_sector_count(),
+                all_fetched,
+            );
+            if !config.device.track_written {
+                mark_no_source_stripes_written(&mut metadata);
+            }
+            (Arc::from(metadata), Some(source_builder))
+        } else {
+            let stripe_sector_count_shift = DEFAULT_STRIPE_SECTOR_COUNT_SHIFT;
+            let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+            let stripe_count = stripe_device.stripe_count(stripe_sector_count);
+            let mut metadata =
+                UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count);
+            for stripe_header in metadata.stripe_headers.iter_mut() {
+                *stripe_header |= metadata_flags::WRITTEN | metadata_flags::FETCHED;
+            }
+            (Arc::from(metadata), None)
+        };
 
     Ok(Arc::new(StripeServer::new(
         Arc::from(stripe_device),
         metadata,
+        source_builder,
     )))
 }
 
@@ -198,7 +208,7 @@ mod tests {
             stripe_count,
             image_stripe_count,
         );
-        // Fetch the source stripes so error_if_incomplete_metadata passes.
+        // The source stripes are already fetched (their data is in the overlay).
         for i in 0..image_stripe_count {
             metadata.stripe_headers[i] |= metadata_flags::FETCHED;
         }
@@ -240,16 +250,34 @@ mod tests {
     }
 
     #[test]
-    fn test_error_if_incomplete_metadata() {
-        let mut metadata = UbiMetadata::new(DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, 16, 4);
+    fn test_prepare_rejects_unfetched_without_source() -> Result<()> {
+        let stripe_count = 8usize;
+        let storage_file = NamedTempFile::new()?;
+        let metadata_file = NamedTempFile::new()?;
+        storage_file
+            .as_file()
+            .set_len(stripe_count as u64 * STRIPE_SIZE)?;
 
-        for i in 0..4 {
-            let result = error_if_incomplete_metadata(&metadata);
-            assert!(result.is_err());
-            metadata.stripe_headers[i] |= metadata_flags::FETCHED;
-        }
+        // One source stripe that has NOT been fetched, and (via the config
+        // helper) no stripe_source configured to serve it from.
+        let metadata = UbiMetadata::new(DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, stripe_count, 1);
+        metadata_file.as_file().set_len(4 * 1024 * 1024)?;
+        let mut buf = vec![0u8; metadata.metadata_size()];
+        metadata.write_to_buf(&mut buf)?;
+        metadata_file.as_file().write_all(&buf)?;
 
-        let result = error_if_incomplete_metadata(&metadata);
-        assert!(result.is_ok());
+        let config = config(
+            storage_file.path().to_str().unwrap().to_string(),
+            Some(metadata_file.path().to_str().unwrap().to_string()),
+            false,
+        );
+        let result = prepare_stripe_server(&config);
+        assert!(
+            result.is_err(),
+            "unfetched source stripes with no stripe_source must be rejected"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("no stripe_source is configured"), "{err}");
+        Ok(())
     }
 }

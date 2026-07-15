@@ -26,7 +26,13 @@ pub fn prepare_stripe_server(config: &v2::Config) -> Result<Arc<StripeServer>> {
     let (metadata, source_builder): (Arc<UbiMetadata>, Option<StripeSourceBuilder>) =
         if let Some(metadata_path) = config.device.metadata_path.as_deref() {
             let metadata_device = build_block_device(metadata_path, config, false)?;
-            let mut metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
+            // Accept legacy v0.2.x metadata too, so those volumes can be served
+            // for migration onto the current format. v0.2.x derives the stripe
+            // count from the data device (not the metadata file), so pass it in.
+            let mut metadata = crate::stripe_server::legacy::load_metadata_for_serving(
+                metadata_device.as_ref(),
+                stripe_device.sector_count(),
+            )?;
             let all_fetched = metadata.has_fetched_all_stripes();
             // Unfetched source stripes are served from the stripe source, so one
             // must be configured when the device is not fully fetched; otherwise

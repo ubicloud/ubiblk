@@ -10,7 +10,7 @@ use crate::{
         secrets::{get_resolved_secret, ResolvedSecret, SecretRef},
         stripe_source::ArchiveStorageConfig,
     },
-    stripe_server::connect_to_stripe_server,
+    stripe_server::connect_reconnecting_stripe_client,
     utils::s3::{build_s3_client, create_runtime, RateLimitedRetry, S3ClientTuning},
     CipherMethod, KeyEncryptionCipher, Result,
 };
@@ -58,7 +58,8 @@ impl StripeSourceBuilder {
                     return Ok(Box::new(stripe_source));
                 }
                 v2::stripe_source::StripeSourceConfig::Remote(config) => {
-                    let client = connect_to_stripe_server(config, &self.device_config.secrets)?;
+                    let client =
+                        connect_reconnecting_stripe_client(config, &self.device_config.secrets)?;
                     let stripe_source =
                         RemoteStripeSource::new(Box::new(client), self.stripe_sector_count)?;
                     return Ok(Box::new(stripe_source));

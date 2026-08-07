@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use log::info;
 use ubiblk_macros::error_context;
 
@@ -62,15 +64,21 @@ impl StripeSourceBuilder {
                     // honor it as-is so a misconfiguration surfaces rather than
                     // being silently coerced.
                     let connections = config.connections;
+                    // A factory that dials a fresh connection; reused both for
+                    // the initial pool and for a worker to reconnect on failure.
+                    let config = config.clone();
+                    let secrets = self.device_config.secrets.clone();
+                    let connect: Arc<ConnectFn> = Arc::new(move || {
+                        connect_to_stripe_server(&config, &secrets)
+                            .map(|client| Box::new(client) as Box<dyn RemoteStripeProvider + Send>)
+                    });
                     let mut clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
                         Vec::with_capacity(connections);
                     for _ in 0..connections {
-                        clients.push(Box::new(connect_to_stripe_server(
-                            config,
-                            &self.device_config.secrets,
-                        )?));
+                        clients.push(connect()?);
                     }
-                    let stripe_source = RemoteStripeSource::new(clients, self.stripe_sector_count)?;
+                    let stripe_source =
+                        RemoteStripeSource::new(clients, connect, self.stripe_sector_count)?;
                     return Ok(Box::new(stripe_source));
                 }
                 v2::stripe_source::StripeSourceConfig::Raw { .. } => {}

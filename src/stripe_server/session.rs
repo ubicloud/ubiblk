@@ -11,27 +11,31 @@ use super::*;
 
 impl StripeServerSession {
     pub fn handle_requests(&mut self) {
-        let mut done = false;
-        while !done {
-            if let Err(e) = self.handle_single_request() {
-                match e {
-                    UbiblkError::IoError { source, .. } => {
-                        let kind = source.kind();
-                        if kind == ErrorKind::UnexpectedEof || kind == ErrorKind::ConnectionReset {
-                            info!("Connection closed by peer");
-                            done = true;
-                            continue;
-                        } else {
-                            error!("I/O error: {}", source);
-                            continue;
-                        }
-                    }
-                    _ => {
-                        error!("Error handling request: {}", e);
-                        continue;
-                    }
+        loop {
+            let Err(e) = self.handle_single_request() else {
+                continue;
+            };
+            // The protocol is length-prefixed, so after any error the stream is
+            // in an unknown state: a partially read/written message desyncs every
+            // subsequent request, and retrying a failing read just busy-loops.
+            // Tear the session down so the client reconnects onto a fresh one.
+            match &e {
+                UbiblkError::IoError { source, .. }
+                    if matches!(
+                        source.kind(),
+                        ErrorKind::UnexpectedEof | ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    info!("Connection closed by peer");
                 }
+                UbiblkError::IoError { source, .. }
+                    if matches!(source.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    info!("Closing idle connection after read/write timeout");
+                }
+                _ => error!("Terminating stripe session after error: {e}"),
             }
+            return;
         }
     }
 
@@ -346,5 +350,36 @@ mod tests {
         session.handle_single_request().unwrap();
 
         assert_eq!(*writes.lock().unwrap(), vec![STATUS_INVALID_COMMAND]);
+    }
+
+    /// A stream whose reads always fail with a non-EOF error, to prove
+    /// `handle_requests` tears the session down instead of spinning forever.
+    struct AlwaysErrorStream;
+
+    impl Read for AlwaysErrorStream {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("persistent read error"))
+        }
+    }
+
+    impl Write for AlwaysErrorStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn handle_requests_terminates_on_persistent_error() {
+        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, 1, 0));
+        let device = Arc::new(TestBlockDevice::new(SECTOR_SIZE as u64));
+        let server = StripeServer::new(device, metadata, None);
+        let mut session = server.start_session(Box::new(AlwaysErrorStream)).unwrap();
+
+        // Returns rather than looping on the broken stream (would hang otherwise).
+        session.handle_requests();
     }
 }

@@ -96,7 +96,23 @@ impl RemoteStripeSource {
                 .name(format!("remote-fetch-{i}"))
                 .spawn(move || {
                     while let Ok(stripe_id) = rx.recv() {
-                        let result = client.fetch_stripe(stripe_id as u64);
+                        // A panic in `fetch_stripe` must not silently orphan the
+                        // stripe: it would sit in `pending` forever, so the
+                        // source would report `busy()` indefinitely and the
+                        // fetcher would never retry it (retries only happen off a
+                        // `poll()` completion). Convert a panic into a failed
+                        // fetch so the stripe is retried like any other error,
+                        // and keep the worker (and its connection) alive.
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            || client.fetch_stripe(stripe_id as u64),
+                        ))
+                        .unwrap_or_else(|_| {
+                            Err(crate::ubiblk_error!(IoError {
+                                source: std::io::Error::other(format!(
+                                    "remote stripe fetch worker panicked fetching stripe {stripe_id}"
+                                )),
+                            }))
+                        });
                         if tx.send((stripe_id, result)).is_err() {
                             break;
                         }
@@ -373,6 +389,49 @@ mod tests {
         source.request(2, buffer).unwrap();
         assert!(source.busy());
         let _ = poll_until(&mut source, 1);
+        assert!(!source.busy());
+    }
+
+    /// A provider that panics on a chosen stripe id and otherwise succeeds.
+    struct PanickingProvider {
+        metadata: Box<UbiMetadata>,
+        panic_on: u64,
+    }
+
+    impl RemoteStripeProvider for PanickingProvider {
+        fn fetch_stripe(&mut self, stripe_id: u64) -> Result<Vec<u8>> {
+            if stripe_id == self.panic_on {
+                panic!("simulated worker panic while fetching stripe {stripe_id}");
+            }
+            Ok(vec![stripe_id as u8; STRIPE_SIZE])
+        }
+
+        fn get_metadata(&self) -> Option<&UbiMetadata> {
+            Some(&self.metadata)
+        }
+    }
+
+    #[test]
+    fn test_worker_panic_fails_stripe_without_stalling() {
+        let metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, TOTAL_STRIPES, 0);
+        let clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
+            vec![Box::new(PanickingProvider {
+                metadata,
+                panic_on: 2,
+            })];
+        let mut source = RemoteStripeSource::new(clients, STRIPE_SECTORS as u64).unwrap();
+
+        // The panicking fetch is reported as a failure, not swallowed...
+        source.request(2, shared_buffer(STRIPE_SIZE)).unwrap();
+        let completions = poll_until(&mut source, 1);
+        assert_eq!(completions, vec![(2, false)]);
+        // ...and it does not leave the source permanently busy.
+        assert!(!source.busy());
+
+        // The worker survived the panic and still serves later requests.
+        source.request(4, shared_buffer(STRIPE_SIZE)).unwrap();
+        let completions = poll_until(&mut source, 1);
+        assert_eq!(completions, vec![(4, true)]);
         assert!(!source.busy());
     }
 

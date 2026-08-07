@@ -97,6 +97,10 @@ pub struct RemoteStripeConfig {
     pub connect_timeout_ms: u64,
     #[serde(default = "default_operation_attempt_timeout_ms")]
     pub operation_attempt_timeout_ms: u64,
+    /// Number of parallel connections used to fetch stripes. Each connection can
+    /// only have one fetch in flight at a time, so this bounds fetch throughput.
+    #[serde(default = "default_connections")]
+    pub connections: usize,
 }
 
 impl RemoteStripeConfig {
@@ -118,6 +122,16 @@ impl RemoteStripeConfig {
         }
         Self::validate_connect_timeout_ms(&self.connect_timeout_ms)?;
         Self::validate_operation_attempt_timeout_ms(&self.operation_attempt_timeout_ms)?;
+        Self::validate_connections(self.connections)?;
+        Ok(())
+    }
+
+    fn validate_connections(connections: usize) -> crate::Result<()> {
+        if connections == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "Remote connections must be greater than 0".to_string(),
+            }));
+        }
         Ok(())
     }
 
@@ -572,6 +586,7 @@ mod tests {
                 autofetch: false,
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
+                connections: 16,
             })
         );
     }
@@ -596,6 +611,7 @@ mod tests {
                 autofetch: false,
                 connect_timeout_ms: 5_000,
                 operation_attempt_timeout_ms: 20_000,
+                connections: 16,
             })
         );
     }
@@ -757,6 +773,7 @@ mod tests {
             autofetch: false,
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 20_000,
+            connections: 1,
         });
         let danger_zone = DangerZone {
             enabled: false,
@@ -784,6 +801,7 @@ mod tests {
             autofetch: false,
             connect_timeout_ms: 0,
             operation_attempt_timeout_ms: 20_000,
+            connections: 1,
         });
         let danger_zone = DangerZone {
             enabled: true,
@@ -804,6 +822,7 @@ mod tests {
             autofetch: false,
             connect_timeout_ms: 5_000,
             operation_attempt_timeout_ms: 0,
+            connections: 1,
         });
         let danger_zone = DangerZone {
             enabled: true,

@@ -7,7 +7,7 @@ use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{error, info, warn};
 
 use crate::{
-    block_device::{metadata_flags, SharedBuffer},
+    block_device::{metadata_flags, SharedBuffer, UbiMetadata},
     stripe_server::RemoteStripeProvider,
     Result, UbiblkError,
 };
@@ -16,6 +16,24 @@ use super::StripeSource;
 
 /// Result of a worker fetch: the stripe id and either its bytes or the error.
 type FetchOutcome = (usize, Result<Vec<u8>>);
+
+/// The stripe geometry a reconnect must preserve. If a worker reconnects and
+/// the server now reports a different geometry (e.g. the address was
+/// repointed at another image), we must not serve its bytes for our stripes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MetadataFingerprint {
+    stripe_sector_count: u64,
+    stripe_count: usize,
+}
+
+impl MetadataFingerprint {
+    fn of(metadata: &UbiMetadata) -> Self {
+        Self {
+            stripe_sector_count: metadata.stripe_sector_count(),
+            stripe_count: metadata.stripe_headers.len(),
+        }
+    }
+}
 
 /// Dials a fresh connection to the remote stripe server. A worker calls this to
 /// reconnect after its own connection drops.
@@ -40,6 +58,7 @@ fn is_connection_error(err: &UbiblkError) -> bool {
 fn fetch_with_reconnect(
     client: &mut Box<dyn RemoteStripeProvider + Send>,
     connect: &ConnectFn,
+    expected: MetadataFingerprint,
     stripe_id: usize,
 ) -> Result<Vec<u8>> {
     let mut delay = RECONNECT_INITIAL_BACKOFF;
@@ -56,7 +75,19 @@ fn fetch_with_reconnect(
                 "reconnecting to remote stripe server (attempt {attempt}/{RECONNECT_MAX_ATTEMPTS})"
             );
             match connect() {
-                Ok(fresh) => *client = fresh,
+                // Only accept the reconnected client if it serves the same
+                // stripe geometry; otherwise fail permanently rather than serve
+                // another image's bytes for our stripes.
+                Ok(fresh)
+                    if fresh.get_metadata().map(MetadataFingerprint::of) == Some(expected) =>
+                {
+                    *client = fresh;
+                }
+                Ok(_) => {
+                    return Err(crate::ubiblk_error!(MetadataError {
+                        description: "stripe server metadata changed across reconnect".to_string(),
+                    }));
+                }
                 Err(e) => {
                     last_err = Some(e);
                     continue;
@@ -163,6 +194,10 @@ impl RemoteStripeSource {
             })?;
 
         let connection_count = clients.len();
+        let expected_fingerprint = MetadataFingerprint {
+            stripe_sector_count: remote_stripe_sector_count,
+            stripe_count: remote_headers.len(),
+        };
         let (request_tx, request_rx) = unbounded::<usize>();
         let (result_tx, result_rx) = unbounded::<FetchOutcome>();
 
@@ -174,7 +209,12 @@ impl RemoteStripeSource {
                 .name(format!("remote-fetch-{i}"))
                 .spawn(move || {
                     while let Ok(stripe_id) = rx.recv() {
-                        let result = fetch_with_reconnect(&mut client, connect.as_ref(), stripe_id);
+                        let result = fetch_with_reconnect(
+                            &mut client,
+                            connect.as_ref(),
+                            expected_fingerprint,
+                            stripe_id,
+                        );
                         if tx.send((stripe_id, result)).is_err() {
                             break;
                         }
@@ -638,5 +678,23 @@ mod tests {
             !reconnected.load(Ordering::SeqCst),
             "must not reconnect on a data error"
         );
+    }
+
+    #[test]
+    fn test_rejects_reconnect_with_changed_metadata() {
+        // The initial connection fails (triggering a reconnect), but the
+        // reconnected server reports a different stripe geometry. The fetch must
+        // fail permanently rather than serve another image's bytes.
+        let clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
+            vec![Box::new(DroppedConnectionProvider::new())];
+        let connect: Arc<ConnectFn> = Arc::new(|| {
+            Ok(Box::new(MockRemoteStripeProvider::new_with_bad_metadata())
+                as Box<dyn RemoteStripeProvider + Send>)
+        });
+        let mut source = RemoteStripeSource::new(clients, connect, STRIPE_SECTORS as u64).unwrap();
+
+        source.request(2, shared_buffer(STRIPE_SIZE)).unwrap();
+        let completions = poll_until(&mut source, 1);
+        assert_eq!(completions, vec![(2, false)]);
     }
 }

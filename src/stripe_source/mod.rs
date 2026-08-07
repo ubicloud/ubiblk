@@ -24,4 +24,4 @@ pub use archive::ArchiveStripeSource;
 pub use bdev::BlockDeviceStripeSource;
 pub use builder::StripeSourceBuilder;
 pub use flaky::FlakyStripeSource;
-pub use remote::RemoteStripeSource;
+pub use remote::{ConnectFn, RemoteStripeSource};

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{error, info, warn};
@@ -7,13 +9,86 @@ use log::{error, info, warn};
 use crate::{
     block_device::{metadata_flags, SharedBuffer},
     stripe_server::RemoteStripeProvider,
-    Result,
+    Result, UbiblkError,
 };
 
 use super::StripeSource;
 
 /// Result of a worker fetch: the stripe id and either its bytes or the error.
 type FetchOutcome = (usize, Result<Vec<u8>>);
+
+/// Dials a fresh connection to the remote stripe server. A worker calls this to
+/// reconnect after its own connection drops.
+pub type ConnectFn = dyn Fn() -> Result<Box<dyn RemoteStripeProvider + Send>> + Send + Sync;
+
+/// Exponential-backoff schedule for reconnecting a dropped worker connection.
+const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+const RECONNECT_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const RECONNECT_MAX_ATTEMPTS: u32 = 10;
+
+/// Only a transport failure (dropped/reset/timed-out connection) is worth
+/// reconnecting for. Data and protocol errors (missing stripe, bad metadata,
+/// size mismatch, …) are not transient and fail the stripe immediately.
+fn is_connection_error(err: &UbiblkError) -> bool {
+    matches!(err, UbiblkError::IoError { .. })
+}
+
+/// Fetch a stripe over `client`, re-dialing through `connect` on a transport
+/// error. A panic or a non-transport error fails the stripe right away; a
+/// connection error triggers a bounded exponential-backoff reconnect and retry.
+/// The first reconnect happens immediately; only subsequent ones back off.
+fn fetch_with_reconnect(
+    client: &mut Box<dyn RemoteStripeProvider + Send>,
+    connect: &ConnectFn,
+    stripe_id: usize,
+) -> Result<Vec<u8>> {
+    let mut delay = RECONNECT_INITIAL_BACKOFF;
+    let mut last_err: Option<UbiblkError> = None;
+
+    // attempt 0 uses the current connection; attempts 1..=MAX reconnect first.
+    for attempt in 0..=RECONNECT_MAX_ATTEMPTS {
+        if attempt > 0 {
+            if attempt > 1 {
+                thread::sleep(delay);
+                delay = (delay * 2).min(RECONNECT_MAX_BACKOFF);
+            }
+            warn!(
+                "reconnecting to remote stripe server (attempt {attempt}/{RECONNECT_MAX_ATTEMPTS})"
+            );
+            match connect() {
+                Ok(fresh) => *client = fresh,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            }
+        }
+
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.fetch_stripe(stripe_id as u64)
+        })) {
+            Ok(Ok(data)) => return Ok(data),
+            // A non-transport error is permanent: fail without reconnecting.
+            Ok(Err(e)) if !is_connection_error(&e) => return Err(e),
+            Ok(Err(e)) => last_err = Some(e),
+            // A panic is a bug, not a transient fault: fail the stripe rather
+            // than orphaning it, and do not spin reconnecting.
+            Err(_) => {
+                return Err(crate::ubiblk_error!(IoError {
+                    source: std::io::Error::other(format!(
+                        "remote stripe fetch worker panicked fetching stripe {stripe_id}"
+                    )),
+                }));
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        crate::ubiblk_error!(IoError {
+            source: std::io::Error::other("remote stripe fetch failed without a recorded error"),
+        })
+    }))
+}
 
 /// A stripe source backed by one or more connections to a remote stripe server.
 ///
@@ -39,9 +114,11 @@ pub struct RemoteStripeSource {
 impl RemoteStripeSource {
     /// Build a source from a non-empty pool of pre-connected clients. Each
     /// client becomes a worker thread; more clients means more fetches in
-    /// flight and higher aggregate throughput.
+    /// flight and higher aggregate throughput. `connect` re-dials the server so
+    /// a worker can recover its own connection if it drops mid-transfer.
     pub fn new(
         clients: Vec<Box<dyn RemoteStripeProvider + Send>>,
+        connect: Arc<ConnectFn>,
         stripe_sector_count: u64,
     ) -> Result<Self> {
         if clients.is_empty() {
@@ -92,27 +169,12 @@ impl RemoteStripeSource {
         for (i, mut client) in clients.into_iter().enumerate() {
             let rx: Receiver<usize> = request_rx.clone();
             let tx: Sender<FetchOutcome> = result_tx.clone();
+            let connect = Arc::clone(&connect);
             thread::Builder::new()
                 .name(format!("remote-fetch-{i}"))
                 .spawn(move || {
                     while let Ok(stripe_id) = rx.recv() {
-                        // A panic in `fetch_stripe` must not silently orphan the
-                        // stripe: it would sit in `pending` forever, so the
-                        // source would report `busy()` indefinitely and the
-                        // fetcher would never retry it (retries only happen off a
-                        // `poll()` completion). Convert a panic into a failed
-                        // fetch so the stripe is retried like any other error,
-                        // and keep the worker (and its connection) alive.
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                            || client.fetch_stripe(stripe_id as u64),
-                        ))
-                        .unwrap_or_else(|_| {
-                            Err(crate::ubiblk_error!(IoError {
-                                source: std::io::Error::other(format!(
-                                    "remote stripe fetch worker panicked fetching stripe {stripe_id}"
-                                )),
-                            }))
-                        });
+                        let result = fetch_with_reconnect(&mut client, connect.as_ref(), stripe_id);
                         if tx.send((stripe_id, result)).is_err() {
                             break;
                         }
@@ -253,8 +315,9 @@ mod tests {
     impl RemoteStripeProvider for MockRemoteStripeProvider {
         fn fetch_stripe(&mut self, stripe_id: u64) -> Result<Vec<u8>> {
             if stripe_id % 2 == 1 {
-                return Err(crate::ubiblk_error!(IoError {
-                    source: std::io::Error::other("simulated fetch error"),
+                // A non-transport (data) error: fails the stripe, no reconnect.
+                return Err(crate::ubiblk_error!(StripeUnavailableData {
+                    stripe: stripe_id
                 }));
             }
             Ok(vec![stripe_id as u8; STRIPE_SIZE])
@@ -263,6 +326,15 @@ mod tests {
         fn get_metadata(&self) -> Option<&UbiMetadata> {
             Some(&self.metadata)
         }
+    }
+
+    /// A reconnect factory that always dials a fresh, healthy mock connection.
+    /// Existing tests never fault, so this is only exercised by the reconnect
+    /// tests below.
+    fn mock_connect() -> Arc<ConnectFn> {
+        Arc::new(|| {
+            Ok(Box::new(MockRemoteStripeProvider::new()) as Box<dyn RemoteStripeProvider + Send>)
+        })
     }
 
     /// Poll until `expected` completions have been collected or we give up.
@@ -284,7 +356,7 @@ mod tests {
                 Box::new(MockRemoteStripeProvider::new()) as Box<dyn RemoteStripeProvider + Send>
             })
             .collect();
-        RemoteStripeSource::new(clients, STRIPE_SECTORS as u64).unwrap()
+        RemoteStripeSource::new(clients, mock_connect(), STRIPE_SECTORS as u64).unwrap()
     }
 
     fn prep() -> RemoteStripeSource {
@@ -333,14 +405,14 @@ mod tests {
     fn test_invalid_metadata() {
         let clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
             vec![Box::new(MockRemoteStripeProvider::new_with_bad_metadata())];
-        let result = RemoteStripeSource::new(clients, STRIPE_SECTORS as u64);
+        let result = RemoteStripeSource::new(clients, mock_connect(), STRIPE_SECTORS as u64);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_no_connections_is_error() {
         let clients: Vec<Box<dyn RemoteStripeProvider + Send>> = Vec::new();
-        let result = RemoteStripeSource::new(clients, STRIPE_SECTORS as u64);
+        let result = RemoteStripeSource::new(clients, mock_connect(), STRIPE_SECTORS as u64);
         let err = result.err().expect("empty client pool must error");
         assert!(
             err.to_string().contains("at least one connection"),
@@ -419,7 +491,8 @@ mod tests {
                 metadata,
                 panic_on: 2,
             })];
-        let mut source = RemoteStripeSource::new(clients, STRIPE_SECTORS as u64).unwrap();
+        let mut source =
+            RemoteStripeSource::new(clients, mock_connect(), STRIPE_SECTORS as u64).unwrap();
 
         // The panicking fetch is reported as a failure, not swallowed...
         source.request(2, shared_buffer(STRIPE_SIZE)).unwrap();
@@ -476,7 +549,8 @@ mod tests {
                 }) as Box<dyn RemoteStripeProvider + Send>
             })
             .collect();
-        let mut source = RemoteStripeSource::new(clients, STRIPE_SECTORS as u64).unwrap();
+        let mut source =
+            RemoteStripeSource::new(clients, mock_connect(), STRIPE_SECTORS as u64).unwrap();
 
         let requested = 8;
         for stripe_id in 0..requested {
@@ -494,6 +568,75 @@ mod tests {
             max_in_flight.load(Ordering::SeqCst) > 1,
             "expected concurrent fetches across connections, saw max {}",
             max_in_flight.load(Ordering::SeqCst)
+        );
+    }
+
+    /// A provider whose fetches always fail with a transport (I/O) error, as if
+    /// its connection had dropped. Still serves metadata so the source builds.
+    struct DroppedConnectionProvider {
+        metadata: Box<UbiMetadata>,
+    }
+
+    impl DroppedConnectionProvider {
+        fn new() -> Self {
+            Self {
+                metadata: UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, TOTAL_STRIPES, 0),
+            }
+        }
+    }
+
+    impl RemoteStripeProvider for DroppedConnectionProvider {
+        fn fetch_stripe(&mut self, _stripe_id: u64) -> Result<Vec<u8>> {
+            Err(crate::ubiblk_error!(IoError {
+                source: std::io::Error::other("connection dropped"),
+            }))
+        }
+
+        fn get_metadata(&self) -> Option<&UbiMetadata> {
+            Some(&self.metadata)
+        }
+    }
+
+    #[test]
+    fn test_reconnects_after_transport_error() {
+        // The initial connection fails every fetch with a transport error;
+        // reconnecting yields a healthy connection, so the stripe still
+        // completes. (Recovery on the first reconnect, so no backoff sleep.)
+        let clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
+            vec![Box::new(DroppedConnectionProvider::new())];
+        let mut source =
+            RemoteStripeSource::new(clients, mock_connect(), STRIPE_SECTORS as u64).unwrap();
+
+        source.request(2, shared_buffer(STRIPE_SIZE)).unwrap();
+        let completions = poll_until(&mut source, 1);
+        assert_eq!(completions, vec![(2, true)]);
+        assert!(!source.busy());
+    }
+
+    #[test]
+    fn test_no_reconnect_on_non_transport_error() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // A non-transport (data) error must fail the stripe without ever
+        // touching the reconnect factory.
+        let reconnected = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&reconnected);
+        let connect: Arc<ConnectFn> = Arc::new(move || {
+            flag.store(true, Ordering::SeqCst);
+            Ok(Box::new(MockRemoteStripeProvider::new()) as Box<dyn RemoteStripeProvider + Send>)
+        });
+
+        let clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
+            vec![Box::new(MockRemoteStripeProvider::new())];
+        let mut source = RemoteStripeSource::new(clients, connect, STRIPE_SECTORS as u64).unwrap();
+
+        // Stripe 1 is odd -> the mock returns StripeUnavailableData (non-transport).
+        source.request(1, shared_buffer(STRIPE_SIZE)).unwrap();
+        let completions = poll_until(&mut source, 1);
+        assert_eq!(completions, vec![(1, false)]);
+        assert!(
+            !reconnected.load(Ordering::SeqCst),
+            "must not reconnect on a data error"
         );
     }
 }

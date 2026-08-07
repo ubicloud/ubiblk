@@ -10,7 +10,7 @@ use crate::{
         secrets::{get_resolved_secret, ResolvedSecret, SecretRef},
         stripe_source::ArchiveStorageConfig,
     },
-    stripe_server::connect_to_stripe_server,
+    stripe_server::{connect_to_stripe_server, RemoteStripeProvider},
     utils::s3::{build_s3_client, create_runtime, RateLimitedRetry, S3ClientTuning},
     CipherMethod, KeyEncryptionCipher, Result,
 };
@@ -58,9 +58,19 @@ impl StripeSourceBuilder {
                     return Ok(Box::new(stripe_source));
                 }
                 v2::stripe_source::StripeSourceConfig::Remote(config) => {
-                    let client = connect_to_stripe_server(config, &self.device_config.secrets)?;
-                    let stripe_source =
-                        RemoteStripeSource::new(Box::new(client), self.stripe_sector_count)?;
+                    // `connections` is validated (> 0) when the config is loaded;
+                    // honor it as-is so a misconfiguration surfaces rather than
+                    // being silently coerced.
+                    let connections = config.connections;
+                    let mut clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
+                        Vec::with_capacity(connections);
+                    for _ in 0..connections {
+                        clients.push(Box::new(connect_to_stripe_server(
+                            config,
+                            &self.device_config.secrets,
+                        )?));
+                    }
+                    let stripe_source = RemoteStripeSource::new(clients, self.stripe_sector_count)?;
                     return Ok(Box::new(stripe_source));
                 }
                 v2::stripe_source::StripeSourceConfig::Raw { .. } => {}

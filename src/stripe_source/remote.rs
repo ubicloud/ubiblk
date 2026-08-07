@@ -1,5 +1,7 @@
-use std::collections::VecDeque;
+use std::collections::HashMap;
+use std::thread;
 
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use log::{error, info, warn};
 
 use crate::{
@@ -10,20 +12,52 @@ use crate::{
 
 use super::StripeSource;
 
+/// Result of a worker fetch: the stripe id and either its bytes or the error.
+type FetchOutcome = (usize, Result<Vec<u8>>);
+
+/// A stripe source backed by one or more connections to a remote stripe server.
+///
+/// Fetching a stripe over a single connection is a synchronous request/response
+/// round-trip, so a single connection can only ever have one fetch in flight —
+/// which caps throughput at one stripe per round-trip regardless of how many
+/// fetches the `StripeFetcher` has queued. To use the available bandwidth we
+/// spread requests across a pool of worker threads, each owning its own
+/// connection (mirroring how the S3-backed `ArchiveStripeSource` uses a pool of
+/// S3 workers). Requests are dispatched to whichever worker is free and
+/// completions come back out of order, matched up by stripe id. The workers
+/// only produce raw bytes (`SharedBuffer` is `!Send`); the copy into the
+/// caller's buffer happens on `poll`. Dropping the source drops `request_tx`,
+/// which makes the workers' `recv` return and the threads exit on their own.
 pub struct RemoteStripeSource {
-    client: Box<dyn RemoteStripeProvider>,
     source_sector_count: u64,
-    pending_requests: VecDeque<(usize, SharedBuffer)>,
     remote_headers: Vec<u8>,
+    request_tx: Sender<usize>,
+    result_rx: Receiver<FetchOutcome>,
+    pending: HashMap<usize, SharedBuffer>,
 }
 
 impl RemoteStripeSource {
-    pub fn new(client: Box<dyn RemoteStripeProvider>, stripe_sector_count: u64) -> Result<Self> {
-        let metadata = client.get_metadata().ok_or_else(|| {
-            crate::ubiblk_error!(MetadataError {
-                description: "metadata not fetched from remote server".to_string(),
-            })
-        })?;
+    /// Build a source from a non-empty pool of pre-connected clients. Each
+    /// client becomes a worker thread; more clients means more fetches in
+    /// flight and higher aggregate throughput.
+    pub fn new(
+        clients: Vec<Box<dyn RemoteStripeProvider + Send>>,
+        stripe_sector_count: u64,
+    ) -> Result<Self> {
+        if clients.is_empty() {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "remote stripe source requires at least one connection".to_string(),
+            }));
+        }
+
+        let metadata = clients
+            .first()
+            .and_then(|client| client.get_metadata())
+            .ok_or_else(|| {
+                crate::ubiblk_error!(MetadataError {
+                    description: "metadata not fetched from remote server".to_string(),
+                })
+            })?;
         let remote_headers = metadata.stripe_headers.clone();
 
         let remote_stripe_sector_count = metadata.stripe_sector_count();
@@ -51,74 +85,107 @@ impl RemoteStripeSource {
                 })
             })?;
 
+        let connection_count = clients.len();
+        let (request_tx, request_rx) = unbounded::<usize>();
+        let (result_tx, result_rx) = unbounded::<FetchOutcome>();
+
+        for (i, mut client) in clients.into_iter().enumerate() {
+            let rx: Receiver<usize> = request_rx.clone();
+            let tx: Sender<FetchOutcome> = result_tx.clone();
+            thread::Builder::new()
+                .name(format!("remote-fetch-{i}"))
+                .spawn(move || {
+                    while let Ok(stripe_id) = rx.recv() {
+                        let result = client.fetch_stripe(stripe_id as u64);
+                        if tx.send((stripe_id, result)).is_err() {
+                            break;
+                        }
+                    }
+                })?;
+        }
+
+        info!("RemoteStripeSource started with {connection_count} fetch connection(s)");
+
         Ok(Self {
-            client,
             source_sector_count,
-            pending_requests: VecDeque::new(),
             remote_headers,
+            request_tx,
+            result_rx,
+            pending: HashMap::new(),
         })
     }
-}
 
-impl Drop for RemoteStripeSource {
-    fn drop(&mut self) {
-        info!("Terminating the RemoteStripeSource");
+    /// Copy a fetched stripe's bytes into the caller's buffer, zero-filling any
+    /// remainder. Returns whether the copy succeeded.
+    fn deliver(stripe_id: usize, data: &[u8], buffer: &SharedBuffer) -> bool {
+        let mut buf_ref = buffer.borrow_mut();
+        let buf = buf_ref.as_mut_slice();
+
+        if data.len() > buf.len() {
+            error!(
+                "Stripe {} returned {} bytes which exceeds buffer size {}",
+                stripe_id,
+                data.len(),
+                buf.len()
+            );
+            return false;
+        }
+
+        let (dst, rest) = buf.split_at_mut(data.len());
+        dst.copy_from_slice(data);
+        rest.fill(0);
+
+        if !rest.is_empty() {
+            warn!(
+                "Stripe {} returned fewer bytes ({}) than buffer capacity ({})",
+                stripe_id,
+                data.len(),
+                buf.len()
+            );
+        }
+        true
     }
 }
 
 impl StripeSource for RemoteStripeSource {
     fn request(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
-        self.pending_requests.push_back((stripe_id, buffer));
+        self.request_tx.send(stripe_id).map_err(|_| {
+            crate::ubiblk_error!(IoError {
+                source: std::io::Error::other("remote stripe fetch workers are gone"),
+            })
+        })?;
+        self.pending.insert(stripe_id, buffer);
         Ok(())
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
-        let mut completions = Vec::with_capacity(self.pending_requests.len());
+        let mut completions = Vec::new();
 
-        while let Some((stripe_id, buffer)) = self.pending_requests.pop_front() {
-            let result = match self.client.fetch_stripe(stripe_id as u64) {
-                Ok(data) => {
-                    let mut buf_ref = buffer.borrow_mut();
-                    let buf = buf_ref.as_mut_slice();
-
-                    if data.len() > buf.len() {
-                        error!(
-                            "Stripe {} returned {} bytes which exceeds buffer size {}",
-                            stripe_id,
-                            data.len(),
-                            buf.len()
-                        );
-                        false
-                    } else {
-                        let (dst, rest) = buf.split_at_mut(data.len());
-                        dst.copy_from_slice(&data);
-                        rest.fill(0);
-
-                        if !rest.is_empty() {
-                            warn!(
-                                "Stripe {} returned fewer bytes ({}) than buffer capacity ({})",
-                                stripe_id,
-                                data.len(),
-                                buf.len()
-                            );
-                        }
-                        true
-                    }
+        while let Ok((stripe_id, result)) = self.result_rx.try_recv() {
+            let buffer = match self.pending.remove(&stripe_id) {
+                Some(buffer) => buffer,
+                None => {
+                    error!("Received completion for unknown stripe {stripe_id}");
+                    continue;
                 }
+            };
+
+            let success = match result {
+                Ok(data) => Self::deliver(stripe_id, &data, &buffer),
                 Err(err) => {
-                    error!("Failed to fetch stripe {}: {err}", stripe_id);
+                    error!("Failed to fetch stripe {stripe_id}: {err}");
                     false
                 }
             };
 
-            completions.push((stripe_id, result));
+            completions.push((stripe_id, success));
         }
 
         completions
     }
 
     fn busy(&self) -> bool {
-        !self.pending_requests.is_empty()
+        !self.pending.is_empty()
     }
 
     fn sector_count(&self) -> u64 {
@@ -182,19 +249,40 @@ mod tests {
         }
     }
 
+    /// Poll until `expected` completions have been collected or we give up.
+    fn poll_until(source: &mut RemoteStripeSource, expected: usize) -> Vec<(usize, bool)> {
+        let mut completions = Vec::new();
+        for _ in 0..1000 {
+            completions.extend(source.poll());
+            if completions.len() >= expected {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        completions
+    }
+
+    fn prep_with_connections(connections: usize) -> RemoteStripeSource {
+        let clients: Vec<Box<dyn RemoteStripeProvider + Send>> = (0..connections)
+            .map(|_| {
+                Box::new(MockRemoteStripeProvider::new()) as Box<dyn RemoteStripeProvider + Send>
+            })
+            .collect();
+        RemoteStripeSource::new(clients, STRIPE_SECTORS as u64).unwrap()
+    }
+
     fn prep() -> RemoteStripeSource {
-        let provider = Box::new(MockRemoteStripeProvider::new());
-        RemoteStripeSource::new(provider, STRIPE_SECTORS as u64).unwrap()
+        prep_with_connections(1)
     }
 
     #[test]
     fn test_fetch_good_stripe() {
-        let mut source = prep();
+        let mut source = prep_with_connections(4);
         let buffer_1 = shared_buffer(STRIPE_SIZE);
         let buffer_2 = shared_buffer(STRIPE_SIZE);
         source.request(2, buffer_1.clone()).unwrap();
         source.request(4, buffer_2.clone()).unwrap();
-        let completions = source.poll();
+        let completions = poll_until(&mut source, 2);
         assert_eq!(completions.len(), 2);
 
         for (stripe_id, success) in completions {
@@ -218,7 +306,7 @@ mod tests {
         let buffer_2 = shared_buffer(STRIPE_SIZE);
         source.request(1, buffer_1.clone()).unwrap();
         source.request(3, buffer_2.clone()).unwrap();
-        let completions = source.poll();
+        let completions = poll_until(&mut source, 2);
         assert_eq!(completions.len(), 2);
         for (_, success) in completions {
             assert!(!success);
@@ -227,9 +315,21 @@ mod tests {
 
     #[test]
     fn test_invalid_metadata() {
-        let provider = Box::new(MockRemoteStripeProvider::new_with_bad_metadata());
-        let result = RemoteStripeSource::new(provider, STRIPE_SECTORS as u64);
+        let clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
+            vec![Box::new(MockRemoteStripeProvider::new_with_bad_metadata())];
+        let result = RemoteStripeSource::new(clients, STRIPE_SECTORS as u64);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_no_connections_is_error() {
+        let clients: Vec<Box<dyn RemoteStripeProvider + Send>> = Vec::new();
+        let result = RemoteStripeSource::new(clients, STRIPE_SECTORS as u64);
+        let err = result.err().expect("empty client pool must error");
+        assert!(
+            err.to_string().contains("at least one connection"),
+            "expected a clear 'at least one connection' error, got: {err}"
+        );
     }
 
     #[test]
@@ -237,7 +337,7 @@ mod tests {
         let mut source = prep();
         let buffer = shared_buffer(STRIPE_SIZE + 100);
         source.request(2, buffer.clone()).unwrap();
-        let completions = source.poll();
+        let completions = poll_until(&mut source, 1);
         assert_eq!(completions.len(), 1);
         assert_eq!(completions[0], (2, true));
         for (i, &byte) in buffer.borrow().as_slice().iter().enumerate() {
@@ -272,7 +372,69 @@ mod tests {
         let buffer = shared_buffer(STRIPE_SIZE);
         source.request(2, buffer).unwrap();
         assert!(source.busy());
-        let _ = source.poll();
+        let _ = poll_until(&mut source, 1);
         assert!(!source.busy());
+    }
+
+    /// A provider that records how many fetches run at the same instant across
+    /// the whole pool, so a test can prove the connections fetch in parallel.
+    struct ConcurrencyProvider {
+        metadata: Box<UbiMetadata>,
+        in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        max_in_flight: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl RemoteStripeProvider for ConcurrencyProvider {
+        fn fetch_stripe(&mut self, stripe_id: u64) -> Result<Vec<u8>> {
+            use std::sync::atomic::Ordering;
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(vec![stripe_id as u8; STRIPE_SIZE])
+        }
+
+        fn get_metadata(&self) -> Option<&UbiMetadata> {
+            Some(&self.metadata)
+        }
+    }
+
+    #[test]
+    fn test_fetches_run_concurrently_across_connections() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let max_in_flight = Arc::new(AtomicUsize::new(0));
+
+        const CONNECTIONS: usize = 4;
+        let clients: Vec<Box<dyn RemoteStripeProvider + Send>> = (0..CONNECTIONS)
+            .map(|_| {
+                Box::new(ConcurrencyProvider {
+                    metadata: UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, TOTAL_STRIPES, 0),
+                    in_flight: Arc::clone(&in_flight),
+                    max_in_flight: Arc::clone(&max_in_flight),
+                }) as Box<dyn RemoteStripeProvider + Send>
+            })
+            .collect();
+        let mut source = RemoteStripeSource::new(clients, STRIPE_SECTORS as u64).unwrap();
+
+        let requested = 8;
+        for stripe_id in 0..requested {
+            source
+                .request(stripe_id, shared_buffer(STRIPE_SIZE))
+                .unwrap();
+        }
+        let completions = poll_until(&mut source, requested);
+        assert_eq!(completions.len(), requested);
+        assert!(completions.iter().all(|(_, success)| *success));
+
+        // With a single connection this would be 1; the pool must overlap
+        // fetches across its connections.
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) > 1,
+            "expected concurrent fetches across connections, saw max {}",
+            max_in_flight.load(Ordering::SeqCst)
+        );
     }
 }

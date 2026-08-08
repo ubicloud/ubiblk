@@ -1,4 +1,6 @@
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{collections::VecDeque, sync::Arc};
+
+use atomic_refcell::AtomicRefCell;
 
 use libublk::{
     helpers::IoBuf,
@@ -41,7 +43,7 @@ impl UblkIoHandler {
     ) -> Self {
         let backend_bufs = (0..queue_size)
             .map(|_| {
-                Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+                Arc::new(AtomicRefCell::new(AlignedBuf::new_with_alignment(
                     max_io_bytes,
                     alignment,
                 )))

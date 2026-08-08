@@ -1,4 +1,6 @@
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{collections::VecDeque, sync::Arc};
+
+use atomic_refcell::AtomicRefCell;
 
 use crate::block_device::SharedBuffer;
 
@@ -16,7 +18,7 @@ impl AlignedBufferPool {
             .map(|index| {
                 let mut buf = AlignedBuf::new_with_alignment(size, alignment);
                 buf.id = index;
-                Rc::new(RefCell::new(buf))
+                Arc::new(AtomicRefCell::new(buf))
             })
             .collect();
 
@@ -49,7 +51,7 @@ impl AlignedBufferPool {
         );
 
         assert!(
-            Rc::ptr_eq(buffer, &self.buffers[index]),
+            Arc::ptr_eq(buffer, &self.buffers[index]),
             "Returned buffer does not match the pool's buffer at index {index}"
         );
 

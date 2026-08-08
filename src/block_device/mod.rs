@@ -1,14 +1,19 @@
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::Result;
-use std::{cell::RefCell, rc::Rc};
+use atomic_refcell::AtomicRefCell;
+use std::sync::Arc;
 
-pub type SharedBuffer = Rc<RefCell<AlignedBuf>>;
+pub type SharedBuffer = Arc<AtomicRefCell<AlignedBuf>>;
 
 pub fn shared_buffer(size: usize) -> SharedBuffer {
-    Rc::new(RefCell::new(AlignedBuf::new(size)))
+    Arc::new(AtomicRefCell::new(AlignedBuf::new(size)))
 }
 
-pub trait IoChannel {
+// `Send` lets an `IoChannel` (and the buffers it holds) live on a worker thread
+// that the vhost/ublk backends move it onto. Each channel is still only ever
+// touched by its owning thread; the bound just lets us express that in the type
+// system instead of an `unsafe impl Send` on the backend thread.
+pub trait IoChannel: Send {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);
     fn add_flush(&mut self, id: usize);

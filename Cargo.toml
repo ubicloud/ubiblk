@@ -18,6 +18,7 @@ debug = false
 opt-level = "s"
 
 [dependencies]
+atomic_refcell = "0.1.14"
 clap = { version = "4.5.49", features = ["cargo", "wrap_help", "derive"] }
 serde = { version = "1.0", features = ["derive"] }
 libc = "0.2"

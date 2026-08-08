@@ -1,6 +1,7 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::{ops::Deref, sync::RwLockWriteGuard};
+
+use atomic_refcell::AtomicRefCell;
 
 use super::request::*;
 #[cfg(test)]
@@ -80,7 +81,7 @@ impl UbiBlkBackendThread {
             .map(|_| RequestSlot {
                 used: false,
                 request_type: RequestType::Unsupported(0),
-                buffer: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+                buffer: Arc::new(AtomicRefCell::new(AlignedBuf::new_with_alignment(
                     buf_size as usize,
                     alignment,
                 ))),
@@ -136,7 +137,7 @@ impl UbiBlkBackendThread {
         self.request_slots.push(RequestSlot {
             used: true,
             request_type: request.request_type(),
-            buffer: Rc::new(RefCell::new(AlignedBuf::new_with_alignment(
+            buffer: Arc::new(AtomicRefCell::new(AlignedBuf::new_with_alignment(
                 len,
                 self.alignment,
             ))),
@@ -450,8 +451,5 @@ impl UbiBlkBackendThread {
         busy
     }
 }
-
-unsafe impl Sync for UbiBlkBackendThread {}
-unsafe impl Send for UbiBlkBackendThread {}
 
 mod backend_thread_tests;

@@ -1,6 +1,6 @@
 use crate::{Result, UbiblkError};
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
+    aead::{Aead, AeadCore, Generate, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
 use log::error;
@@ -181,7 +181,7 @@ pub fn aes256gcm_decrypt(key: &[u8], aad: &[u8], ciphertext: &[u8]) -> Result<Ve
 pub fn aes256gcm_encrypt(key: &[u8], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     let cipher = new_cipher(key)?;
 
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let nonce = KekNonce::generate();
     let ciphertext = cipher
         .encrypt(
             &nonce,

@@ -25,12 +25,12 @@ thiserror = "2.0.17"
 nix = { version = "0.31.3", features = ["event", "fs", "sched", "process"] }
 # vhost = { path = "../vhost/vhost", features = ["vhost-user-frontend"] }
 # vhost-user-backend = { path = "../vhost/vhost-user-backend" }
-vhost = "0.14.0"
-vhost-user-backend = "0.20.0"
-vmm-sys-util = "0.14.0"
-vm-memory = "0.16.2"
+vhost = "0.17.0"
+vhost-user-backend = "0.23.0"
+vmm-sys-util = "0.15.0"
+vm-memory = "0.18.0"
 virtio-bindings = "0.2.6"
-virtio-queue = "0.16.0"
+virtio-queue = "0.18.0"
 # NOTE: io-uring was intentionally downgraded from 0.7.10 to 0.7.9 for compatibility with libublk 0.4.5.
 io-uring = "0.7.9"
 hex = "0.4.3"
@@ -66,8 +66,8 @@ zeroize = "1.8.2"
 bindgen = "0.72.1"
 
 [dev-dependencies]
-virtio-queue = { version = "0.16.0", features = ["test-utils"] }
-vm-memory = { version = "0.16.2", features = ["backend-mmap", "backend-atomic"] }
+virtio-queue = { version = "0.18.0", features = ["test-utils"] }
+vm-memory = { version = "0.18.0", features = ["backend-mmap", "backend-atomic"] }
 aws-smithy-mocks = "0.2.2"
 aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio", "test-util"] }
 

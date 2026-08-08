@@ -10,6 +10,7 @@ use crate::{
 
 use super::backend_thread::UbiBlkBackendThread;
 use log::{debug, error, info, warn};
+use std::os::fd::{FromRawFd, IntoRawFd};
 use vhost::vhost_user::message::*;
 use vhost_user_backend::{bitmap::BitmapMmapRegion, VhostUserBackend, VringRwLock, VringT};
 use virtio_bindings::{
@@ -19,7 +20,10 @@ use virtio_bindings::{
 };
 use virtio_queue::QueueT;
 use vm_memory::{ByteValued, GuestAddressSpace, GuestMemoryAtomic};
-use vmm_sys_util::{epoll::EventSet, eventfd::EventFd};
+use vmm_sys_util::{
+    epoll::EventSet,
+    event::{EventConsumer, EventNotifier},
+};
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
 
@@ -278,11 +282,17 @@ impl VhostUserBackend for UbiBlkBackend {
         buf
     }
 
-    fn exit_event(&self, thread_index: usize) -> Option<EventFd> {
-        self.threads[thread_index]
-            .lock()
-            .ok()
-            .and_then(|t| t.kill_evt.try_clone().ok())
+    fn exit_event(&self, thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
+        // vhost-user-backend 0.23 splits the exit event into a consumer (which
+        // the daemon waits on) and a notifier (which signals the worker to
+        // exit). Both wrap clones of the worker's kill eventfd, so they share
+        // the same underlying fd as before.
+        let thread = self.threads[thread_index].lock().ok()?;
+        let consumer_fd = thread.kill_evt.try_clone().ok()?;
+        let notifier_fd = thread.kill_evt.try_clone().ok()?;
+        let consumer = unsafe { EventConsumer::from_raw_fd(consumer_fd.into_raw_fd()) };
+        let notifier = unsafe { EventNotifier::from_raw_fd(notifier_fd.into_raw_fd()) };
+        Some((consumer, notifier))
     }
 
     fn queues_per_thread(&self) -> Vec<u64> {
@@ -547,9 +557,9 @@ mod tests {
     #[test]
     fn exit_event_clone() {
         let backend = default_backend();
-        let evt1 = backend.exit_event(0).unwrap();
-        let evt2 = backend.exit_event(0).unwrap();
-        assert_ne!(evt1.as_raw_fd(), evt2.as_raw_fd());
+        let (consumer1, _notifier1) = backend.exit_event(0).unwrap();
+        let (consumer2, _notifier2) = backend.exit_event(0).unwrap();
+        assert_ne!(consumer1.as_raw_fd(), consumer2.as_raw_fd());
     }
 
     /// maybe_pin_cpu should return Ok(false) when no CPUs are configured.

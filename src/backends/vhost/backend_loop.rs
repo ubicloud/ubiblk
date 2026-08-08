@@ -49,7 +49,7 @@ fn serve_vhost(backend_env: &BackendEnv) -> Result<()> {
             })
         })?;
 
-    let listener = {
+    let mut listener = {
         let _um = UmaskGuard::set(0o117); // ensures 0660 max on creation
         Listener::new(socket, true)?
     };
@@ -57,7 +57,7 @@ fn serve_vhost(backend_env: &BackendEnv) -> Result<()> {
     // Allow only owner and group to read/write the socket
     fs::set_permissions(socket, fs::Permissions::from_mode(0o660))?;
 
-    daemon.start(listener)?;
+    daemon.start(&mut listener)?;
     let result = daemon.wait();
 
     for handler in daemon.get_epoll_handlers() {

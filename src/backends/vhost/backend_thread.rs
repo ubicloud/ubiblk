@@ -13,7 +13,6 @@ use crate::config::v2;
 use crate::utils::aligned_buffer::AlignedBuf;
 use crate::Result;
 
-use libc::EFD_NONBLOCK;
 use log::{error, info};
 use nix::{
     sched::{sched_setaffinity, CpuSet},
@@ -23,7 +22,9 @@ use vhost_user_backend::{bitmap::BitmapMmapRegion, VringState};
 use virtio_bindings::virtio_blk::*;
 use virtio_queue::{DescriptorChain, QueueT};
 use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard};
-use vmm_sys_util::eventfd::EventFd;
+use vmm_sys_util::event::{
+    new_event_consumer_and_notifier, EventConsumer, EventFlag, EventNotifier,
+};
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
 type Vring<'a> = RwLockWriteGuard<'a, VringState<GuestMemoryAtomic<GuestMemoryMmap>>>;
@@ -44,7 +45,8 @@ struct RequestSlot {
 
 pub struct UbiBlkBackendThread {
     pub event_idx: bool,
-    pub kill_evt: EventFd,
+    pub exit_consumer: EventConsumer,
+    pub exit_notifier: EventNotifier,
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
     io_channel: Box<dyn IoChannel>,
     request_slots: Vec<RequestSlot>,
@@ -91,14 +93,16 @@ impl UbiBlkBackendThread {
             })
             .collect();
 
-        let kill_evt = EventFd::new(EFD_NONBLOCK).map_err(|e| {
-            error!("failed to create kill eventfd: {e:?}");
+        let (exit_consumer, exit_notifier) = new_event_consumer_and_notifier(EventFlag::NONBLOCK)
+            .map_err(|e| {
+            error!("failed to create exit eventfd: {e:?}");
             crate::ubiblk_error!(ThreadCreation { source: e })
         })?;
 
         Ok(UbiBlkBackendThread {
             event_idx: false,
-            kill_evt,
+            exit_consumer,
+            exit_notifier,
             mem,
             io_channel,
             request_slots,

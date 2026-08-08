@@ -10,7 +10,6 @@ use crate::{
 
 use super::backend_thread::UbiBlkBackendThread;
 use log::{debug, error, info, warn};
-use std::os::fd::{FromRawFd, IntoRawFd};
 use vhost::vhost_user::message::*;
 use vhost_user_backend::{bitmap::BitmapMmapRegion, VhostUserBackend, VringRwLock, VringT};
 use virtio_bindings::{
@@ -285,13 +284,10 @@ impl VhostUserBackend for UbiBlkBackend {
     fn exit_event(&self, thread_index: usize) -> Option<(EventConsumer, EventNotifier)> {
         // vhost-user-backend 0.23 splits the exit event into a consumer (which
         // the daemon waits on) and a notifier (which signals the worker to
-        // exit). Both wrap clones of the worker's kill eventfd, so they share
-        // the same underlying fd as before.
+        // exit). Hand back clones of the worker's exit event pair.
         let thread = self.threads[thread_index].lock().ok()?;
-        let consumer_fd = thread.kill_evt.try_clone().ok()?;
-        let notifier_fd = thread.kill_evt.try_clone().ok()?;
-        let consumer = unsafe { EventConsumer::from_raw_fd(consumer_fd.into_raw_fd()) };
-        let notifier = unsafe { EventNotifier::from_raw_fd(notifier_fd.into_raw_fd()) };
+        let consumer = thread.exit_consumer.try_clone().ok()?;
+        let notifier = thread.exit_notifier.try_clone().ok()?;
         Some((consumer, notifier))
     }
 

@@ -131,8 +131,8 @@ fn fetch_with_reconnect(
 /// connection (mirroring how the S3-backed `ArchiveStripeSource` uses a pool of
 /// S3 workers). Requests are dispatched to whichever worker is free and
 /// completions come back out of order, matched up by stripe id. The workers
-/// only produce raw bytes (`SharedBuffer` is `!Send`); the copy into the
-/// caller's buffer happens on `poll`. Dropping the source drops `request_tx`,
+/// produce owned byte buffers; the copy into the caller's `SharedBuffer` happens
+/// on `poll`, on the fetcher's own thread. Dropping the source drops `request_tx`,
 /// which makes the workers' `recv` return and the threads exit on their own.
 pub struct RemoteStripeSource {
     source_sector_count: u64,

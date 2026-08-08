@@ -62,6 +62,14 @@ impl UringIoChannel {
     }
 }
 
+// In-flight buffer contract: `add_read`/`add_write` hand the kernel a raw
+// pointer into `buf` and then drop the `AtomicRefCell` guard, but the kernel
+// keeps reading/writing that memory until the matching completion is reaped in
+// `poll`. Nothing may borrow or move the buffer between submission and its CQE;
+// the borrow system cannot see the kernel's outstanding access. Safety
+// therefore rests on the caller's request-slot lifecycle (a slot is not reused
+// until its completion), not on `AtomicRefCell`; the `Send`/`Sync` on
+// `SharedBuffer` does not make concurrent access during this window sound.
 impl IoChannel for UringIoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let mut buf = buf.borrow_mut();

@@ -216,9 +216,11 @@ fn set_thread_name(name: &str) {
     {
         use std::ffi::CString;
         match CString::new(name) {
-            Ok(cname) => unsafe {
-                libc::prctl(libc::PR_SET_NAME, cname.as_ptr(), 0, 0, 0);
-            },
+            Ok(cname) => {
+                if let Err(e) = nix::sys::prctl::set_name(&cname) {
+                    error!("Failed to set thread name '{name}': {e}");
+                }
+            }
             Err(e) => {
                 error!("Failed to set thread name '{name}': {e}");
             }

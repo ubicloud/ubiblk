@@ -157,11 +157,12 @@ pub fn aes256gcm_decrypt(key: &[u8], aad: &[u8], ciphertext: &[u8]) -> Result<Ve
         return Err(param_err(msg));
     }
 
-    let nonce = KekNonce::from_slice(&ciphertext[..GCM_NONCE_SIZE]);
+    let nonce = KekNonce::try_from(&ciphertext[..GCM_NONCE_SIZE])
+        .map_err(|_| param_err("invalid GCM nonce length"))?;
     let encrypted_data = &ciphertext[GCM_NONCE_SIZE..];
     let plaintext = cipher
         .decrypt(
-            nonce,
+            &nonce,
             Payload {
                 msg: encrypted_data,
                 aad,
@@ -227,10 +228,10 @@ mod tests {
 
     fn encrypt_helper(kek_key: &[u8], nonce: &[u8], aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
         let cipher = Aes256Gcm::new_from_slice(kek_key).unwrap();
-        let nonce = KekNonce::from_slice(nonce);
+        let nonce = KekNonce::try_from(nonce).unwrap();
         let ciphertext = cipher
             .encrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: plaintext,
                     aad,
@@ -238,7 +239,7 @@ mod tests {
             )
             .unwrap();
         let mut output = Vec::with_capacity(GCM_NONCE_SIZE + ciphertext.len());
-        output.extend_from_slice(nonce);
+        output.extend_from_slice(&nonce);
         output.extend_from_slice(&ciphertext);
         output
     }

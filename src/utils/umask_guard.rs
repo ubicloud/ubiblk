@@ -1,27 +1,27 @@
 #[cfg(test)]
 use std::sync::Mutex;
 
+use nix::sys::stat::{umask, Mode};
+
 /// RAII guard that temporarily sets the process umask.
 ///
 /// Restores the previous umask when dropped.
 /// **Note:** `umask` is process-global; avoid using in concurrent threads.
 pub struct UmaskGuard {
-    previous: libc::mode_t,
+    previous: Mode,
 }
 
 impl UmaskGuard {
     /// Set the process umask to `mask` and restore it on drop.
     pub fn set(mask: libc::mode_t) -> Self {
-        let previous = unsafe { libc::umask(mask) };
+        let previous = umask(Mode::from_bits_retain(mask));
         Self { previous }
     }
 }
 
 impl Drop for UmaskGuard {
     fn drop(&mut self) {
-        unsafe {
-            libc::umask(self.previous);
-        }
+        umask(self.previous);
     }
 }
 
@@ -35,11 +35,9 @@ mod tests {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
     fn get_umask() -> libc::mode_t {
-        unsafe {
-            let cur = libc::umask(0);
-            libc::umask(cur);
-            cur
-        }
+        let cur = umask(Mode::from_bits_retain(0));
+        umask(cur);
+        cur.bits()
     }
 
     #[test]

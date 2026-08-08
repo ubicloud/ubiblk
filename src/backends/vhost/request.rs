@@ -41,7 +41,9 @@ use virtio_queue::{
     desc::{split::Descriptor as SplitDescriptor, RawDescriptor},
     DescriptorChain,
 };
-use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryError};
+use vm_memory::{
+    ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryBackend, GuestMemoryError,
+};
 
 /// Block request parsing errors.
 #[derive(Debug)]
@@ -168,7 +170,7 @@ impl Request {
     // Checks that a descriptor meets the minimal requirements for a valid status descriptor.
     fn check_status_desc<M>(mem: &M, desc: RawDescriptor) -> Result<()>
     where
-        M: GuestMemory + ?Sized,
+        M: GuestMemory + ?Sized + GuestMemoryBackend,
     {
         let desc = SplitDescriptor::from(desc);
         // The status MUST always be writable.
@@ -217,7 +219,7 @@ impl Request {
     pub fn parse<M>(desc_chain: &mut DescriptorChain<M>) -> Result<Request>
     where
         M: Deref,
-        M::Target: GuestMemory,
+        M::Target: GuestMemory + GuestMemoryBackend,
     {
         let chain_head = desc_chain.next().ok_or(Error::DescriptorChainTooShort)?;
         // The head contains the request type which MUST be readable.

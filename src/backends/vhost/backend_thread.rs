@@ -22,9 +22,7 @@ use nix::{
 use vhost_user_backend::{bitmap::BitmapMmapRegion, VringState};
 use virtio_bindings::virtio_blk::*;
 use virtio_queue::{DescriptorChain, QueueT};
-use vm_memory::{
-    Bytes, GuestAddress, GuestAddressSpace, GuestMemory, GuestMemoryAtomic, GuestMemoryLoadGuard,
-};
+use vm_memory::{Bytes, GuestAddress, GuestAddressSpace, GuestMemoryAtomic, GuestMemoryLoadGuard};
 use vmm_sys_util::eventfd::EventFd;
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;

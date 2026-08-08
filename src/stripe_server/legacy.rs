@@ -295,10 +295,14 @@ fn unwrap_xts_key(wrapped: &(Vec<u8>, Vec<u8>), kek: &LegacyKek) -> Result<[u8; 
                     ),
                 }));
             }
-            let nonce = LegacyNonce::from_slice(iv);
+            let nonce = LegacyNonce::try_from(iv).map_err(|_| {
+                crate::ubiblk_error!(InvalidParameter {
+                    description: "Legacy KEK init_vector must be 12 bytes".to_string(),
+                })
+            })?;
             (
-                decrypt_key(&cipher, nonce, aad, &wrapped.0)?,
-                decrypt_key(&cipher, nonce, aad, &wrapped.1)?,
+                decrypt_key(&cipher, &nonce, aad, &wrapped.0)?,
+                decrypt_key(&cipher, &nonce, aad, &wrapped.1)?,
             )
         }
     };
@@ -387,10 +391,10 @@ mod tests {
         let aad = b"authdata".to_vec();
 
         let cipher = Aes256Gcm::new_from_slice(&kek_key).unwrap();
-        let nonce = LegacyNonce::from_slice(&iv);
+        let nonce = LegacyNonce::try_from(&iv[..]).unwrap();
         let wrap = |k: &[u8]| {
             cipher
-                .encrypt(nonce, Payload { msg: k, aad: &aad })
+                .encrypt(&nonce, Payload { msg: k, aad: &aad })
                 .unwrap()
         };
 

@@ -38,14 +38,20 @@ struct RpcRequest {
     command: String,
 }
 
-#[allow(dead_code)]
+// The fields are populated when the RPC server starts (see `start_rpc_server`,
+// which is reachable in non-test builds via `run_backend_loop`) but are only
+// ever read by the test-only `stop()` below, so suppress the dead-code lint
+// for non-test builds where they are write-only.
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct RpcServerHandle {
     join_handle: JoinHandle<()>,
     stop_requested: Arc<AtomicBool>,
     path: PathBuf,
 }
 
-#[allow(dead_code)]
+// `stop()` is only used by the tests below; gate the impl on `cfg(test)` so no
+// dead-code allow is needed for it.
+#[cfg(test)]
 impl RpcServerHandle {
     pub fn stop(self) -> Result<()> {
         self.stop_requested.store(true, Ordering::Release);

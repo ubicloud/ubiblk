@@ -13,4 +13,10 @@ ignore = [
   # from ubiblk: libublk only constructs bitmaps via `Bitmap::new()` for CPU
   # affinity (libublk-0.4.6/src/ctrl.rs), never from untrusted byte slices.
   "RUSTSEC-2025-0167",
+  # lru 0.16.4 unsound: potential use-after-free from lack of panic safety in
+  # `LruCache::pop()`. Pulled in transitively by aws-sdk-s3 (1.141.0, the latest
+  # release), which pins lru to 0.16.x; there is no patched 0.16.x release, so
+  # no upgrade removes it. Triggering needs a panic during pop(); revisit when
+  # aws-sdk-s3 / lru ship a fix.
+  "RUSTSEC-2026-0253",
 ]

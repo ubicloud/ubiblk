@@ -1,0 +1,16 @@
+# cargo-audit ignore list, with justification for each entry.
+#
+# `bitmaps` 3.2.1 is a transitive dependency pulled in by `libublk` (used for
+# CPU-affinity bitmaps in libublk's control path). Both `libublk` (0.4.6) and
+# `bitmaps` (3.2.1) are the latest published versions, and `bitmaps` is
+# unmaintained, so there is no upgrade that removes or fixes these advisories.
+[advisories]
+ignore = [
+  # bitmaps is unmaintained. Maintenance-status warning, not an exploitable
+  # vulnerability; the only user is libublk, a direct upstream dependency.
+  "RUSTSEC-2026-0247",
+  # Unsound `Bitmap::try_from(&[u8])` can create invalid values. Not reachable
+  # from ubiblk: libublk only constructs bitmaps via `Bitmap::new()` for CPU
+  # affinity (libublk-0.4.6/src/ctrl.rs), never from untrusted byte slices.
+  "RUSTSEC-2025-0167",
+]

@@ -252,7 +252,7 @@ impl StripeSource for ArchiveStripeSource {
                 );
             }
         }
-        self.finished_requests.drain(..).collect()
+        std::mem::take(&mut self.finished_requests)
     }
 
     fn busy(&self) -> bool {

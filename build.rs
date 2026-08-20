@@ -15,6 +15,10 @@ fn main() {
     // Generate Rust bindings
     let bindings = bindgen::Builder::default()
         .header(header)
+        // Don't emit bindings for libc runtime symbols pulled in via string.h;
+        // they are provided by the standard library and redefining them trips
+        // rustc's suspicious_runtime_symbol_definitions lint.
+        .blocklist_function("memcpy|memmove|memset|memcmp|strlen|bcmp")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate ISA-L Crypto bindings");

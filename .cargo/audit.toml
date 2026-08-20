@@ -19,4 +19,11 @@ ignore = [
   # no upgrade removes it. Triggering needs a panic during pop(); revisit when
   # aws-sdk-s3 / lru ship a fix.
   "RUSTSEC-2026-0253",
+  # h2 0.3.x unbounded empty DATA frames (low-severity DoS, fixed in >= 0.4.16).
+  # h2 0.4.x is updated to the patched 0.4.16 in Cargo.lock, but h2 0.3.x is
+  # pulled in by aws-smithy-http-client 1.2.0 (the latest release) for its default
+  # rustls HTTPS client, and no aws-smithy-http-client release drops the 0.3.x
+  # dependency, so nothing removes it. ubiblk only uses this as an S3 client
+  # against a trusted object store. Revisit when the AWS SDK moves off h2 0.3.x.
+  "RUSTSEC-2026-0258",
 ]

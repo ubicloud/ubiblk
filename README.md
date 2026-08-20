@@ -211,6 +211,12 @@ xts --config <CONFIG_TOML> [options] <INPUT> <OUTPUT>
 | `--len` | — | no | Number of sectors to process |
 | `--action` | — | no | `encode` or `decode` (default: `decode`) |
 
+## Contributing
+
+Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md), which
+covers how to open a pull request and the Contributor License Agreement (CLA)
+you'll need to sign before your first contribution can be merged.
+
 ## License
 
 This project is licensed under the GNU Affero General Public License v3.0

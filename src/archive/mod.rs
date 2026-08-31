@@ -14,10 +14,12 @@ pub const ARCHIVE_FORMAT_VERSION_MAX: u32 = ARCHIVE_FORMAT_VERSION;
 /// Abstraction over a backend that can store and retrieve archived objects.
 pub trait ArchiveStore {
     /// Asynchronously store an object under the given `name`. Completion can be
-    /// polled via `poll_puts`.
+    /// polled via `poll_puts`. May block to apply backpressure when too many
+    /// operations are already queued.
     fn start_put_object(&mut self, name: &str, data: Vec<u8>);
     /// Asynchronously retrieve an object by its `name`. Completion can be
-    /// polled via `poll_gets`.
+    /// polled via `poll_gets`. May block to apply backpressure when too many
+    /// operations are already queued.
     fn start_get_object(&mut self, name: &str);
     /// Poll for completed put operations. Each returned tuple contains the
     /// object name and the result of the operation.

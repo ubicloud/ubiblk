@@ -50,10 +50,18 @@ jobs:
           curl -fL -o "${archive}" "${url}"
           sudo tar -xzf "${archive}" -C /
 
+      # Use actions/checkout rather than a bare `git clone`: it authenticates
+      # with the workflow token instead of fetching anonymously, so the step is
+      # not subject to GitHub's per-IP unauthenticated rate limits, and it
+      # retries transient network failures.
+      - name: Check out blkbench
+        uses: actions/checkout@v4
+        with:
+          repository: ubicloud/blkbench
+          path: blkbench-src
+
       - name: Build blkbench
-        run: |
-          git clone --depth 1 https://github.com/ubicloud/blkbench blkbench-src
-          make -C blkbench-src -j"$(nproc)" LDFLAGS="-Wl,-rpath,/usr/local/lib/x86_64-linux-gnu"
+        run: make -C blkbench-src -j"$(nproc)" LDFLAGS="-Wl,-rpath,/usr/local/lib/x86_64-linux-gnu"
 
       - name: Build ubiblk and set up the device
         run: |

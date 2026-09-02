@@ -74,12 +74,24 @@ jobs:
         with:
           go-version: "1.22"
 
+      # Use actions/checkout rather than a bare `git clone`, for the same reason
+      # as the blkbench job: it authenticates with the workflow token instead of
+      # fetching anonymously, so it is not subject to GitHub's per-IP
+      # unauthenticated rate limits, and it retries transient failures. It can
+      # only check out under the workspace, so the source lands here rather than
+      # in $RUNNER_TEMP; only the built binary has to be on PATH.
+      - name: Check out r2proxy
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ubicloud/r2proxy
+          path: r2proxy-src
+
       - name: Build r2proxy
         if: steps.guard.outputs.enabled == 'true'
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/ubicloud/r2proxy "$RUNNER_TEMP/r2proxy-src"
-          go build -C "$RUNNER_TEMP/r2proxy-src" -o "$RUNNER_TEMP/bin/r2proxy" .
+          go build -C r2proxy-src -o "$RUNNER_TEMP/bin/r2proxy" .
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Ensure aws CLI (used for bucket cleanup)

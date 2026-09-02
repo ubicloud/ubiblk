@@ -33,6 +33,6 @@ jobs:
           branch: 'main'
           allowlist: byucesoy, enescakir, fdr, ozgune, pykello, umurc, velioglu, bot*
           remote-organization-name: ubicloud
-          remote-repository-name: cla-signers
+          remote-repository-name: ubiblk-cla-signers
           create-file-commit-message: 'Creating file for storing CLA Signatures'
           signed-commit-message: '$contributorName has signed the CLA in $owner/$repo#$pullRequestNo'

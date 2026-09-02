@@ -1,29 +1,28 @@
 # cargo-audit ignore list, with justification for each entry.
 #
-# `bitmaps` 3.2.1 is a transitive dependency pulled in by `libublk` (used for
-# CPU-affinity bitmaps in libublk's control path). Both `libublk` (0.4.6) and
-# `bitmaps` (3.2.1) are the latest published versions, and `bitmaps` is
-# unmaintained, so there is no upgrade that removes or fixes these advisories.
+# Keep this list minimal: before adding an entry, check whether a dependency
+# upgrade removes the advisory instead. Re-check the existing entries whenever
+# the lockfile is refreshed.
+
 [advisories]
 ignore = [
   # bitmaps is unmaintained. Maintenance-status warning, not an exploitable
   # vulnerability; the only user is libublk, a direct upstream dependency.
+  # There is no patched release (patched = []), and libublk 0.4.8 (the latest)
+  # still depends on bitmaps 3.2.1, so no upgrade removes it.
   "RUSTSEC-2026-0247",
   # Unsound `Bitmap::try_from(&[u8])` can create invalid values. Not reachable
   # from ubiblk: libublk only constructs bitmaps via `Bitmap::new()` for CPU
   # affinity (libublk-0.4.6/src/ctrl.rs), never from untrusted byte slices.
+  # No patched release exists; see the note above.
   "RUSTSEC-2025-0167",
-  # lru 0.16.4 unsound: potential use-after-free from lack of panic safety in
-  # `LruCache::pop()`. Pulled in transitively by aws-sdk-s3 (1.141.0, the latest
-  # release), which pins lru to 0.16.x; there is no patched 0.16.x release, so
-  # no upgrade removes it. Triggering needs a panic during pop(); revisit when
-  # aws-sdk-s3 / lru ship a fix.
-  "RUSTSEC-2026-0253",
   # h2 0.3.x unbounded empty DATA frames (low-severity DoS, fixed in >= 0.4.16).
-  # h2 0.4.x is updated to the patched 0.4.16 in Cargo.lock, but h2 0.3.x is
-  # pulled in by aws-smithy-http-client 1.2.0 (the latest release) for its default
-  # rustls HTTPS client, and no aws-smithy-http-client release drops the 0.3.x
-  # dependency, so nothing removes it. ubiblk only uses this as an S3 client
-  # against a trusted object store. Revisit when the AWS SDK moves off h2 0.3.x.
+  # ubiblk's HTTPS client uses h2 0.4.16, which is patched. h2 0.3.x is an
+  # *optional* dependency of aws-smithy-http-client (`dep:h2-0-3`, gated behind
+  # its `hyper-014` feature) and reaches our lockfile only through
+  # dev-dependencies: `aws-smithy-mocks` and `aws-sdk-s3`'s `test-util` feature,
+  # which turn on aws-smithy-http-client's default features. It is not compiled
+  # into the shipped binary -- `cargo tree -e normal -i h2@0.3` finds no path.
+  # Revisit if the AWS SDK drops the legacy hyper-0.14 test client.
   "RUSTSEC-2026-0258",
 ]

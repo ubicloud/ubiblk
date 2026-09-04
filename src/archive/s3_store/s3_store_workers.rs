@@ -44,13 +44,16 @@ pub(super) fn spawn_workers(
 ) -> Result<Vec<JoinHandle<()>>> {
     let client_config = client.config().clone();
 
-    if worker_threads < 1 {
-        worker_threads = 1;
+    if worker_threads < super::MIN_WORKER_THREADS {
+        worker_threads = super::MIN_WORKER_THREADS;
         warn!("At least one S3 worker thread is required; defaulting to 1");
     }
-    if worker_threads > 128 {
-        worker_threads = 128;
-        warn!("Capping S3 worker threads to maximum of 128");
+    if worker_threads > super::MAX_WORKER_THREADS {
+        worker_threads = super::MAX_WORKER_THREADS;
+        warn!(
+            "Capping S3 worker threads to maximum of {}",
+            super::MAX_WORKER_THREADS
+        );
     }
 
     let mut workers = Vec::with_capacity(worker_threads);

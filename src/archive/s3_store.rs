@@ -1,6 +1,6 @@
 use std::{sync::Arc, thread::JoinHandle};
 
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender};
 use log::{debug, error, info};
 
 use super::ArchiveStore;
@@ -11,6 +11,24 @@ type S3Client = aws_sdk_s3::Client;
 type S3ByteStream = aws_sdk_s3::primitives::ByteStream;
 
 mod s3_store_workers;
+
+/// Bounds on the number of S3 worker threads; `spawn_workers` clamps its
+/// `worker_threads` argument to this range.
+pub(crate) const MIN_WORKER_THREADS: usize = 1;
+pub(crate) const MAX_WORKER_THREADS: usize = 128;
+
+/// Number of queued requests allowed per worker thread. Each queued
+/// `S3Request::Put` owns a full (compressed) stripe, so the request queue
+/// must stay bounded: with an unbounded queue, a producer that generates
+/// stripes faster than they upload (e.g. the archiver reading a fast local
+/// device) accumulates every pending stripe in memory and can exhaust it.
+/// Sending to a full queue blocks, which is what pushes backpressure onto
+/// the producer.
+const REQUEST_QUEUE_CAPACITY_PER_WORKER: usize = 2;
+
+fn request_queue_capacity(worker_threads: usize) -> usize {
+    worker_threads.clamp(MIN_WORKER_THREADS, MAX_WORKER_THREADS) * REQUEST_QUEUE_CAPACITY_PER_WORKER
+}
 
 enum S3Request {
     Put {
@@ -60,7 +78,7 @@ impl S3Store {
             }
         });
 
-        let (request_tx, request_rx) = unbounded();
+        let (request_tx, request_rx) = bounded(request_queue_capacity(worker_threads));
         let (result_tx, result_rx) = unbounded();
         let bucket = Arc::new(bucket);
         let workers = spawn_workers(
@@ -183,10 +201,16 @@ fn key_with_prefix(prefix: &Option<String>, name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        },
+        time::{Duration, Instant},
+    };
 
     use aws_sdk_s3::operation::{get_object::GetObjectOutput, put_object::PutObjectOutput};
-    use aws_smithy_mocks::{mock, mock_client, Rule};
+    use aws_smithy_mocks::{mock, mock_client, Rule, RuleMode};
 
     use super::*;
 
@@ -252,6 +276,85 @@ mod tests {
         let result = store.get_object("test-object", Duration::from_secs(5));
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), b"hello");
+    }
+
+    #[test]
+    fn request_queue_capacity_tracks_worker_count() {
+        assert_eq!(
+            request_queue_capacity(0),
+            MIN_WORKER_THREADS * REQUEST_QUEUE_CAPACITY_PER_WORKER
+        );
+        assert_eq!(
+            request_queue_capacity(4),
+            4 * REQUEST_QUEUE_CAPACITY_PER_WORKER
+        );
+        assert_eq!(
+            request_queue_capacity(1000),
+            MAX_WORKER_THREADS * REQUEST_QUEUE_CAPACITY_PER_WORKER
+        );
+    }
+
+    #[test]
+    fn request_queue_is_bounded() {
+        let put_rule =
+            mock!(S3Client::put_object).then_output(|| PutObjectOutput::builder().build());
+        let store = prepare_s3_store("test-bucket", None, &[put_rule]);
+        let capacity = store.request_tx.as_ref().unwrap().capacity();
+        assert_eq!(capacity, Some(request_queue_capacity(2)));
+    }
+
+    #[test]
+    fn start_put_object_blocks_when_uploads_stall() {
+        let gate = Arc::new(AtomicBool::new(false));
+        let rule_gate = Arc::clone(&gate);
+        let put_rule = mock!(S3Client::put_object).then_output(move || {
+            while !rule_gate.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            PutObjectOutput::builder().build()
+        });
+
+        let mut store = S3Store::new(
+            mock_client!(aws_sdk_s3, RuleMode::MatchAny, &[put_rule]),
+            "test-bucket".to_string(),
+            None,
+            1,
+        )
+        .unwrap();
+
+        // With a single stalled worker the store can accept the queue
+        // capacity plus the one request the worker already holds; the next
+        // start_put_object must block until an upload completes.
+        let bound = request_queue_capacity(1) + 1;
+        let total_puts = bound + 3;
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let uploader_accepted = Arc::clone(&accepted);
+        let uploader = std::thread::spawn(move || {
+            for i in 0..total_puts {
+                store.start_put_object(&format!("object-{i}"), vec![0u8; 64]);
+                uploader_accepted.fetch_add(1, Ordering::SeqCst);
+            }
+            let mut completed = 0;
+            while completed < total_puts {
+                completed += store.poll_puts().len();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            completed
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while accepted.load(Ordering::SeqCst) < bound && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        // Give the uploader a chance to overrun the bound if backpressure is
+        // broken; while uploads are stalled it must stay blocked at the bound.
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(accepted.load(Ordering::SeqCst), bound);
+
+        gate.store(true, Ordering::SeqCst);
+        let completed = uploader.join().expect("uploader thread panicked");
+        assert_eq!(completed, total_puts);
+        assert_eq!(accepted.load(Ordering::SeqCst), total_puts);
     }
 
     #[test]

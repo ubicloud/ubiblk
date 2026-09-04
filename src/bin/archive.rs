@@ -62,6 +62,10 @@ struct Args {
         help = "Optional path to write archive stats JSON."
     )]
     stats_path: Option<PathBuf>,
+
+    /// Allow creating an archive that contains no data stripes.
+    #[arg(long = "allow-empty", default_value_t = false)]
+    allow_empty: bool,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -131,6 +135,7 @@ fn run() -> Result<()> {
         StripeSourceBuilder::build_archive_kek(&target_config.target, &target_config.secrets)?,
         4,
     )?;
+    archiver.set_allow_empty(args.allow_empty);
 
     archiver.archive_all()?;
 

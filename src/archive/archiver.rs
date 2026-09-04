@@ -34,6 +34,7 @@ pub struct StripeArchiver {
     hmac_key: [u8; 32],
     compression: ArchiveCompressionAlgorithm,
     physical_size_bytes: u64,
+    allow_empty: bool,
 }
 
 impl StripeArchiver {
@@ -81,7 +82,28 @@ impl StripeArchiver {
             hmac_key,
             compression,
             physical_size_bytes: 0,
+            allow_empty: false,
         })
+    }
+
+    /// Allow `archive_all` to produce an archive with no data stripes.
+    pub fn set_allow_empty(&mut self, allow_empty: bool) {
+        self.allow_empty = allow_empty;
+    }
+
+    /// Number of stripes marked written or existing in the stripe source.
+    pub fn archivable_stripe_count(&self) -> usize {
+        (0..self.stripe_count)
+            .filter(|&stripe_id| self.stripe_should_be_archived(stripe_id))
+            .count()
+    }
+
+    /// Number of archived stripes with actual (non-zero) data.
+    pub fn archived_data_stripe_count(&self) -> usize {
+        self.stripe_hashes
+            .values()
+            .filter(|specifier| matches!(specifier, StripeContentSpecifier::Some(_)))
+            .count()
     }
 
     pub fn archive_all(&mut self) -> crate::Result<()> {
@@ -100,6 +122,18 @@ impl StripeArchiver {
     }
 
     fn archive_all_inner(&mut self) -> crate::Result<()> {
+        if !self.allow_empty && self.archivable_stripe_count() == 0 {
+            return Err(crate::ubiblk_error!(ArchiveError {
+                description: "No stripes are marked as written or as existing in a stripe \
+                              source, so the archive would contain no data. This typically \
+                              means the device was populated with track_written disabled; \
+                              enable track_written before writing data, or set the written \
+                              flags retroactively (e.g. with the mark-written tool). Pass \
+                              --allow-empty to archive an empty device anyway."
+                    .to_string(),
+            }));
+        }
+
         let mut next_stripe_id = 0;
         while next_stripe_id < self.stripe_count {
             if !self.stripe_should_be_archived(next_stripe_id) {
@@ -119,6 +153,16 @@ impl StripeArchiver {
         while !self.stripe_fetch_buffers.is_empty() || self.inflight_puts > 0 {
             self.poll_fetches()?;
             self.poll_uploads()?;
+        }
+
+        if !self.allow_empty && self.archived_data_stripe_count() == 0 {
+            return Err(crate::ubiblk_error!(ArchiveError {
+                description: "Archive would contain no data stripes: every selected stripe \
+                              is all zeroes. Refusing to write the manifest so this is not \
+                              mistaken for a valid backup. Pass --allow-empty to archive an \
+                              empty device anyway."
+                    .to_string(),
+            }));
         }
 
         let stripe_hashes_bytes = self.serialize_stripe_hashes()?;
@@ -619,6 +663,8 @@ mod tests {
         let offset = stripe_id * stripe_len;
         bdev.write(offset, vec![0u8; stripe_len].as_slice(), stripe_len);
 
+        // The only archivable stripe is all-zero, so allow_empty is required.
+        archiver.set_allow_empty(true);
         archiver.archive_all().unwrap();
 
         let stored_objects = store.list_objects().unwrap();
@@ -627,6 +673,82 @@ mod tests {
             archiver.stripe_hashes.get(&stripe_id),
             Some(&StripeContentSpecifier::Zero)
         );
+    }
+
+    #[test]
+    fn test_archive_all_fails_with_no_archivable_stripes() {
+        let (mut archiver, store) = prep(16, 0, false, Vec::new());
+        assert_eq!(archiver.archivable_stripe_count(), 0);
+
+        let result = archiver.archive_all();
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("track_written"), "unexpected error: {err}");
+
+        assert!(store.list_objects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_archive_all_no_archivable_stripes_with_allow_empty() {
+        let (mut archiver, store) = prep(16, 0, false, Vec::new());
+        archiver.set_allow_empty(true);
+        archiver.archive_all().unwrap();
+
+        let stored_objects: std::collections::HashSet<String> =
+            store.list_objects().unwrap().into_iter().collect();
+        let expected_objects: std::collections::HashSet<String> =
+            ["metadata.json".to_string(), "stripe-mapping".to_string()]
+                .into_iter()
+                .collect();
+        assert_eq!(stored_objects, expected_objects);
+        assert_eq!(archiver.archived_data_stripe_count(), 0);
+    }
+
+    #[test]
+    fn test_archive_all_fails_when_all_selected_stripes_are_zero() {
+        let bdev_stripe_count = 4;
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, bdev_stripe_count, 0);
+        let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * SECTOR_SIZE) as u64;
+        let bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(bdev_size));
+        let stripe_source =
+            BlockDeviceStripeSource::new(bdev.clone(), STRIPE_SECTOR_COUNT).unwrap();
+        let store = Box::new(MemStore::default());
+
+        let mut archiver = StripeArchiver::new(
+            Box::new(stripe_source),
+            bdev.as_ref(),
+            metadata,
+            Box::new(MemStore::new_with_objects(store.objects.clone())),
+            false,
+            ArchiveCompressionAlgorithm::None,
+            KeyEncryptionCipher::default(),
+            1,
+        )
+        .unwrap();
+
+        // Written but all-zero: archivable, yet produces no data object.
+        archiver.metadata.stripe_headers[1] |= metadata_flags::WRITTEN;
+        bdev.write(stripe_len, vec![0u8; stripe_len].as_slice(), stripe_len);
+        assert_eq!(archiver.archivable_stripe_count(), 1);
+
+        let result = archiver.archive_all();
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("no data stripes"), "unexpected error: {err}");
+
+        assert!(store.list_objects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_archived_data_stripe_count() {
+        let (mut archiver, _store) = prep(16, 0, false, Vec::new());
+        archiver.metadata.stripe_headers[2] |= metadata_flags::WRITTEN;
+        archiver.metadata.stripe_headers[7] |= metadata_flags::WRITTEN;
+
+        assert_eq!(archiver.archivable_stripe_count(), 2);
+        archiver.archive_all().unwrap();
+        assert_eq!(archiver.archived_data_stripe_count(), 2);
     }
 
     fn expect_hash(map: &StripeContentMap, stripe_id: usize) -> &[u8; 32] {

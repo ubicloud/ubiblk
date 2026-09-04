@@ -361,6 +361,115 @@ pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Resu
     Ok(())
 }
 
+/// Outcome of [`mark_written_from_data`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MarkWrittenSummary {
+    /// Stripes examined (i.e. not already written or backed by a source).
+    pub scanned: usize,
+    /// Stripes newly marked as written.
+    pub marked: usize,
+}
+
+/// Whether a backend holds the device, probed via the configured RPC socket.
+pub fn backend_holds_device(config: &v2::Config) -> bool {
+    match config.device.rpc_socket.as_ref() {
+        Some(path) => std::os::unix::net::UnixStream::connect(path).is_ok(),
+        None => false,
+    }
+}
+
+/// Fail if a backend may hold the device: always when the configured RPC
+/// socket is live, and without `force` when liveness cannot be verified.
+pub fn ensure_no_backend_holds_device(config: &v2::Config, force: bool) -> Result<()> {
+    if let Some(path) = config.device.rpc_socket.as_ref() {
+        if std::os::unix::net::UnixStream::connect(path).is_ok() {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "A backend is running (RPC socket {} is live). Stop it before \
+                     modifying device metadata.",
+                    path.display()
+                ),
+            }));
+        }
+        return Ok(());
+    }
+
+    if !force {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "No rpc_socket is configured, so it cannot be verified that no \
+                          backend holds the device. Stop any backend serving this device \
+                          and pass --force to proceed."
+                .to_string(),
+        }));
+    }
+
+    Ok(())
+}
+
+/// Set the WRITTEN flag for every stripe whose data contains a nonzero byte,
+/// repairing metadata for a device populated with track_written disabled.
+/// All-zero, already-written, and source-backed stripes are left untouched.
+#[error_context("Failed to mark written stripes from data")]
+pub fn mark_written_from_data(config: &v2::Config) -> Result<MarkWrittenSummary> {
+    let metadata_path = config.device.metadata_path.as_ref().ok_or_else(|| {
+        crate::ubiblk_error!(InvalidParameter {
+            description: "metadata_path is none".to_string(),
+        })
+    })?;
+
+    let metadata_bdev = build_block_device(metadata_path, config, true)?;
+    let mut metadata = UbiMetadata::load_from_bdev(metadata_bdev.as_ref())?;
+
+    let disk_bdev = build_block_device(&config.device.data_path, config, true)?;
+    let stripe_sector_count = metadata.stripe_sector_count();
+    let device_sector_count = disk_bdev.sector_count();
+
+    let mut io_channel = disk_bdev.create_channel()?;
+    let buf = block_device::shared_buffer(stripe_sector_count as usize * SECTOR_SIZE);
+    let timeout = std::time::Duration::from_secs(30);
+
+    let mut summary = MarkWrittenSummary {
+        scanned: 0,
+        marked: 0,
+    };
+    for stripe_id in 0..metadata.stripe_headers.len() {
+        let header = metadata.stripe_headers[stripe_id];
+        if header
+            & (block_device::metadata_flags::WRITTEN | block_device::metadata_flags::HAS_SOURCE)
+            != 0
+        {
+            continue;
+        }
+
+        let sector_offset = stripe_id as u64 * stripe_sector_count;
+        if sector_offset >= device_sector_count {
+            break;
+        }
+        let sector_count = stripe_sector_count.min(device_sector_count - sector_offset) as u32;
+
+        io_channel.add_read(sector_offset, sector_count, buf.clone(), stripe_id);
+        io_channel.submit()?;
+        block_device::wait_for_completion(io_channel.as_mut(), stripe_id, timeout)?;
+
+        summary.scanned += 1;
+        let byte_count = sector_count as usize * SECTOR_SIZE;
+        let has_data = buf.borrow().as_slice()[..byte_count]
+            .iter()
+            .any(|byte| *byte != 0);
+        if has_data {
+            metadata.stripe_headers[stripe_id] |= block_device::metadata_flags::WRITTEN;
+            summary.marked += 1;
+        }
+    }
+
+    if summary.marked > 0 {
+        let metadata_bdev = build_block_device(metadata_path, config, false)?;
+        metadata.save_to_bdev(metadata_bdev.as_ref())?;
+    }
+
+    Ok(summary)
+}
+
 #[error_context("Failed to ensure metadata file exists with secure permissions")]
 fn ensure_metadata_file(path: &Path, minimum_size: usize) -> Result<()> {
     let mut created = false;
@@ -974,6 +1083,196 @@ mod tests {
         let mut env = BackendEnv::build(&config).unwrap();
         // No bgworker_config, so this is a no-op
         env.run_bgworker_thread().unwrap();
+    }
+
+    #[test]
+    fn mark_written_marks_nonzero_stripes() {
+        let stripe_sector_count_shift = 6u8;
+        let stripe_size = (1usize << stripe_sector_count_shift) * SECTOR_SIZE;
+        let stripe_count = 8;
+
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file
+            .as_file()
+            .set_len((stripe_count * stripe_size) as u64)
+            .unwrap();
+
+        let metadata_file = tempfile::NamedTempFile::new().unwrap();
+        metadata_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), Some(metadata_file.path()), None);
+        init_metadata(&config, stripe_sector_count_shift).unwrap();
+
+        // A single nonzero byte in each of stripes 1 and 3.
+        let mut data = vec![0u8; stripe_count * stripe_size];
+        data[stripe_size] = 0xAB;
+        data[3 * stripe_size + stripe_size / 2] = 0xCD;
+        std::fs::write(disk_file.path(), &data).unwrap();
+
+        let summary = mark_written_from_data(&config).unwrap();
+        assert_eq!(
+            summary,
+            MarkWrittenSummary {
+                scanned: stripe_count,
+                marked: 2
+            }
+        );
+
+        let metadata_bdev = build_block_device(metadata_file.path(), &config, true).unwrap();
+        let metadata = UbiMetadata::load_from_bdev(metadata_bdev.as_ref()).unwrap();
+        for stripe_id in 0..stripe_count {
+            let written =
+                metadata.stripe_headers[stripe_id] & block_device::metadata_flags::WRITTEN != 0;
+            assert_eq!(written, stripe_id == 1 || stripe_id == 3);
+        }
+    }
+
+    #[test]
+    fn mark_written_skips_source_and_written_stripes() {
+        let stripe_sector_count_shift = 6u8;
+        let stripe_size = (1usize << stripe_sector_count_shift) * SECTOR_SIZE;
+        let stripe_count = 4;
+        let image_stripe_count = 2;
+
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        let image_file = tempfile::NamedTempFile::new().unwrap();
+        image_file
+            .as_file()
+            .set_len((image_stripe_count * stripe_size) as u64)
+            .unwrap();
+
+        let metadata_file = tempfile::NamedTempFile::new().unwrap();
+        metadata_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let config = test_config(
+            disk_file.path(),
+            Some(metadata_file.path()),
+            Some(StripeSourceConfig::Raw {
+                image_path: image_file.path().to_path_buf(),
+                autofetch: false,
+                copy_on_read: false,
+            }),
+        );
+
+        std::fs::write(disk_file.path(), vec![0x11u8; stripe_count * stripe_size]).unwrap();
+        init_metadata(&config, stripe_sector_count_shift).unwrap();
+
+        let summary = mark_written_from_data(&config).unwrap();
+        assert_eq!(
+            summary,
+            MarkWrittenSummary {
+                scanned: stripe_count - image_stripe_count,
+                marked: stripe_count - image_stripe_count
+            }
+        );
+
+        let metadata_bdev = build_block_device(metadata_file.path(), &config, true).unwrap();
+        let metadata = UbiMetadata::load_from_bdev(metadata_bdev.as_ref()).unwrap();
+        for stripe_id in 0..stripe_count {
+            let header = metadata.stripe_headers[stripe_id];
+            let written = header & block_device::metadata_flags::WRITTEN != 0;
+            let has_source = header & block_device::metadata_flags::HAS_SOURCE != 0;
+            assert_eq!(has_source, stripe_id < image_stripe_count);
+            assert_eq!(written, stripe_id >= image_stripe_count);
+        }
+
+        // A second run is a no-op.
+        let summary = mark_written_from_data(&config).unwrap();
+        assert_eq!(
+            summary,
+            MarkWrittenSummary {
+                scanned: 0,
+                marked: 0
+            }
+        );
+    }
+
+    #[test]
+    fn mark_written_leaves_all_zero_device_unmarked() {
+        let stripe_sector_count_shift = 6u8;
+        let stripe_size = (1usize << stripe_sector_count_shift) * SECTOR_SIZE;
+        let stripe_count = 4;
+
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file
+            .as_file()
+            .set_len((stripe_count * stripe_size) as u64)
+            .unwrap();
+
+        let metadata_file = tempfile::NamedTempFile::new().unwrap();
+        metadata_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), Some(metadata_file.path()), None);
+        init_metadata(&config, stripe_sector_count_shift).unwrap();
+
+        let summary = mark_written_from_data(&config).unwrap();
+        assert_eq!(
+            summary,
+            MarkWrittenSummary {
+                scanned: stripe_count,
+                marked: 0
+            }
+        );
+    }
+
+    #[test]
+    fn mark_written_fails_without_metadata_path() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), None, None);
+        let result = mark_written_from_data(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("metadata_path"));
+    }
+
+    #[test]
+    fn ensure_no_backend_requires_force_without_rpc_socket() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), None, None);
+        assert!(!backend_holds_device(&config));
+
+        let result = ensure_no_backend_holds_device(&config, false);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("--force"));
+
+        ensure_no_backend_holds_device(&config, true).unwrap();
+    }
+
+    #[test]
+    fn ensure_no_backend_refuses_live_rpc_socket() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let rpc_dir = tempfile::tempdir().unwrap();
+        let rpc_path = rpc_dir.path().join("backend.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&rpc_path).unwrap();
+
+        let mut config = test_config(disk_file.path(), None, None);
+        config.device.rpc_socket = Some(rpc_path);
+        assert!(backend_holds_device(&config));
+
+        // Even force does not override a provably live backend.
+        for force in [false, true] {
+            let result = ensure_no_backend_holds_device(&config, force);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("is live"));
+        }
+    }
+
+    #[test]
+    fn ensure_no_backend_allows_dead_rpc_socket() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let rpc_dir = tempfile::tempdir().unwrap();
+        let mut config = test_config(disk_file.path(), None, None);
+        config.device.rpc_socket = Some(rpc_dir.path().join("gone.sock"));
+
+        assert!(!backend_holds_device(&config));
+        ensure_no_backend_holds_device(&config, false).unwrap();
     }
 
     #[test]

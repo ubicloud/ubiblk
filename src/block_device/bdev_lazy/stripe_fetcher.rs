@@ -280,10 +280,7 @@ impl StripeFetcher {
     }
 
     pub fn accept_pushed_stripe(&mut self, stripe_id: usize, data: &[u8], permit: PushPermit) {
-        if self
-            .shared_metadata_state
-            .stripe_fetched_if_needed(stripe_id)
-        {
+        if self.stripe_is_local(stripe_id) {
             debug!("Stripe {stripe_id} is already local, ignoring the pushed copy");
             return;
         }
@@ -309,6 +306,18 @@ impl StripeFetcher {
             self.stripe_states.get(&stripe_id),
             Some(FetchState::Queued) | Some(FetchState::Fetching) | Some(FetchState::Flushing)
         )
+    }
+
+    /// Whether this stripe's data is already on the target, by either account
+    /// of it. The shared state is the coordinator's, and on a pool it lags: a
+    /// worker reports a landed pull and the coordinator marks it, so for a
+    /// while only the worker's own state knows. A push written in that gap is
+    /// a second write of the stripe, landing after the guest has been let
+    /// onto it and over anything the guest wrote there.
+    fn stripe_is_local(&self, stripe_id: usize) -> bool {
+        self.shared_metadata_state
+            .stripe_fetched_if_needed(stripe_id)
+            || self.stripe_states.get(&stripe_id) == Some(&FetchState::Fetched)
     }
 
     fn write_pushed_stripe(&mut self, stripe_id: usize, data: &[u8]) {
@@ -359,10 +368,9 @@ impl StripeFetcher {
             let Some(data) = self.pending_pushes.remove(&stripe_id) else {
                 continue;
             };
-            if self
-                .shared_metadata_state
-                .stripe_fetched_if_needed(stripe_id)
-            {
+            if self.stripe_is_local(stripe_id) {
+                // The pull it waited behind succeeded, or the stripe arrived
+                // some other way. Either brought the snapshot content.
                 self.push_permits.remove(&stripe_id);
                 continue;
             }
@@ -634,7 +642,7 @@ impl StripeFetcher {
 mod tests {
     use super::*;
     use crate::block_device::bdev_test::TestBlockDevice;
-    use crate::stripe_source::BlockDeviceStripeSource;
+    use crate::stripe_source::{BlockDeviceStripeSource, FlakyStripeSource};
 
     struct TestState {
         source_dev: Box<TestBlockDevice>,
@@ -643,6 +651,14 @@ mod tests {
     }
 
     fn prep(autofetch: bool) -> TestState {
+        prep_with_source(autofetch, |source| source)
+    }
+
+    /// Like `prep`, with the source wrapped: for a source that refuses.
+    fn prep_with_source(
+        autofetch: bool,
+        wrap: impl FnOnce(Box<dyn StripeSource>) -> Box<dyn StripeSource>,
+    ) -> TestState {
         let source_size: u64 = 1024 * 1024; // 1 MiB
         let target_size: u64 = 2 * 1024 * 1024; // 2 MiB
         let stripe_sector_count_shift = 3; // 8 sectors per stripe
@@ -651,9 +667,9 @@ mod tests {
         let source_dev = Box::new(TestBlockDevice::new(source_size));
         let target_dev = Box::new(TestBlockDevice::new(target_size));
 
-        let stripe_source = Box::new(
+        let stripe_source = wrap(Box::new(
             BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count).unwrap(),
-        );
+        ));
 
         let metadata = UbiMetadata::new(
             stripe_sector_count_shift,
@@ -709,17 +725,21 @@ mod tests {
     /// never succeed and the pushed copy is the only correct one.
     #[test]
     fn pushed_stripe_is_applied_after_the_racing_fetch_fails() {
-        let mut state = prep(false);
+        // A source that refuses this stripe for good, the way prod refuses a
+        // stripe it has already copied out: every attempt fails, retries
+        // included. A pull that eventually succeeded would make the push
+        // redundant instead.
+        let mut state = prep_with_source(false, |source| {
+            Box::new(FlakyStripeSource::new(
+                source,
+                vec![(0, MAX_FETCH_RETRIES as usize + 1)],
+            ))
+        });
         let pushed = vec![0xAB; (state.fetcher.stripe_sector_count as usize) * SECTOR_SIZE];
 
-        // Start a pull and make it fail, the way a pull for a stripe prod has
-        // already copied out fails.
-        state
-            .source_dev
-            .fail_next
-            .store(true, std::sync::atomic::Ordering::SeqCst);
         state.fetcher.handle_fetch_request(0);
         state.fetcher.update();
+        assert!(state.fetcher.fetch_in_flight(0));
 
         // The push arrives while that pull is still outstanding.
         state
@@ -817,6 +837,103 @@ mod tests {
             0,
             "and released once the stripe is on the fork's disk"
         );
+    }
+
+    /// A push parked behind a pull that then succeeds is dropped, not written.
+    /// The pull brought the snapshot content, and for a moment only this
+    /// fetcher knows: the coordinator marks the shared state once it hears the
+    /// pull finished. Checking the shared state alone lets the pushed copy go to
+    /// the disk as a second write of the stripe, in flight while the guest is
+    /// being let onto it.
+    #[test]
+    fn a_parked_push_is_dropped_when_its_own_pull_lands() {
+        let mut state = prep(false);
+        let stripe_bytes = (state.fetcher.stripe_sector_count as usize) * SECTOR_SIZE;
+        state
+            .source_dev
+            .write(0, &vec![0x11; stripe_bytes], stripe_bytes);
+        let pushed = vec![0x22; stripe_bytes];
+        let gate = super::super::push_gate::PushGate::new(4);
+
+        // One update puts the pull in flight, and the push arrives behind it.
+        state.fetcher.handle_fetch_request(0);
+        state.fetcher.update();
+        assert!(state.fetcher.fetch_in_flight(0));
+        state
+            .fetcher
+            .accept_pushed_stripe(0, &pushed, gate.acquire());
+        assert_eq!(gate.queued(), 1, "the slot is held while the copy waits");
+
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+
+        assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
+        assert_eq!(
+            state.target_dev.metrics.read().unwrap().writes,
+            1,
+            "the pull's write is the only write of the stripe"
+        );
+        let mut written = vec![0u8; stripe_bytes];
+        state.target_dev.read(0, &mut written, stripe_bytes);
+        assert_eq!(
+            written,
+            vec![0x11; stripe_bytes],
+            "what the pull brought stands"
+        );
+        assert!(state.fetcher.pending_pushes.is_empty());
+        assert_eq!(gate.queued(), 0, "and the slot goes with the dropped push");
+    }
+
+    /// A push for a stripe this fetcher has already pulled is dropped even
+    /// before the shared state says the stripe is there. On a pool the push
+    /// queues behind the pull on the worker's channel, and the worker can
+    /// dequeue it after its pull landed but before the coordinator has heard
+    /// so; written then, it lands over the stripe as the guest is let onto it.
+    #[test]
+    fn a_push_for_a_stripe_already_pulled_is_dropped_before_the_coordinator_hears() {
+        let mut state = prep(false);
+        let stripe_bytes = (state.fetcher.stripe_sector_count as usize) * SECTOR_SIZE;
+        state
+            .source_dev
+            .write(0, &vec![0x11; stripe_bytes], stripe_bytes);
+        let pushed = vec![0x22; stripe_bytes];
+        let gate = super::super::push_gate::PushGate::new(4);
+
+        state.fetcher.handle_fetch_request(0);
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
+        assert!(
+            !state.fetcher.shared_metadata_state.stripe_fetched(0),
+            "the coordinator has not marked the stripe yet"
+        );
+
+        state
+            .fetcher
+            .accept_pushed_stripe(0, &pushed, gate.acquire());
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+
+        assert_eq!(
+            state.target_dev.metrics.read().unwrap().writes,
+            1,
+            "the pull's write is the only write of the stripe"
+        );
+        let mut written = vec![0u8; stripe_bytes];
+        state.target_dev.read(0, &mut written, stripe_bytes);
+        assert_eq!(
+            written,
+            vec![0x11; stripe_bytes],
+            "what the pull brought stands"
+        );
+        assert!(
+            state.fetcher.take_finished_fetches().is_empty(),
+            "and there is nothing new to report"
+        );
+        assert_eq!(gate.queued(), 0, "the slot goes with the dropped push");
     }
 
     /// With no pull in flight the push is written straight away.

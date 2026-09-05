@@ -8,9 +8,12 @@
 //! idle fork cannot stall prod writes and a busy fork does not wait for prod to
 //! overwrite something before it can read it.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    os::fd::{AsRawFd, RawFd},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use log::{info, warn};
@@ -26,6 +29,9 @@ use super::{DynStream, WireCompression, PUSH_STRIPE_FRAME, SNAPSHOT_END_FRAME};
 pub struct RemoteDestination {
     id: DestinationId,
     stream: DynStream,
+    /// A second handle on the socket under `stream`, when there is one, so the
+    /// fork can be found dead without writing to it.
+    socket: Option<Box<dyn AsRawFd + Send>>,
     alive: Arc<AtomicBool>,
     compression: WireCompression,
 }
@@ -35,9 +41,19 @@ impl RemoteDestination {
         Self {
             id,
             stream,
+            socket: None,
             alive: Arc::new(AtomicBool::new(true)),
             compression,
         }
+    }
+
+    /// Check liveness against the socket itself, not only against failed
+    /// pushes. Without this a fork is found dead only when a push to it fails,
+    /// and a fork that dies while prod is not writing is never found at all:
+    /// the kernel has given up on the connection, but nothing asks it.
+    pub fn with_socket(mut self, socket: Box<dyn AsRawFd + Send>) -> Self {
+        self.socket = Some(socket);
+        self
     }
 
     /// Shared with whoever wants to hang up on this destination from another
@@ -100,12 +116,46 @@ impl SnapshotDestination for RemoteDestination {
     }
 
     fn is_alive(&self) -> bool {
-        self.alive.load(Ordering::SeqCst)
+        if !self.alive.load(Ordering::SeqCst) {
+            return false;
+        }
+        if self
+            .socket
+            .as_ref()
+            .is_some_and(|socket| peer_hung_up(socket.as_raw_fd()))
+        {
+            info!("Snapshot destination {} hung up", self.id);
+            self.alive.store(false, Ordering::SeqCst);
+            return false;
+        }
+        true
     }
 
     fn finish(&mut self) {
         self.send_end();
     }
+}
+
+/// Whether the peer on a socket has hung up, or the connection has failed.
+///
+/// The kernel knows as soon as a FIN, a reset or a keepalive timeout lands, but
+/// only tells a process that asks. A push socket is only ever written to, so
+/// nothing asks between pushes; this does, without reading or writing a byte.
+fn peer_hung_up(fd: RawFd) -> bool {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLRDHUP,
+        revents: 0,
+    };
+    // SAFETY: poll_fd is a valid pollfd that outlives the call, and 1 is the
+    // number of entries it points at.
+    let ready = unsafe { libc::poll(&mut poll_fd, 1, 0) };
+    if ready <= 0 {
+        // Nothing to report, or poll itself failed. Neither says the peer is
+        // gone; a push that fails will still catch it.
+        return false;
+    }
+    poll_fd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLRDHUP) != 0
 }
 
 /// What a subscribed fork reads off its push session.
@@ -277,6 +327,25 @@ mod tests {
 
         assert!(died, "writing to a closed peer must fail");
         assert!(!destination.is_alive());
+    }
+
+    /// The case a failed push cannot cover: the fork is gone, and prod has no
+    /// write that would make the worker push anything to find that out.
+    #[test]
+    fn a_fork_that_hangs_up_is_found_dead_without_a_push() {
+        let (server, client) = UnixStream::pair().unwrap();
+        let socket = server.try_clone().unwrap();
+        let destination = RemoteDestination::new(4, Box::new(server), WireCompression::None)
+            .with_socket(Box::new(socket));
+
+        assert!(destination.is_alive(), "a quiet fork is not a dead one");
+
+        drop(client);
+        assert!(
+            !destination.is_alive(),
+            "the hang-up is seen without anything being written"
+        );
+        assert!(!destination.is_alive(), "and it stays dead");
     }
 
     #[test]

@@ -127,13 +127,25 @@ pub fn spawn_snapshot_server(
                     continue;
                 }
 
+                // Keepalive only marks the socket dead; something has to look.
+                // The worker looks at this handle, so a fork that dies while
+                // prod is not writing is dropped rather than kept until a push
+                // to it happens to fail.
+                let socket = match stream.try_clone() {
+                    Ok(socket) => socket,
+                    Err(e) => {
+                        error!("Failed to duplicate a snapshot connection: {e}");
+                        continue;
+                    }
+                };
+
                 let server = server.clone();
                 // One thread per fork. A session that subscribes hands its
                 // stream to the snapshot worker and this thread ends.
                 let spawned = thread::Builder::new()
                     .name("snapshot-session".to_string())
                     .spawn(move || match server.start_session(Box::new(stream)) {
-                        Ok(mut session) => session.handle_requests(),
+                        Ok(session) => session.with_socket(Box::new(socket)).handle_requests(),
                         Err(e) => error!("Failed to start a snapshot session: {e}"),
                     });
 

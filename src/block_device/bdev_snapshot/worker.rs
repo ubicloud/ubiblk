@@ -30,6 +30,16 @@ pub const MAX_DESTINATIONS: usize = 8;
 /// the fork to come up.
 const SUBSCRIBER_GRACE: Duration = Duration::from_secs(60);
 
+/// How often the worker wakes up with no request to serve, while a snapshot has
+/// something to look after: a fork that may have died, or a stripe held for a
+/// subscriber that may never come.
+///
+/// A fork that dies while prod is not writing is otherwise never noticed. Only
+/// a copy-out asks whether a destination is still alive, and with nothing being
+/// written no copy-out runs, so the snapshot stays live for as long as prod
+/// stays quiet.
+const IDLE_WAKEUP: Duration = Duration::from_secs(1);
+
 pub enum SnapshotRequest {
     /// A write is waiting on this stripe, or a destination asked for it.
     CopyOut {
@@ -249,11 +259,9 @@ impl SnapshotWorker {
         Ok(data)
     }
 
-    /// Read the pre-write content of a stripe and hand it to every live
-    /// destination. Destinations that fail are dropped, never retried: prod
-    /// writes are waiting on this.
     /// Forget forks that have gone away. Done before every copy-out so a dead
-    /// fork is dropped even when it is not the one holding a stripe up.
+    /// fork is dropped even when it is not the one holding a stripe up, and on
+    /// every idle wakeup so one is dropped even when nothing is written.
     fn prune_dead_destinations(&mut self) {
         let before = self.destinations.len();
         self.destinations
@@ -268,6 +276,9 @@ impl SnapshotWorker {
         }
     }
 
+    /// Read the pre-write content of a stripe and hand it to every live
+    /// destination. Destinations that fail are dropped, never retried: prod
+    /// writes are waiting on this.
     fn copy_out(&mut self, stripe_id: usize) {
         self.prune_dead_destinations();
 
@@ -374,17 +385,22 @@ impl SnapshotWorker {
 
     pub fn receive_requests(&mut self, block: bool) {
         if block {
-            // With stripes held for a subscriber, wake up regularly so the
-            // grace period can expire even if no request arrives.
-            let blocking_recv = if self.deferred.is_empty() {
+            // With a fork attached or stripes held for one, wake up regularly
+            // so a dead fork is dropped and the grace period can expire even if
+            // no request arrives. With neither there is nothing to look after.
+            let idle = self.destinations.is_empty() && self.deferred.is_empty();
+            let blocking_recv = if idle {
                 self.requests.recv().map_err(RecvTimeoutError::from)
             } else {
-                self.requests.recv_timeout(Duration::from_secs(1))
+                self.requests.recv_timeout(IDLE_WAKEUP)
             };
 
             match blocking_recv {
                 Ok(request) => self.process_request(request),
-                Err(RecvTimeoutError::Timeout) => self.expire_grace_if_needed(),
+                Err(RecvTimeoutError::Timeout) => {
+                    self.expire_grace_if_needed();
+                    self.prune_dead_destinations();
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     error!("Snapshot worker request channel closed");
                     self.done = true;

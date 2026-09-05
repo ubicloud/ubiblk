@@ -224,6 +224,81 @@ fn subscribing_without_a_snapshot_is_refused() {
     assert!(result.is_err());
 }
 
+/// A fork that goes away while prod is quiet. No write means no copy-out, and a
+/// copy-out was the only thing that ever asked whether a fork was still there:
+/// the snapshot stayed live, `snapshot_status` kept reporting the fork, and the
+/// next fork could not be taken until an operator forced a write on prod.
+#[test]
+fn a_fork_that_goes_away_while_prod_is_quiet_is_dropped() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    file.as_file()
+        .write_all(&vec![0u8; STRIPES * STRIPE_BYTES])
+        .unwrap();
+    file.as_file().sync_all().unwrap();
+
+    let disk = SyncBlockDevice::new(file.path().to_path_buf(), false, false, false).unwrap();
+    let (snapshot_ch, snapshot_requests) = channel();
+    let snapshot_device = SnapshotBlockDevice::new(
+        BlockDevice::clone(disk.as_ref()),
+        STRIPE_SHIFT,
+        snapshot_ch.clone(),
+    );
+    let state = snapshot_device.state();
+    let mut worker = SnapshotWorker::new(
+        BlockDevice::clone(disk.as_ref()).as_ref(),
+        state.clone(),
+        snapshot_requests,
+    )
+    .unwrap();
+    thread::spawn(move || worker.run());
+
+    let metadata = UbiMetadata::new(STRIPE_SHIFT, STRIPES, 0);
+    let server = Arc::new(
+        StripeServer::new(
+            Arc::from(BlockDevice::clone(disk.as_ref())),
+            Arc::from(metadata),
+            None,
+        )
+        .with_snapshot(snapshot_ch.clone(), state.clone()),
+    );
+
+    // The snapshot server's accept loop: the session gets a second handle on
+    // the socket, so the worker can tell the fork has gone.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        if let Some(Ok(stream)) = listener.incoming().next() {
+            let socket = stream.try_clone().unwrap();
+            server
+                .start_session(Box::new(stream))
+                .unwrap()
+                .with_socket(Box::new(socket))
+                .handle_requests();
+        }
+    });
+
+    freeze(&state);
+    let subscriber = SnapshotSubscriber::subscribe(
+        Box::new(TcpStream::connect(address).unwrap()),
+        WireCompression::None,
+    )
+    .unwrap();
+    wait_until("the fork to register as a destination", || {
+        state.destination_count() == 1
+    });
+
+    // The fork dies. Prod writes nothing.
+    drop(subscriber);
+
+    wait_until("the dead fork to be dropped", || {
+        state.destination_count() == 0
+    });
+    assert!(
+        !state.snapshot_live(),
+        "it was the only fork, so the snapshot ends and the next one can be taken"
+    );
+}
+
 /// A device whose reads do not complete until the test says so, so a copy-out
 /// can be made to land while a pull is in flight — the window the check before
 /// the read cannot cover.

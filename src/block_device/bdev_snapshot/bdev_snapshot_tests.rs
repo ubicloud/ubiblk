@@ -387,6 +387,78 @@ fn a_dead_destination_is_not_offered_stripes() {
     assert_eq!(channel.poll(), vec![(1, true)]);
 }
 
+/// A fork that dies while prod is not writing has nothing to reveal it: no
+/// copy-out runs, so nothing asks whether it is still there. The worker has to
+/// ask on its own, or the snapshot outlives its last fork for as long as prod
+/// stays quiet, and the next snapshot finds a fork still attached to this one.
+#[test]
+fn a_dead_destination_is_pruned_without_a_write() {
+    let mut h = harness(4);
+    let mut worker = worker_for(&mut h);
+
+    let destination = TestDestination::new(1);
+    attach(&mut worker, &h.state, destination.clone());
+    worker.process_request(SnapshotRequest::Freeze);
+    assert_eq!(h.state.destination_count(), 1);
+
+    // The fork goes away. Nothing is written, so no copy-out will notice.
+    destination.alive.store(false, Ordering::SeqCst);
+
+    // No request is queued: the worker wakes up on its own and looks.
+    worker.receive_requests(true);
+
+    assert!(destination.offered_stripes().is_empty(), "no copy-out ran");
+    assert_eq!(worker.destination_count(), 0);
+    assert_eq!(
+        h.state.destination_count(),
+        0,
+        "snapshot_status no longer reports the dead fork"
+    );
+    assert!(
+        !h.state.snapshot_live(),
+        "it was the last fork, so the snapshot ends"
+    );
+    assert_eq!(h.state.stripe_state(0), FREE, "prod stops paying for it");
+}
+
+#[test]
+fn a_dead_destination_is_pruned_while_another_keeps_the_snapshot() {
+    let mut h = harness(4);
+    let mut worker = worker_for(&mut h);
+
+    let living = TestDestination::new(1);
+    let dying = TestDestination::new(2);
+    attach(&mut worker, &h.state, living.clone());
+    attach(&mut worker, &h.state, dying.clone());
+    worker.process_request(SnapshotRequest::Freeze);
+
+    dying.alive.store(false, Ordering::SeqCst);
+    worker.receive_requests(true);
+
+    assert_eq!(worker.destination_count(), 1);
+    assert_eq!(h.state.destination_count(), 1);
+    assert!(h.state.snapshot_live(), "the other fork still needs it");
+    assert_eq!(h.state.stripe_state(0), LOCKED);
+}
+
+#[test]
+fn a_live_idle_destination_is_not_pruned() {
+    let mut h = harness(4);
+    let mut worker = worker_for(&mut h);
+
+    let destination = TestDestination::new(1);
+    attach(&mut worker, &h.state, destination.clone());
+    worker.process_request(SnapshotRequest::Freeze);
+
+    // A fork that is merely quiet is not a fork that is gone.
+    worker.receive_requests(true);
+
+    assert_eq!(worker.destination_count(), 1);
+    assert_eq!(h.state.destination_count(), 1);
+    assert!(h.state.snapshot_live());
+    assert_eq!(h.state.stripe_state(0), LOCKED);
+}
+
 #[test]
 fn destinations_are_capped() {
     let mut h = harness(2);

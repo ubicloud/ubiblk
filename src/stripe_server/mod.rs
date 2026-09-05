@@ -1,5 +1,6 @@
 use std::{
     io::{Read, Write},
+    os::fd::AsRawFd,
     sync::{atomic::AtomicU64, mpsc::Sender, Arc},
 };
 
@@ -68,6 +69,10 @@ pub struct StripeServer {
 
 pub struct StripeServerSession {
     stream: Option<DynStream>,
+    /// A second handle on the socket under `stream`, if the caller has one.
+    /// Handed to the snapshot worker along with the stream when the session
+    /// subscribes, so a fork that dies is noticed without a push to it.
+    socket: Option<Box<dyn AsRawFd + Send>>,
     /// One buffer, reused for every stripe this session serves. Allocating a
     /// megabyte per request means faulting in and zeroing a megabyte per
     /// request, which the serving side pays on every stripe a fork pulls.
@@ -142,6 +147,7 @@ impl StripeServer {
             .transpose()?;
         Ok(StripeServerSession {
             stream: Some(stream),
+            socket: None,
             stripe_buffer: None,
             compression: WireCompression::default(),
             metadata: self.metadata.clone(),
@@ -152,6 +158,16 @@ impl StripeServer {
             live_state: self.live_state.clone(),
             next_destination_id: self.next_destination_id.clone(),
         })
+    }
+}
+
+impl StripeServerSession {
+    /// Let a subscription made on this session be checked for liveness against
+    /// the socket itself. `socket` must be another handle on the connection
+    /// `stream` was built from.
+    pub fn with_socket(mut self, socket: Box<dyn AsRawFd + Send>) -> Self {
+        self.socket = Some(socket);
+        self
     }
 }
 

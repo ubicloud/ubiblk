@@ -109,7 +109,10 @@ impl StripeServerSession {
             .next_destination_id
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let stream = self.stream.take().expect("stream checked above");
-        let destination = RemoteDestination::new(id, stream, compression);
+        let mut destination = RemoteDestination::new(id, stream, compression);
+        if let Some(socket) = self.socket.take() {
+            destination = destination.with_socket(socket);
+        }
 
         if snapshot_ch
             .send(SnapshotRequest::AddDestination {

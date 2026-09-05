@@ -235,4 +235,60 @@ mod tests {
 
         assert!(bg_worker.shared_state().is_stripe_failed(0));
     }
+
+    #[test]
+    fn bg_worker_marks_a_batch_of_fetches_with_one_header_write() {
+        let stripe_sector_count_shift = 8;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+        let source_dev = TestBlockDevice::new(1024 * 1024);
+        let target_dev = TestBlockDevice::new(1024 * 1024);
+        let metadata_dev = TestBlockDevice::new(1024 * 1024);
+        let stripe_source = Box::new(
+            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
+                .unwrap(),
+        );
+
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, 16, 8);
+        metadata.save_to_bdev(&metadata_dev).unwrap();
+        let metadata_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let (tx, rx) = channel();
+        let mut bg_worker = BgWorker::new(
+            stripe_source,
+            &target_dev,
+            &metadata_dev,
+            4096,
+            false,
+            metadata_state,
+            rx,
+        )
+        .unwrap();
+        let (start_writes, start_flushes) = {
+            let metrics = metadata_dev.metrics.read().unwrap();
+            (metrics.writes, metrics.flushes)
+        };
+
+        // Eight fetches arrive together, as when a guest has several reads
+        // outstanding on stripes that are not local yet.
+        for stripe_id in 0..8 {
+            tx.send(BgWorkerRequest::Fetch { stripe_id }).unwrap();
+        }
+        bg_worker.receive_requests(false);
+        for _ in 0..10 {
+            bg_worker.update();
+        }
+
+        for stripe_id in 0..8 {
+            assert!(bg_worker.shared_state().stripe_fetched(stripe_id));
+        }
+        // Each stripe's data was written on its own, but their headers share
+        // a sector, so marking all eight fetched took one metadata write and
+        // one flush rather than eight of each.
+        assert_eq!(target_dev.metrics.read().unwrap().writes, 8);
+        let metrics = metadata_dev.metrics.read().unwrap();
+        assert_eq!(metrics.writes - start_writes, 1);
+        assert_eq!(metrics.flushes - start_flushes, 1);
+    }
 }

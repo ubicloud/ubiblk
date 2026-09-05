@@ -306,6 +306,7 @@ mod tests {
     use super::*;
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::stripe_source::BlockDeviceStripeSource;
+    use std::{cell::RefCell, rc::Rc};
 
     struct TestState {
         source_dev: Box<TestBlockDevice>,
@@ -537,5 +538,152 @@ mod tests {
         state.fetcher.disconnect_from_source_if_all_fetched();
         assert_eq!(state.fetcher.stripe_source.sector_count(), 0);
         assert!(state.fetcher.disconnected);
+    }
+
+    #[test]
+    fn test_queued_fetches_are_issued_together() {
+        let mut state = prep(false);
+        // More requests than the fetcher has buffers for.
+        let requested = MAX_CONCURRENT_FETCHES + 4;
+        for stripe_id in 0..requested {
+            state.fetcher.handle_fetch_request(stripe_id);
+        }
+
+        // One pass hands the source every queued fetch the buffer pool can
+        // hold, not one per pass.
+        state.fetcher.update();
+        assert_eq!(
+            state.source_dev.metrics.read().unwrap().reads,
+            MAX_CONCURRENT_FETCHES
+        );
+        assert_eq!(state.fetcher.fetch_queue.len(), 4);
+
+        // The rest follow as buffers come back.
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        let mut finished = state.fetcher.take_finished_fetches();
+        assert_eq!(finished.len(), requested);
+        finished.sort_by_key(|(stripe_id, _)| *stripe_id);
+        for (idx, (stripe_id, success)) in finished.iter().enumerate() {
+            assert_eq!(*stripe_id, idx);
+            assert!(success);
+        }
+        assert_eq!(state.source_dev.metrics.read().unwrap().reads, requested);
+        assert_eq!(state.target_dev.metrics.read().unwrap().writes, requested);
+    }
+
+    /// A source that completes a fetch only when the test says so, in the
+    /// order the test chooses.
+    #[derive(Default)]
+    struct ManualSourceState {
+        pending: Vec<(usize, SharedBuffer)>,
+        completed: Vec<(usize, bool)>,
+    }
+
+    impl ManualSourceState {
+        fn complete(&mut self, stripe_id: usize) {
+            let idx = self
+                .pending
+                .iter()
+                .position(|(id, _)| *id == stripe_id)
+                .expect("stripe was requested");
+            let (_, buffer) = self.pending.remove(idx);
+            buffer
+                .borrow_mut()
+                .as_mut_slice()
+                .fill((stripe_id + 1) as u8);
+            self.completed.push((stripe_id, true));
+        }
+    }
+
+    struct ManualStripeSource {
+        state: Rc<RefCell<ManualSourceState>>,
+        sector_count: u64,
+    }
+
+    impl StripeSource for ManualStripeSource {
+        fn request(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
+            self.state.borrow_mut().pending.push((stripe_id, buffer));
+            Ok(())
+        }
+
+        fn poll(&mut self) -> Vec<(usize, bool)> {
+            std::mem::take(&mut self.state.borrow_mut().completed)
+        }
+
+        fn busy(&self) -> bool {
+            let state = self.state.borrow();
+            !state.pending.is_empty() || !state.completed.is_empty()
+        }
+
+        fn sector_count(&self) -> u64 {
+            self.sector_count
+        }
+
+        fn has_stripe(&self, _stripe_id: usize) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_fetches_finish_in_the_order_the_source_completes_them() {
+        let stripe_sector_count_shift = 3;
+        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
+        let stripe_size = stripe_sector_count as usize * SECTOR_SIZE;
+        let target_dev = TestBlockDevice::new(1024 * 1024);
+        let source_state = Rc::new(RefCell::new(ManualSourceState::default()));
+        let stripe_source = Box::new(ManualStripeSource {
+            state: source_state.clone(),
+            sector_count: target_dev.sector_count(),
+        });
+        let stripe_count = target_dev.stripe_count(stripe_sector_count);
+        let metadata = UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count);
+        let mut fetcher = StripeFetcher::new(
+            stripe_source,
+            &target_dev,
+            stripe_sector_count,
+            SharedMetadataState::new(&metadata),
+            SECTOR_SIZE,
+            false,
+        )
+        .unwrap();
+
+        for stripe_id in [0, 1, 2] {
+            fetcher.handle_fetch_request(stripe_id);
+        }
+        fetcher.update();
+        // All three are outstanding at the source at once.
+        assert_eq!(source_state.borrow().pending.len(), 3);
+        assert!(fetcher.take_finished_fetches().is_empty());
+
+        // The last one asked for comes back first. It alone is written,
+        // flushed and reported; the others are still waiting on the source.
+        source_state.borrow_mut().complete(2);
+        for _ in 0..3 {
+            fetcher.update();
+        }
+        assert_eq!(fetcher.take_finished_fetches(), vec![(2, true)]);
+        assert_eq!(target_dev.metrics.read().unwrap().writes, 1);
+        assert_eq!(target_dev.metrics.read().unwrap().flushes, 1);
+        let mut stripe = vec![0u8; stripe_size];
+        target_dev.read(2 * stripe_size, &mut stripe, stripe_size);
+        assert!(stripe.iter().all(|byte| *byte == 3));
+        target_dev.read(0, &mut stripe, stripe_size);
+        assert!(stripe.iter().all(|byte| *byte == 0));
+
+        source_state.borrow_mut().complete(0);
+        for _ in 0..3 {
+            fetcher.update();
+        }
+        assert_eq!(fetcher.take_finished_fetches(), vec![(0, true)]);
+
+        source_state.borrow_mut().complete(1);
+        for _ in 0..3 {
+            fetcher.update();
+        }
+        assert_eq!(fetcher.take_finished_fetches(), vec![(1, true)]);
+        assert!(!fetcher.busy());
+        assert_eq!(target_dev.metrics.read().unwrap().writes, 3);
     }
 }

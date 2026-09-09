@@ -73,35 +73,119 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
     let queue_size = config.tuning.queue_size as u16;
     let io_buf_bytes = config.tuning.seg_size_max;
 
-    let ctrl = std::sync::Arc::new(create_ublk_ctrl(
-        device_name,
+    let (created_sender, created_receiver) = std::sync::mpsc::channel();
+    let device = Device {
+        name: device_name,
+        size: device_size,
         num_queues,
         queue_size,
         io_buf_bytes,
-    )?);
+        alignment: backend_alignment,
+        symlink: device_symlink.clone(),
+    };
+    let io_trackers = backend_env.io_trackers().clone();
+    let thread = std::thread::Builder::new()
+        .name("ublk-device".to_string())
+        .spawn(move || run_ublk_device(device, bdev, io_trackers, created_sender))
+        .map_err(|e| crate::ubiblk_error!(ThreadCreation { source: e }))?;
+
+    let dev_id = match created_receiver.recv_timeout(DEVICE_CREATE_TIMEOUT) {
+        Ok(created) => created?,
+        Err(_) => {
+            return Err(crate::ubiblk_error!(Timeout {
+                description: format!(
+                    "kernel did not complete ublk device creation (UBLK_U_CMD_ADD_DEV) \
+                     within {}s. This usually indicates a kernel ublk regression (for \
+                     example the NULL pointer dereference in ublk_init_queues on \
+                     6.17.0-*-aws kernels); check `dmesg | grep -i ublk`. The creation \
+                     thread is stuck in an uninterruptible io_uring wait and cannot be \
+                     cancelled; the ublk control device may stay wedged until reboot.",
+                    DEVICE_CREATE_TIMEOUT.as_secs()
+                ),
+            }))
+        }
+    };
 
     // Ensure the kernel device is torn down on Ctrl-C so we don't leave a stale
-    // /dev/ublk* entry if the process exits without a clean shutdown.
-    let ctrl_sig = ctrl.clone();
-    let ctrl_symlink = device_symlink.clone();
+    // /dev/ublk* entry if the process exits without a clean shutdown. The
+    // handler opens its own control handle from the id, since the one serving
+    // the device belongs to another thread.
+    let ctrl_symlink = device_symlink;
     if let Err(e) = ctrlc::set_handler(move || {
-        handle_ctrlc_shutdown(&ctrl_sig, ctrl_symlink.as_deref());
+        handle_ctrlc_shutdown(dev_id, ctrl_symlink.as_deref());
     }) {
         log::warn!("Failed to set Ctrl-C handler: {e}");
     }
 
-    let io_trackers = backend_env.io_trackers().clone();
-    let announce_symlink = device_symlink.clone();
+    thread.join().map_err(|_| {
+        crate::ubiblk_error!(InvalidParameter {
+            description: "the ublk device thread panicked".to_string(),
+        })
+    })?
+}
+
+/// What the device thread needs to build and serve the device.
+struct Device {
+    name: String,
+    size: u64,
+    num_queues: u16,
+    queue_size: u16,
+    io_buf_bytes: u32,
+    alignment: usize,
+    symlink: Option<PathBuf>,
+}
+
+/// Build the device and serve it, all on one thread.
+///
+/// Every control command libublk issues goes through a ring it keeps in
+/// thread-local storage, and `UblkCtrl` is `Send` regardless: moving one to
+/// another thread compiles and then panics on the first command with "Control
+/// ring not initialized". So the thread that creates the device is the thread
+/// that serves it, and the caller learns the device exists through `created`
+/// rather than by taking the handle.
+fn run_ublk_device(
+    device: Device,
+    bdev: Box<dyn BlockDevice>,
+    io_trackers: Vec<IoTracker>,
+    created: std::sync::mpsc::Sender<Result<u32>>,
+) -> Result<()> {
+    let ctrl = UblkCtrlBuilder::default()
+        .name(&device.name)
+        .nr_queues(device.num_queues)
+        .depth(device.queue_size)
+        .io_buf_bytes(device.io_buf_bytes)
+        // Add the device immediately so the backend can bind queues in run_target.
+        .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
+        .build();
+
+    let ctrl = match ctrl {
+        Ok(ctrl) => ctrl,
+        Err(e) => {
+            let _ = created.send(Err(e.into()));
+            return Ok(());
+        }
+    };
+
+    if created.send(Ok(ctrl.dev_info().dev_id)).is_err() {
+        // The caller gave up waiting; leaving the device behind would be worse
+        // than the error it already returned.
+        let _ = ctrl.del_dev();
+        return Ok(());
+    }
+
+    let device_size = device.size;
+    let alignment = device.alignment;
+    let announce_symlink = device.symlink.clone();
     ctrl.run_target(
         move |dev| configure_ublk_device(dev, device_size),
         move |qid, dev| {
             let io_tracker = io_trackers[qid as usize].clone();
-            serve_ublk_queue(qid, dev, bdev.clone(), backend_alignment, io_tracker)
+            serve_ublk_queue(qid, dev, bdev.clone(), alignment, io_tracker)
         },
         move |ctrl| announce_ublk_device(ctrl, announce_symlink.as_deref()),
     )?;
 
-    if let Some(symlink_path) = device_symlink.as_deref() {
+    if let Some(symlink_path) = device.symlink.as_deref() {
         if let Err(err) = remove_device_symlink(symlink_path) {
             warn!(
                 "Failed to remove device symlink {}: {err}",
@@ -113,51 +197,7 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
     Ok(())
 }
 
-/// Create the ublk control device with a bounded wait. libublk issues
-/// ADD_DEV synchronously inside `UblkCtrlBuilder::build`, and on kernels with
-/// a broken ublk driver the completion never arrives and the wait is
-/// uninterruptible — so build on a separate thread and time out instead of
-/// hanging the backend forever.
-fn create_ublk_ctrl(
-    device_name: String,
-    num_queues: u16,
-    queue_size: u16,
-    io_buf_bytes: u32,
-) -> Result<UblkCtrl> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("ublk-add-dev".to_string())
-        .spawn(move || {
-            let result = UblkCtrlBuilder::default()
-                .name(&device_name)
-                .nr_queues(num_queues)
-                .depth(queue_size)
-                .io_buf_bytes(io_buf_bytes)
-                // Add the device immediately so the backend can bind queues in run_target.
-                .dev_flags(UblkFlags::UBLK_DEV_F_ADD_DEV)
-                .build();
-            let _ = sender.send(result);
-        })
-        .map_err(|e| crate::ubiblk_error!(ThreadCreation { source: e }))?;
-
-    match receiver.recv_timeout(DEVICE_CREATE_TIMEOUT) {
-        Ok(result) => Ok(result?),
-        Err(_) => Err(crate::ubiblk_error!(Timeout {
-            description: format!(
-                "kernel did not complete ublk device creation (UBLK_U_CMD_ADD_DEV) \
-                 within {}s. This usually indicates a kernel ublk regression (for \
-                 example the NULL pointer dereference in ublk_init_queues on \
-                 6.17.0-*-aws kernels); check `dmesg | grep -i ublk`. The creation \
-                 thread is stuck in an uninterruptible io_uring wait and cannot be \
-                 cancelled; the ublk control device may stay wedged until reboot.",
-                DEVICE_CREATE_TIMEOUT.as_secs()
-            ),
-        })),
-    }
-}
-
-fn handle_ctrlc_shutdown(ctrl: &UblkCtrl, device_symlink: Option<&Path>) {
-    let dev_id = ctrl.dev_info().dev_id;
+fn handle_ctrlc_shutdown(dev_id: u32, device_symlink: Option<&Path>) {
     if let Err(e) = UblkCtrl::new_simple(dev_id as i32).and_then(|c| c.del_dev()) {
         log::error!("Failed to delete ublk device (dev_id={dev_id}): {e}");
     }

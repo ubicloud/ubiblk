@@ -158,10 +158,12 @@ impl StripeSourceBuilder {
         })
     }
 
+    /// `Send` because a store can be handed to the thread that keeps a device's
+    /// cache under its size. Both stores built here already are.
     pub fn build_archive_store(
         config: &ArchiveStorageConfig,
         secrets: &std::collections::HashMap<String, ResolvedSecret>,
-    ) -> Result<Box<dyn ArchiveStore>> {
+    ) -> Result<Box<dyn ArchiveStore + Send>> {
         match config {
             ArchiveStorageConfig::Filesystem { path, .. } => {
                 Ok(Box::new(FileSystemStore::new(path.into())?))

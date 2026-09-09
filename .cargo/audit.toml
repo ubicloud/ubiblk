@@ -8,16 +8,18 @@
 ignore = [
   # bitmaps is unmaintained. Maintenance-status warning, not an exploitable
   # vulnerability; the only user is libublk, a direct upstream dependency.
-  # There is no patched release (patched = []), and libublk 0.4.8 (the latest)
-  # still depends on bitmaps 3.2.1, so no upgrade removes it.
+  # There is no patched release (patched = []), and bitmaps is a mandatory,
+  # non-optional dependency of libublk 0.4.8 (the latest), so no upgrade or
+  # feature change removes it.
   "RUSTSEC-2026-0247",
   # Unsound `Bitmap::try_from(&[u8])` can create invalid values. Not reachable
   # from ubiblk: libublk only constructs bitmaps via `Bitmap::new()` for CPU
-  # affinity (libublk-0.4.6/src/ctrl.rs), never from untrusted byte slices.
+  # affinity (libublk-0.4.8/src/ctrl.rs:241,295), never from untrusted byte
+  # slices.
   # No patched release exists; see the note above.
   "RUSTSEC-2025-0167",
   # h2 0.3.x unbounded empty DATA frames (low-severity DoS, fixed in >= 0.4.16).
-  # ubiblk's HTTPS client uses h2 0.4.16, which is patched. h2 0.3.x is an
+  # ubiblk's HTTPS client uses h2 0.4.19, which is patched. h2 0.3.x is an
   # *optional* dependency of aws-smithy-http-client (`dep:h2-0-3`, gated behind
   # its `hyper-014` feature) and reaches our lockfile only through
   # dev-dependencies: `aws-smithy-mocks` and `aws-sdk-s3`'s `test-util` feature,

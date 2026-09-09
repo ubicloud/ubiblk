@@ -69,7 +69,7 @@ bindgen = "0.72.1"
 [dev-dependencies]
 virtio-queue = { version = "0.18.0", features = ["test-utils"] }
 vm-memory = { version = "0.18.0", features = ["backend-mmap", "backend-atomic"] }
-aws-smithy-mocks = "0.2.2"
+aws-smithy-mocks = "0.3.0"
 aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio", "test-util"] }
 
 [features]

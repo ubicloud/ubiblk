@@ -7,6 +7,7 @@ use crate::{
 };
 
 use super::channel::SpillIoChannel;
+use super::evictor::Evictor;
 use super::map::AddressMap;
 use super::shared::Shared;
 
@@ -65,6 +66,20 @@ impl SpillBlockDevice {
             shared,
             store_factory,
             sector_count,
+        })
+    }
+
+    /// Frees slots ahead of demand, so a miss usually finds one waiting rather
+    /// than having to make room itself.
+    pub fn evictor(&self) -> Result<Evictor> {
+        let slots = self.shared.map.lock().unwrap().slots();
+        Ok(Evictor {
+            shared: self.shared.clone(),
+            base: self.base.create_channel()?,
+            store: (self.store_factory)()?,
+            buf: crate::block_device::shared_buffer(self.shared.chunk_len()),
+            next_id: 0,
+            headroom: std::cmp::max(1, slots / 8),
         })
     }
 

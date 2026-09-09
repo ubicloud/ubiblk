@@ -60,7 +60,7 @@ pub use bdev_lazy::{
     },
     status_report::{StatusReport, StatusReporter},
 };
-pub use bdev_spill::{SpillBlockDevice, StoreFactory};
+pub use bdev_spill::{Evictor, SpillBlockDevice, StoreFactory};
 
 pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_null::NullBlockDevice;

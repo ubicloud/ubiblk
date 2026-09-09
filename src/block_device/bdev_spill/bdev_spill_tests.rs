@@ -76,6 +76,21 @@ fn read_chunk(chan: &mut Box<dyn IoChannel>, chunk_id: u64, id: usize) -> Vec<u8
     read_at(chan, chunk_id * CHUNK_SECTORS, CHUNK_SECTORS as u32, id)
 }
 
+/// Free slots until the evictor has all the headroom it wants.
+fn evict_in_background(device: &SpillBlockDevice) -> (usize, usize) {
+    let mut evictor = device.evictor().unwrap();
+    let (mut dropped, mut uploaded) = (0, 0);
+    for _ in 0..SLOTS * 2 {
+        let (d, u) = evictor.run_once(SLOTS as usize);
+        dropped += d;
+        uploaded += u;
+        if (d, u) == (0, 0) {
+            break;
+        }
+    }
+    (dropped, uploaded)
+}
+
 fn evict_named(device: &SpillBlockDevice, chunk_id: usize) -> bool {
     device.evict_named(chunk_id).expect("eviction failed")
 }
@@ -337,6 +352,40 @@ fn a_real_file_stays_the_size_of_the_cache() {
             read_chunk(&mut chan, chunk_id, 200 + chunk_id as usize),
             vec![0x80 + chunk_id as u8; CHUNK_LEN],
             "chunk {chunk_id} did not come back from the store"
+        );
+    }
+}
+
+/// The evictor exists so that a channel usually finds a slot waiting rather
+/// than having to free one on the thread serving the request.
+#[test]
+fn the_evictor_frees_slots_ahead_of_demand() {
+    let dir = tempfile::tempdir().unwrap();
+    let device = device(&dir);
+    let mut chan = device.create_channel().unwrap();
+
+    for chunk_id in 0..SLOTS {
+        write_chunk(
+            &mut chan,
+            chunk_id,
+            0x70 + chunk_id as u8,
+            chunk_id as usize,
+        );
+    }
+    assert_eq!(device.resident_chunks(), SLOTS as usize);
+
+    let (dropped, uploaded) = evict_in_background(&device);
+    assert!(dropped + uploaded > 0, "nothing was freed");
+    assert!(
+        device.resident_chunks() < SLOTS as usize,
+        "no slot was free for the next miss"
+    );
+
+    for chunk_id in 0..SLOTS {
+        assert_eq!(
+            read_chunk(&mut chan, chunk_id, 300 + chunk_id as usize),
+            vec![0x70 + chunk_id as u8; CHUNK_LEN],
+            "chunk {chunk_id} did not survive being freed"
         );
     }
 }

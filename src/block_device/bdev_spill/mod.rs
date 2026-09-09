@@ -3,6 +3,7 @@
 
 mod channel;
 mod device;
+mod evictor;
 mod map;
 mod shared;
 
@@ -10,3 +11,4 @@ mod shared;
 mod bdev_spill_tests;
 
 pub use device::{SpillBlockDevice, StoreFactory};
+pub use evictor::Evictor;

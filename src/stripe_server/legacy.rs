@@ -238,6 +238,7 @@ pub fn load_legacy_config(config_path: &Path, kek_path: Option<&Path>) -> Result
     };
 
     Ok(v2::Config {
+        spill: None,
         device: DeviceSection {
             data_path: options.path.into(),
             metadata_path: options.metadata_path.map(Into::into),

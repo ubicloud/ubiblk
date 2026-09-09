@@ -41,6 +41,17 @@ impl Config {
             stripe_source.validate(&common.danger_zone, &common.secrets)?;
         }
 
+        let spill: Option<crate::config::v2::SpillSection> =
+            parse_optional_section(&merged, "spill")?;
+        if let Some(spill) = &spill {
+            spill.storage.validate(&common.secrets)?;
+            if spill.size_mb == 0 || spill.chunk_kb == 0 {
+                return Err(ubiblk_error!(InvalidParameter {
+                    description: "spill size_mb and chunk_kb must be greater than zero".to_string(),
+                }));
+            }
+        }
+
         if let Some(encryption) = &encryption {
             encryption.validate_secrets(&common.secrets)?;
         } else if !(common.danger_zone.enabled && common.danger_zone.allow_unencrypted_disk) {
@@ -55,17 +66,19 @@ impl Config {
             encryption,
             danger_zone: common.danger_zone,
             stripe_source,
+            spill,
             secrets: common.secrets,
         })
     }
 
-    fn allowed_top_level_keys() -> [&'static str; 6] {
+    fn allowed_top_level_keys() -> [&'static str; 7] {
         [
             "device",
             "tuning",
             "encryption",
             "danger_zone",
             "stripe_source",
+            "spill",
             "secrets",
         ]
     }
@@ -723,5 +736,48 @@ address = "127.0.0.1:3322"
             config.secrets["xts"].as_bytes(),
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
+    }
+
+    #[test]
+    fn parses_a_spill_section() {
+        let toml = r#"
+            [device]
+            data_path = "/dev/ubiblk0"
+            [danger_zone]
+            enabled = true
+            allow_unencrypted_disk = true
+            [spill]
+            size_mb = 102400
+            prefix = "branch-a"
+            [spill.storage]
+            storage = "filesystem"
+            path = "/var/lib/ubiblk/objects"
+        "#;
+        let config = parse_config(toml).expect("Failed to load config");
+        let spill = config.spill.expect("spill section");
+        assert_eq!(spill.size_mb, 102400);
+        assert_eq!(spill.chunk_kb, 128, "the default chunk size");
+        assert_eq!(spill.prefix, "branch-a");
+    }
+
+    #[test]
+    fn rejects_a_device_that_presents_nothing() {
+        let toml = r#"
+            [device]
+            data_path = "/dev/ubiblk0"
+            [danger_zone]
+            enabled = true
+            allow_unencrypted_disk = true
+            [spill]
+            size_mb = 0
+            prefix = "branch-a"
+            [spill.storage]
+            storage = "filesystem"
+            path = "/var/lib/ubiblk/objects"
+        "#;
+        let err = parse_config(toml)
+            .expect_err("a device of no size should be refused")
+            .to_string();
+        assert!(err.contains("greater than zero"), "{err}");
     }
 }

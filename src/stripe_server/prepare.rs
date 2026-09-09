@@ -86,6 +86,7 @@ mod tests {
 
     fn config(path: String, metadata_path: Option<String>, track_written: bool) -> v2::Config {
         v2::Config {
+            spill: None,
             device: v2::DeviceSection {
                 data_path: path.into(),
                 metadata_path: metadata_path.map(Into::into),

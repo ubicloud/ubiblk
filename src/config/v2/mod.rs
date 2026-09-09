@@ -26,9 +26,31 @@ pub struct Config {
     pub encryption: Option<EncryptionSection>,
     pub danger_zone: DangerZone,
     pub stripe_source: Option<stripe_source::StripeSourceConfig>,
+    pub spill: Option<SpillSection>,
 
     /// Resolved secret values keyed by name.
     pub secrets: HashMap<String, secrets::ResolvedSecret>,
+}
+
+/// Makes the disk a cache for a larger device, with the rest in an object
+/// store. The disk's own size is the ceiling; `size_mb` is what the device
+/// presents.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SpillSection {
+    pub size_mb: u64,
+    /// The unit moved in and out, and one object in the store.
+    #[serde(default = "default_spill_chunk_kb")]
+    pub chunk_kb: u64,
+    /// Namespace for this device's objects. Belongs to one lifetime of one
+    /// device: the address map does not survive a restart, so reusing a prefix
+    /// would put the previous life's chunks under an empty cache.
+    pub prefix: String,
+    pub storage: stripe_source::ArchiveStorageConfig,
+}
+
+fn default_spill_chunk_kb() -> u64 {
+    128
 }
 
 #[derive(Debug, Clone)]

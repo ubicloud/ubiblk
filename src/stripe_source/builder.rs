@@ -255,6 +255,7 @@ mod tests {
             });
 
         v2::Config {
+            spill: None,
             device: DeviceSection {
                 data_path: "/tmp/non-existent-disk".into(),
                 metadata_path: None,

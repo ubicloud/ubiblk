@@ -58,7 +58,7 @@ crossbeam-channel = "0.5.15"
 libublk = "0.4.7"
 ctrlc = "3.5.1"
 ubiblk-macros = { path = "crates/ubiblk-macros" }
-zstd = "0.13.3"
+zstd = "0.14.0"
 crc32fast = "1.4"
 toml = "1.0.1"
 zeroize = "1.8.2"

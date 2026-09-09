@@ -53,8 +53,7 @@ impl BackendEnv {
     pub fn build(config: &v2::Config) -> Result<Self> {
         let alignment = Self::determine_alignment(&config.device.data_path)?;
 
-        let disk_device = build_block_device(&config.device.data_path, config, false)
-            .context("Failed to build disk device")?;
+        let disk_device = build_data_device(config).context("Failed to build disk device")?;
         let metadata_device = config
             .device
             .metadata_path
@@ -488,34 +487,92 @@ pub fn build_block_device(
     config: &v2::Config,
     readonly: bool,
 ) -> Result<Box<dyn BlockDevice>> {
-    let mut block_device: Box<dyn BlockDevice> = create_io_engine_device(
+    encrypt_if_configured(build_io_engine(path, config, readonly)?, config)
+}
+
+/// The device the backend serves. The spill layer sits under encryption, so
+/// what leaves for the object store is ciphertext.
+fn build_data_device(config: &v2::Config) -> Result<Box<dyn BlockDevice>> {
+    let device = build_io_engine(&config.device.data_path, config, false)?;
+    let device = spill_if_configured(device, config)?;
+    encrypt_if_configured(device, config)
+}
+
+fn build_io_engine(
+    path: &Path,
+    config: &v2::Config,
+    readonly: bool,
+) -> Result<Box<dyn BlockDevice>> {
+    create_io_engine_device(
         config.tuning.io_engine.clone(),
         PathBuf::from(path),
         config.tuning.queue_size,
         readonly,
         true,
         config.tuning.write_through,
+    )
+}
+
+fn encrypt_if_configured(
+    block_device: Box<dyn BlockDevice>,
+    config: &v2::Config,
+) -> Result<Box<dyn BlockDevice>> {
+    let Some(encryption) = &config.encryption else {
+        return Ok(block_device);
+    };
+    let xts_key = config
+        .secrets
+        .get(encryption.xts_key.id())
+        .ok_or_else(|| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: format!("Encryption secret '{}' is missing", encryption.xts_key.id()),
+            })
+        })?
+        .as_bytes();
+    let (key1, key2) = xts_key.split_at(32);
+    Ok(block_device::CryptBlockDevice::new(
+        block_device,
+        key1.to_vec(),
+        key2.to_vec(),
+    )?)
+}
+
+#[error_context("Failed to build the spill layer")]
+fn spill_if_configured(
+    device: Box<dyn BlockDevice>,
+    config: &v2::Config,
+) -> Result<Box<dyn BlockDevice>> {
+    let Some(spill) = config.spill.as_ref() else {
+        return Ok(device);
+    };
+
+    let storage = spill.storage.clone();
+    let secrets = config.secrets.clone();
+    let store_factory: block_device::StoreFactory =
+        std::sync::Arc::new(move || StripeSourceBuilder::build_archive_store(&storage, &secrets));
+
+    let cache_mb = device.sector_count() * SECTOR_SIZE as u64 / (1024 * 1024);
+    let spill_device = block_device::SpillBlockDevice::new(
+        device,
+        spill.size_mb * 1024 * 1024 / SECTOR_SIZE as u64,
+        spill.chunk_kb * 1024 / SECTOR_SIZE as u64,
+        &spill.prefix,
+        store_factory,
     )?;
 
-    if let Some(encryption) = &config.encryption {
-        let xts_key = config
-            .secrets
-            .get(encryption.xts_key.id())
-            .ok_or_else(|| {
-                crate::ubiblk_error!(InvalidParameter {
-                    description: format!(
-                        "Encryption secret '{}' is missing",
-                        encryption.xts_key.id()
-                    ),
-                })
-            })?
-            .as_bytes();
-        let (key1, key2) = xts_key.split_at(32);
-        block_device =
-            block_device::CryptBlockDevice::new(block_device, key1.to_vec(), key2.to_vec())?;
-    }
+    info!(
+        "Serving {} MiB from a {cache_mb} MiB cache, with the rest under {}. The address map is \
+         in memory: this device's content does not survive a restart.",
+        spill.size_mb, spill.prefix
+    );
 
-    Ok(block_device)
+    let evictor = spill_device.evictor()?;
+    std::thread::Builder::new()
+        .name("spill-evictor".to_string())
+        .spawn(move || evictor.run())
+        .map_err(|e| crate::ubiblk_error!(ThreadCreation { source: e }))?;
+
+    Ok(Box::new(spill_device))
 }
 
 #[cfg(test)]

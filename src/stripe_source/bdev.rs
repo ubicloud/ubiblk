@@ -1,3 +1,4 @@
+use crate::backends::SECTOR_SIZE;
 use crate::block_device::{BlockDevice, IoChannel, SharedBuffer};
 use crate::Result;
 
@@ -32,6 +33,14 @@ impl StripeSource for BlockDeviceStripeSource {
             .stripe_sector_count
             .min(self.source_sector_count - stripe_sector_offset);
 
+        // Callers reuse buffers, so the part of the last stripe the source does
+        // not have would otherwise be the previous stripe's bytes.
+        {
+            let mut buf = buffer.borrow_mut();
+            let read_len = (stripe_sector_count as usize * SECTOR_SIZE).min(buf.len());
+            buf.as_mut_slice()[read_len..].fill(0);
+        }
+
         self.channel.add_read(
             stripe_sector_offset,
             stripe_sector_count as u32,
@@ -63,9 +72,29 @@ impl StripeSource for BlockDeviceStripeSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::SECTOR_SIZE;
     use crate::block_device::{bdev_test::TestBlockDevice, shared_buffer};
     use crate::UbiblkError;
+
+    #[test]
+    fn a_stripe_the_source_only_partly_holds_reads_back_zero_padded() {
+        let stripe_sectors = 4u64;
+        let device = Box::new(TestBlockDevice::new(6 * SECTOR_SIZE as u64));
+        device.write(
+            4 * SECTOR_SIZE,
+            &vec![0xBBu8; 2 * SECTOR_SIZE],
+            2 * SECTOR_SIZE,
+        );
+        let mut source = BlockDeviceStripeSource::new(device, stripe_sectors).unwrap();
+
+        let buffer = shared_buffer(stripe_sectors as usize * SECTOR_SIZE);
+        buffer.borrow_mut().as_mut_slice().fill(0xAA);
+        source.request(1, buffer.clone()).unwrap();
+        assert_eq!(source.poll(), vec![(1, true)]);
+
+        let mut expected = vec![0xBBu8; 2 * SECTOR_SIZE];
+        expected.extend(vec![0u8; 2 * SECTOR_SIZE]);
+        assert_eq!(buffer.borrow().as_slice(), expected.as_slice());
+    }
 
     #[test]
     fn test_request_beyond_end_errors() {

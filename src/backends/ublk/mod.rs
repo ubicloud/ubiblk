@@ -89,22 +89,7 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
         .spawn(move || run_ublk_device(device, bdev, io_trackers, created_sender))
         .map_err(|e| crate::ubiblk_error!(ThreadCreation { source: e }))?;
 
-    let dev_id = match created_receiver.recv_timeout(DEVICE_CREATE_TIMEOUT) {
-        Ok(created) => created?,
-        Err(_) => {
-            return Err(crate::ubiblk_error!(Timeout {
-                description: format!(
-                    "kernel did not complete ublk device creation (UBLK_U_CMD_ADD_DEV) \
-                     within {}s. This usually indicates a kernel ublk regression (for \
-                     example the NULL pointer dereference in ublk_init_queues on \
-                     6.17.0-*-aws kernels); check `dmesg | grep -i ublk`. The creation \
-                     thread is stuck in an uninterruptible io_uring wait and cannot be \
-                     cancelled; the ublk control device may stay wedged until reboot.",
-                    DEVICE_CREATE_TIMEOUT.as_secs()
-                ),
-            }))
-        }
-    };
+    let dev_id = await_device_creation(&created_receiver, DEVICE_CREATE_TIMEOUT)?;
 
     // Ensure the kernel device is torn down on Ctrl-C so we don't leave a stale
     // /dev/ublk* entry if the process exits without a clean shutdown. The
@@ -122,6 +107,32 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
             description: "the ublk device thread panicked".to_string(),
         })
     })?
+}
+
+/// Wait for the device thread to report that the kernel created the device.
+fn await_device_creation(
+    created: &std::sync::mpsc::Receiver<Result<u32>>,
+    timeout: Duration,
+) -> Result<u32> {
+    match created.recv_timeout(timeout) {
+        Ok(created) => created,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err(crate::ubiblk_error!(InvalidParameter {
+                description: "the ublk device thread stopped without creating a device".to_string(),
+            }))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(crate::ubiblk_error!(Timeout {
+            description: format!(
+                "kernel did not complete ublk device creation (UBLK_U_CMD_ADD_DEV) \
+                 within {}s. This usually indicates a kernel ublk regression (for \
+                 example the NULL pointer dereference in ublk_init_queues on \
+                 6.17.0-*-aws kernels); check `dmesg | grep -i ublk`. The creation \
+                 thread is stuck in an uninterruptible io_uring wait and cannot be \
+                 cancelled; the ublk control device may stay wedged until reboot.",
+                timeout.as_secs()
+            ),
+        })),
+    }
 }
 
 /// What the device thread needs to build and serve the device.
@@ -554,5 +565,45 @@ mod tests {
         assert_eq!(req.sector_count, 8);
         assert_eq!(req.request_id, 3);
         assert_eq!(req.bytes, 4096);
+    }
+
+    /// A thread that stopped without creating anything is not the kernel
+    /// hanging, and saying it is sends whoever reads the log after the wrong
+    /// thing entirely.
+    #[test]
+    fn a_device_thread_that_stops_is_not_reported_as_a_kernel_hang() {
+        let (sender, receiver) = std::sync::mpsc::channel::<Result<u32>>();
+        drop(sender);
+
+        let err = await_device_creation(&receiver, Duration::from_secs(30))
+            .expect_err("a thread that sent nothing has not created a device");
+
+        assert!(
+            !err.to_string().contains("UBLK_U_CMD_ADD_DEV"),
+            "blamed the kernel for a thread that stopped: {err}"
+        );
+    }
+
+    /// And the case the wait is actually for still reports what the kernel did
+    /// not finish.
+    #[test]
+    fn a_kernel_that_never_finishes_creation_is_reported_as_such() {
+        let (_sender, receiver) = std::sync::mpsc::channel::<Result<u32>>();
+        let timeout = Duration::from_millis(200);
+
+        // On another thread, so a wait that is no longer bounded fails this
+        // test rather than hanging the run.
+        let (done_sender, done) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = await_device_creation(&receiver, timeout).map_err(|e| e.to_string());
+            let _ = done_sender.send(outcome);
+        });
+
+        let err = done
+            .recv_timeout(timeout * 20)
+            .expect("the wait never gave up, so it is not bounded")
+            .expect_err("a creation that never completes must not succeed");
+
+        assert!(err.contains("UBLK_U_CMD_ADD_DEV"), "{err}");
     }
 }

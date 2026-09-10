@@ -3,9 +3,11 @@ use super::{
     stripe_fetcher::StripeFetcher,
 };
 
+use crate::block_device::bgworker::BgTask;
 use crate::{block_device::BlockDevice, stripe_source::StripeSource, Result};
 use log::{error, info};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::ops::ControlFlow;
+use std::sync::mpsc::Receiver;
 
 pub enum BgWorkerRequest {
     Fetch { stripe_id: usize },
@@ -13,13 +15,53 @@ pub enum BgWorkerRequest {
     Shutdown,
 }
 
-pub struct BgWorker {
+/// Fetching stripes and persisting what has been fetched, which is what a lazy
+/// device has to do away from its I/O path.
+pub struct LazyTask {
     stripe_fetcher: StripeFetcher,
     metadata_flusher: MetadataFlusher,
-    req_receiver: Receiver<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
-    done: bool,
 }
+
+impl BgTask for LazyTask {
+    type Request = BgWorkerRequest;
+
+    fn handle(&mut self, request: BgWorkerRequest) -> ControlFlow<()> {
+        match request {
+            BgWorkerRequest::Fetch { stripe_id } => {
+                self.stripe_fetcher.handle_fetch_request(stripe_id);
+                ControlFlow::Continue(())
+            }
+            BgWorkerRequest::SetWritten { stripe_id } => {
+                self.metadata_flusher.set_stripe_written(stripe_id);
+                ControlFlow::Continue(())
+            }
+            BgWorkerRequest::Shutdown => {
+                info!("Received shutdown request, stopping worker");
+                ControlFlow::Break(())
+            }
+        }
+    }
+
+    fn update(&mut self) {
+        self.stripe_fetcher.update();
+        for (stripe_id, success) in self.stripe_fetcher.take_finished_fetches() {
+            if success {
+                self.metadata_flusher.set_stripe_fetched(stripe_id);
+            } else {
+                error!("Stripe {stripe_id} fetch failed");
+            }
+        }
+        self.metadata_flusher.update();
+        self.stripe_fetcher.disconnect_from_source_if_all_fetched();
+    }
+
+    fn busy(&self) -> bool {
+        self.stripe_fetcher.busy() || self.metadata_flusher.busy()
+    }
+}
+
+pub type BgWorker = crate::block_device::bgworker::BgWorker<LazyTask>;
 
 impl BgWorker {
     #[allow(clippy::too_many_arguments)]
@@ -43,79 +85,18 @@ impl BgWorker {
             alignment,
             autofetch,
         )?;
-        Ok(BgWorker {
-            stripe_fetcher,
-            metadata_flusher,
+        Ok(Self::with_task(
+            LazyTask {
+                stripe_fetcher,
+                metadata_flusher,
+                metadata_state,
+            },
             req_receiver,
-            done: false,
-            metadata_state,
-        })
+        ))
     }
 
     pub fn shared_state(&self) -> SharedMetadataState {
-        self.metadata_state.clone()
-    }
-
-    pub fn process_request(&mut self, req: BgWorkerRequest) {
-        match req {
-            BgWorkerRequest::Fetch { stripe_id } => {
-                self.stripe_fetcher.handle_fetch_request(stripe_id)
-            }
-            BgWorkerRequest::SetWritten { stripe_id } => {
-                self.metadata_flusher.set_stripe_written(stripe_id)
-            }
-            BgWorkerRequest::Shutdown => {
-                info!("Received shutdown request, stopping worker");
-                self.done = true;
-            }
-        }
-    }
-
-    pub fn receive_requests(&mut self, block: bool) {
-        if block {
-            match self.req_receiver.recv() {
-                Ok(req) => self.process_request(req),
-                Err(e) => {
-                    error!("Failed to receive request: {e}, stopping worker");
-                    self.done = true;
-                    return;
-                }
-            }
-        }
-
-        loop {
-            match self.req_receiver.try_recv() {
-                Ok(req) => self.process_request(req),
-                Err(TryRecvError::Disconnected) => {
-                    error!("Request channel disconnected, stopping worker");
-                    self.done = true;
-                    return;
-                }
-                Err(TryRecvError::Empty) => break,
-            }
-        }
-    }
-
-    pub fn update(&mut self) {
-        self.stripe_fetcher.update();
-        for (stripe_id, success) in self.stripe_fetcher.take_finished_fetches() {
-            if success {
-                self.metadata_flusher.set_stripe_fetched(stripe_id);
-            } else {
-                error!("Stripe {stripe_id} fetch failed");
-            }
-        }
-        self.metadata_flusher.update();
-        self.stripe_fetcher.disconnect_from_source_if_all_fetched();
-    }
-
-    pub fn run(&mut self) {
-        while !self.done {
-            let busy = self.stripe_fetcher.busy() || self.metadata_flusher.busy();
-            let block = !busy;
-            self.receive_requests(block);
-            self.update();
-        }
+        self.task().metadata_state.clone()
     }
 }
 

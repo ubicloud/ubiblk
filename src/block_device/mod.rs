@@ -44,6 +44,7 @@ mod bdev_lazy;
 mod bdev_null;
 mod bdev_sync;
 mod bdev_uring;
+pub mod bgworker;
 mod wait_for_completion;
 
 #[cfg(test)]

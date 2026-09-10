@@ -373,6 +373,52 @@ mod tests {
         assert_eq!(target_metrics.flushes, 1);
     }
 
+    // Once the pool has cycled, a fetch reuses a dirty buffer: the part of the
+    // last stripe the source does not have must still land as zeroes.
+    #[test]
+    fn a_partial_final_source_stripe_lands_zero_padded() {
+        let shift = 3u8;
+        let stripe_sectors = 1u64 << shift;
+        let stripe_len = stripe_sectors as usize * SECTOR_SIZE;
+        let full = MAX_CONCURRENT_FETCHES;
+
+        let source_dev = Box::new(TestBlockDevice::new(
+            (full * stripe_len) as u64 + SECTOR_SIZE as u64,
+        ));
+        let target_dev = Box::new(TestBlockDevice::new(((full + 1) * stripe_len) as u64));
+        source_dev.write(0, &vec![0xAAu8; full * stripe_len], full * stripe_len);
+        source_dev.write(full * stripe_len, &[0xBBu8; SECTOR_SIZE], SECTOR_SIZE);
+
+        let stripe_source =
+            Box::new(BlockDeviceStripeSource::new(source_dev.clone(), stripe_sectors).unwrap());
+        let metadata = UbiMetadata::new(
+            shift,
+            target_dev.stripe_count(stripe_sectors),
+            source_dev.stripe_count(stripe_sectors),
+        );
+        let mut fetcher = StripeFetcher::new(
+            stripe_source,
+            &*target_dev,
+            stripe_sectors,
+            SharedMetadataState::new(&metadata),
+            SECTOR_SIZE,
+            false,
+        )
+        .unwrap();
+
+        for stripe_id in 0..=full {
+            fetcher.handle_fetch_request(stripe_id);
+            for _ in 0..10 {
+                fetcher.update();
+            }
+        }
+
+        let mut expected = vec![0xBBu8; SECTOR_SIZE];
+        expected.extend(vec![0u8; stripe_len - SECTOR_SIZE]);
+        let mem = target_dev.mem.read().unwrap();
+        assert_eq!(&mem[full * stripe_len..], expected.as_slice());
+    }
+
     #[test]
     fn test_repeat_requests_ignored() {
         let mut state = prep(false);

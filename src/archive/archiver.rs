@@ -469,6 +469,41 @@ mod tests {
     }
 
     #[test]
+    fn archives_a_final_stripe_the_image_only_partly_holds() {
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let bdev = Box::new(TestBlockDevice::new(2 * stripe_len as u64));
+        let image = Box::new(TestBlockDevice::new(
+            2 * stripe_len as u64 - SECTOR_SIZE as u64,
+        ));
+        image.write(0, &vec![0xAAu8; stripe_len], stripe_len);
+        let tail = vec![0xBBu8; stripe_len - SECTOR_SIZE];
+        image.write(stripe_len, &tail, tail.len());
+
+        let metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, 2, 2);
+        let stripe_source = BlockDeviceStripeSource::new(image, STRIPE_SECTOR_COUNT).unwrap();
+        let mut store = Box::new(MemStore::default());
+        let mut archiver = StripeArchiver::new(
+            Box::new(stripe_source),
+            bdev.as_ref(),
+            metadata,
+            Box::new(MemStore::new_with_objects(store.objects.clone())),
+            false,
+            ArchiveCompressionAlgorithm::None,
+            KeyEncryptionCipher::default(),
+            1,
+        )
+        .unwrap();
+
+        archiver.archive_all().unwrap();
+
+        let key = archiver.object_key(expect_hash(&archiver.stripe_hashes, 1));
+        let archived = store.get_object(&key, Duration::from_secs(5)).unwrap();
+        let mut expected = tail.clone();
+        expected.extend(vec![0u8; SECTOR_SIZE]);
+        assert_eq!(archived, expected);
+    }
+
+    #[test]
     fn test_archive_all_no_image_stripes() {
         let (mut archiver, mut store) = prep(16, 0, false, Vec::new());
         archiver.metadata.stripe_headers[2] |= metadata_flags::WRITTEN;

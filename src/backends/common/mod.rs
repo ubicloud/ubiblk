@@ -13,8 +13,8 @@ use ubiblk_macros::error_context;
 
 use crate::{
     block_device::{
-        self, BgWorker, BgWorkerRequest, BlockDevice, SharedMetadataState, StatusReporter,
-        SyncBlockDevice, UbiMetadata, UringBlockDevice,
+        self, BgWorker, BgWorkerRequest, BlockDevice, LazyTask, SharedMetadataState,
+        StatusReporter, SyncBlockDevice, UbiMetadata, UringBlockDevice,
     },
     config::v2,
     stripe_source::StripeSourceBuilder,
@@ -274,15 +274,15 @@ impl BackendEnv {
             }
         };
 
-        BgWorker::new(
+        let lazy = LazyTask::new(
             stripe_source,
             &*target_dev,
             &*metadata_dev,
             alignment,
             autofetch,
             shared_state,
-            receiver,
-        )
+        )?;
+        Ok(BgWorker::new(lazy, receiver))
     }
 }
 

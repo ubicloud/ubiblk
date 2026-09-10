@@ -124,12 +124,18 @@ impl IoChannel for UringIoChannel {
         if self.pending == 0 {
             return Ok(());
         }
-        self.submissions += self.pending;
-        self.pending = 0;
         if let Err(e) = self.ring.submit() {
+            // The SQEs stay in the ring: io_uring_enter did not consume them,
+            // and the next submit enters them along with anything added since.
+            // Keep them counted as pending so the next submit is not skipped
+            // as empty, and so `busy` keeps saying completions are owed.
+            // Callers that hold a request's buffer and bookkeeping across a
+            // failed submit rely on this to get the completion eventually.
             error!("Failed to submit IO request: {e}");
             return Err(crate::ubiblk_error!(IoError { source: e }));
         }
+        self.submissions += self.pending;
+        self.pending = 0;
         Ok(())
     }
 

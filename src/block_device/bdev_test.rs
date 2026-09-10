@@ -15,6 +15,10 @@ struct TestIoChannel {
     fail_next: Arc<AtomicBool>,
     fail_submit: Arc<AtomicBool>,
     finished_requests: Vec<(usize, bool)>,
+    /// Requests a failed submit left behind. They are handed to `poll` once a
+    /// later submit succeeds, the way io_uring enters the SQEs a failed
+    /// io_uring_enter did not consume on the next call.
+    unsubmitted_requests: Vec<(usize, bool)>,
     metrics: Arc<RwLock<TestDeviceMetrics>>,
 }
 
@@ -85,11 +89,15 @@ impl IoChannel for TestIoChannel {
             .fail_submit
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            self.finished_requests.clear();
+            self.unsubmitted_requests
+                .append(&mut self.finished_requests);
             return Err(crate::ubiblk_error!(IoError {
                 source: std::io::Error::other("injected submit failure"),
             }));
         }
+        let mut requests = std::mem::take(&mut self.unsubmitted_requests);
+        requests.append(&mut self.finished_requests);
+        self.finished_requests = requests;
         Ok(())
     }
 
@@ -98,7 +106,7 @@ impl IoChannel for TestIoChannel {
     }
 
     fn busy(&self) -> bool {
-        !self.finished_requests.is_empty()
+        !self.finished_requests.is_empty() || !self.unsubmitted_requests.is_empty()
     }
 }
 
@@ -157,6 +165,7 @@ impl BlockDevice for TestBlockDevice {
         Ok(Box::new(TestIoChannel {
             mem: self.mem.clone(),
             finished_requests: Vec::new(),
+            unsubmitted_requests: Vec::new(),
             metrics: self.metrics.clone(),
             fail_next: self.fail_next.clone(),
             fail_submit: self.fail_submit.clone(),
@@ -229,6 +238,27 @@ mod tests {
         assert_eq!(metrics.flushes, 1);
         drop(metrics);
         assert_eq!(device.flushes(), 1);
+    }
+
+    #[test]
+    // A failed submit keeps its requests, as io_uring keeps the SQEs a failed
+    // enter did not consume: poll sees nothing until a later submit succeeds.
+    fn test_failed_submit_holds_requests_until_the_next_submit() {
+        let device = TestBlockDevice::new(SECTOR_SIZE as u64);
+        let mut channel = device.create_channel().unwrap();
+        device
+            .fail_submit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let buf: SharedBuffer = shared_buffer(SECTOR_SIZE);
+        channel.add_read(0, 1, buf, 1);
+        assert!(channel.submit().is_err());
+        assert!(channel.poll().is_empty());
+        assert!(channel.busy());
+
+        channel.submit().unwrap();
+        assert_eq!(channel.poll(), vec![(1, true)]);
+        assert!(!channel.busy());
     }
 
     #[test]

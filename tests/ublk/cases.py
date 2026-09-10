@@ -28,6 +28,31 @@ BACKEND = os.environ.get("UBLK_BACKEND_BIN", str(BIN_DIR / "ublk-backend"))
 DEVICE_MB = 64
 DEVICE_TIMEOUT = 60
 SHUTDOWN_TIMEOUT = 30
+# Longer than the backend's own wait on the kernel, so a wait that is no longer
+# bounded shows up here as a failure.
+CREATION_TIMEOUT = 60
+# ubiblk accepts this depth; ublk does not.
+REFUSED_QUEUE_DEPTH = 8192
+# Our own wording, not libublk's, so the check does not ride on a dependency.
+REPORTED_FAILURE = "Failed to serve ublk backend"
+
+
+def prepare(work, *extra):
+    """Lay out a device's files; `extra` goes to ubiblk-init."""
+    work.mkdir(parents=True, exist_ok=True)
+    # ubiblk-init shells out to init-metadata
+    env = dict(os.environ, PATH=f"{BIN_DIR}:{os.environ['PATH']}")
+    r(
+        "python3",
+        str(ROOT / "scripts" / "ubiblk-init"),
+        "--size",
+        f"{DEVICE_MB}M",
+        "--dir",
+        str(work),
+        "--force",
+        *extra,
+        env=env,
+    )
 
 
 class Device:
@@ -41,18 +66,7 @@ class Device:
         self.backend = None
 
     def __enter__(self):
-        self.work.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ, PATH=f"{BIN_DIR}:{os.environ['PATH']}")
-        r(
-            "python3",
-            str(ROOT / "scripts" / "ubiblk-init"),
-            "--size",
-            f"{DEVICE_MB}M",
-            "--dir",
-            str(self.work),
-            "--force",
-            env=env,
-        )
+        prepare(self.work)
         self.backend = subprocess.Popen(
             ["sudo", BACKEND, "--config", str(self.work / "config.toml"),
              "--device-symlink", str(self.symlink)],
@@ -175,6 +189,45 @@ def case_shutdown_removes_the_device(suite):
         suite.notok(name, reason)
 
 
+def case_a_device_the_kernel_refuses_is_reported(suite):
+    name = "a_device_the_kernel_refuses_is_reported"
+    work = suite.work / name
+    # Past the queue depth ublk allows, so the kernel refuses the device. The
+    # backend has to say so and exit, rather than wait on one that will never
+    # exist.
+    prepare(work, "--queue-size", str(REFUSED_QUEUE_DEPTH))
+    symlink = work / "dev"
+    log = work / "backend.log"
+
+    backend = subprocess.Popen(
+        ["sudo", BACKEND, "--config", str(work / "config.toml"),
+         "--device-symlink", str(symlink)],
+        stdout=log.open("w"),
+        stderr=subprocess.STDOUT,
+    )
+    try:
+        status = backend.wait(timeout=CREATION_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        subprocess.run(["sudo", "kill", "-9", str(backend.pid)], capture_output=True)
+        reason = f"still running after {CREATION_TIMEOUT}s instead of giving up"
+    else:
+        reported = REPORTED_FAILURE in log.read_text(errors="replace")
+        if status == 0:
+            reason = "exited cleanly though no device was created"
+        elif not reported:
+            reason = "exited without saying why"
+        elif symlink.exists():
+            reason = "left a symlink to a device that was never created"
+        else:
+            reason = None
+
+    if reason is None:
+        suite.ok(name)
+    else:
+        tail = "\n".join(log.read_text(errors="replace").splitlines()[-10:])
+        suite.notok(name, f"{reason}\n--- backend log ---\n{tail}")
+
+
 class Cases(Suite):
     def __init__(self):
         super().__init__()
@@ -187,6 +240,7 @@ class Cases(Suite):
         case_device_appears_with_the_right_size,
         case_data_reads_back_as_written,
         case_shutdown_removes_the_device,
+        case_a_device_the_kernel_refuses_is_reported,
     ]
 
 

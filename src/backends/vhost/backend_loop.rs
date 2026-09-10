@@ -86,7 +86,6 @@ fn serve_vhost(backend_env: &BackendEnv) -> Result<()> {
 mod tests {
     use super::*;
     use crate::backends::common::BackendEnv;
-    use crate::utils::umask_guard::UMASK_LOCK;
     use std::os::unix::net::UnixStream;
 
     fn test_danger_zone() -> v2::DangerZone {
@@ -140,8 +139,6 @@ mod tests {
     /// client disconnection gracefully.
     #[test]
     fn serve_vhost_handles_client_disconnect() {
-        let _umask_guard = UMASK_LOCK.lock().unwrap();
-
         let disk_file = tempfile::NamedTempFile::new().unwrap();
         disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
 

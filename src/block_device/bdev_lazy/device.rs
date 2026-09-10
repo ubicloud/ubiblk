@@ -1,5 +1,5 @@
 use crate::{
-    block_device::{BlockDevice, IoChannel, SharedBuffer, SharedMetadataState},
+    block_device::{BgSender, BlockDevice, IoChannel, SharedBuffer, SharedMetadataState},
     Result, ResultExt,
 };
 
@@ -8,10 +8,7 @@ use super::{
     metadata::{Failed, Fetched, NoSource, NotFetched},
 };
 
-use std::{
-    collections::{HashSet, VecDeque},
-    sync::mpsc::Sender,
-};
+use std::collections::{HashSet, VecDeque};
 
 use log::{debug, error};
 
@@ -43,7 +40,7 @@ struct LazyIoChannel {
     image: Option<Box<dyn IoChannel>>,
     queued_rw_requests: VecDeque<RWRequest>,
     finished_requests: Vec<(usize, bool)>,
-    bgworker_ch: Sender<BgWorkerRequest>,
+    bgworker_ch: BgSender<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     stripe_fetches_requested: HashSet<usize>,
     track_written: bool,
@@ -53,7 +50,7 @@ impl LazyIoChannel {
     fn new(
         base: Box<dyn IoChannel>,
         image: Option<Box<dyn IoChannel>>,
-        bgworker_ch: Sender<BgWorkerRequest>,
+        bgworker_ch: BgSender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
         track_written: bool,
     ) -> Self {
@@ -329,7 +326,7 @@ impl IoChannel for LazyIoChannel {
 pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     image: Option<Box<dyn BlockDevice>>,
-    bgworker_ch: Sender<BgWorkerRequest>,
+    bgworker_ch: BgSender<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     track_written: bool,
 }
@@ -338,7 +335,7 @@ impl LazyBlockDevice {
     pub fn new(
         base: Box<dyn BlockDevice>,
         image: Option<Box<dyn BlockDevice>>,
-        bgworker_ch: Sender<BgWorkerRequest>,
+        bgworker_ch: BgSender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
         track_written: bool,
     ) -> Result<Box<Self>> {

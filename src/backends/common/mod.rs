@@ -13,8 +13,8 @@ use ubiblk_macros::error_context;
 
 use crate::{
     block_device::{
-        self, BgWorker, BgWorkerRequest, BlockDevice, SharedMetadataState, StatusReporter,
-        SyncBlockDevice, UbiMetadata, UringBlockDevice,
+        self, BgQueues, BgSender, BgWorker, BgWorkerRequest, BlockDevice, LazyTask,
+        SharedMetadataState, StatusReporter, SyncBlockDevice, UbiMetadata, UringBlockDevice,
     },
     config::v2,
     stripe_source::StripeSourceBuilder,
@@ -39,8 +39,8 @@ struct BgWorkerConfig {
 
 pub struct BackendEnv {
     bdev: Box<dyn BlockDevice>,
-    bgworker_config: Option<BgWorkerConfig>,
-    bgworker_sender: Option<Sender<BgWorkerRequest>>,
+    bgworker: Option<(BgQueues, BgWorkerConfig)>,
+    bgworker_sender: Option<BgSender<BgWorkerRequest>>,
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
     config: v2::Config,
@@ -67,7 +67,7 @@ impl BackendEnv {
         match metadata_device {
             None => Ok(BackendEnv {
                 bdev: disk_device,
-                bgworker_config: None,
+                bgworker: None,
                 bgworker_sender: None,
                 bgworker_thread: None,
                 alignment,
@@ -83,9 +83,10 @@ impl BackendEnv {
 
     #[error_context("Failed to run bgworker thread")]
     pub fn run_bgworker_thread(&mut self) -> Result<()> {
-        if let Some(config) = self.bgworker_config.take() {
+        if let Some((queues, config)) = self.bgworker.take() {
             let (startup_sender, startup_receiver) = channel();
-            self.bgworker_thread = Some(Self::spawn_bgworker_thread(config, startup_sender)?);
+            self.bgworker_thread =
+                Some(Self::spawn_bgworker_thread(queues, config, startup_sender)?);
 
             let startup_status = startup_receiver.recv().map_err(|e| {
                 crate::ubiblk_error!(ChannelError {
@@ -142,7 +143,8 @@ impl BackendEnv {
         let shared_state = SharedMetadataState::new(&metadata);
         let status_reporter = StatusReporter::new(shared_state.clone(), disk_device.sector_count());
 
-        let (bgworker_sender, bgworker_receiver) = channel();
+        let queues = BgQueues::new();
+        let (bgworker_sender, bgworker_receiver) = queues.queue();
 
         let bdev_lazy = Self::build_bdev_lazy(
             disk_device.clone(),
@@ -172,7 +174,7 @@ impl BackendEnv {
 
         Ok(BackendEnv {
             bdev: bdev_lazy,
-            bgworker_config: Some(bgworker_config),
+            bgworker: Some((queues, bgworker_config)),
             bgworker_sender: Some(bgworker_sender),
             bgworker_thread: None,
             alignment,
@@ -197,7 +199,7 @@ impl BackendEnv {
     fn build_bdev_lazy(
         disk_device: Box<dyn BlockDevice>,
         config: &v2::Config,
-        bgworker_sender: Sender<BgWorkerRequest>,
+        bgworker_sender: BgSender<BgWorkerRequest>,
         shared_state: SharedMetadataState,
     ) -> Result<Box<dyn BlockDevice>> {
         let raw_image_device = if config
@@ -228,24 +230,28 @@ impl BackendEnv {
     }
 
     fn spawn_bgworker_thread(
+        queues: BgQueues,
         config: BgWorkerConfig,
         startup_sender: Sender<Result<()>>,
     ) -> Result<std::thread::JoinHandle<()>> {
         std::thread::Builder::new()
             .name("bgworker".to_string())
-            .spawn(move || match Self::build_bgworker(config) {
-                Ok(mut worker) => {
-                    if let Err(send_err) = startup_sender.send(Ok(())) {
-                        error!("Failed to send bgworker startup success: {send_err}");
-                    } else {
-                        info!("Bgworker thread started successfully");
-                        worker.run();
+            .spawn(move || {
+                let mut worker = BgWorker::new(queues);
+                match Self::add_lazy_task(&mut worker, config) {
+                    Ok(()) => {
+                        if let Err(send_err) = startup_sender.send(Ok(())) {
+                            error!("Failed to send bgworker startup success: {send_err}");
+                        } else {
+                            info!("Bgworker thread started successfully");
+                            worker.run();
+                        }
                     }
-                }
-                Err(e) => {
-                    let startup_result = Err(e).context("Failed to build bgworker");
-                    if let Err(send_err) = startup_sender.send(startup_result) {
-                        error!("Failed to send bgworker startup error to main thread: {send_err}. Original error: {:?}", send_err.0);
+                    Err(e) => {
+                        let startup_result = Err(e).context("Failed to build bgworker task");
+                        if let Err(send_err) = startup_sender.send(startup_result) {
+                            error!("Failed to send bgworker startup error to main thread: {send_err}. Original error: {:?}", send_err.0);
+                        }
                     }
                 }
             })
@@ -255,7 +261,7 @@ impl BackendEnv {
             })
     }
 
-    fn build_bgworker(config: BgWorkerConfig) -> Result<BgWorker> {
+    fn add_lazy_task(worker: &mut BgWorker, config: BgWorkerConfig) -> Result<()> {
         let BgWorkerConfig {
             target_dev,
             stripe_source_builder,
@@ -274,15 +280,16 @@ impl BackendEnv {
             }
         };
 
-        BgWorker::new(
+        let task = LazyTask::new(
             stripe_source,
             &*target_dev,
             &*metadata_dev,
             alignment,
             autofetch,
             shared_state,
-            receiver,
-        )
+        )?;
+        worker.add(task, receiver);
+        Ok(())
     }
 }
 
@@ -666,7 +673,7 @@ mod tests {
         );
     }
 
-    fn build_test_bgworker_config() -> (BgWorkerConfig, Sender<BgWorkerRequest>) {
+    fn build_test_bgworker_config() -> (BgQueues, BgWorkerConfig, BgSender<BgWorkerRequest>) {
         let stripe_sector_count_shift = 11;
         let target_dev = TestBlockDevice::new(1024 * 1024);
         let metadata_dev = TestBlockDevice::new(1024 * 1024);
@@ -679,9 +686,11 @@ mod tests {
             shared_state.stripe_sector_count(),
             loaded_metadata.has_fetched_all_stripes(),
         ));
-        let (sender, receiver) = channel();
+        let queues = BgQueues::new();
+        let (sender, receiver) = queues.queue();
 
         (
+            queues,
             BgWorkerConfig {
                 target_dev: Box::new(target_dev),
                 stripe_source_builder,
@@ -697,17 +706,18 @@ mod tests {
 
     #[test]
     fn run_bgworker_handles_shutdown_request() {
-        let (config, sender) = build_test_bgworker_config();
+        let (queues, config, sender) = build_test_bgworker_config();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
-        let mut worker = BackendEnv::build_bgworker(config).unwrap();
+        let mut worker = BgWorker::new(queues);
+        BackendEnv::add_lazy_task(&mut worker, config).unwrap();
         worker.run();
     }
 
     #[test]
     fn spawn_bgworker_thread_runs_and_joins() {
-        let (config, sender) = build_test_bgworker_config();
+        let (queues, config, sender) = build_test_bgworker_config();
         let (startup_sender, startup_receiver) = channel();
-        let handle = BackendEnv::spawn_bgworker_thread(config, startup_sender).unwrap();
+        let handle = BackendEnv::spawn_bgworker_thread(queues, config, startup_sender).unwrap();
         startup_receiver.recv().unwrap().unwrap();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
         handle.join().unwrap();

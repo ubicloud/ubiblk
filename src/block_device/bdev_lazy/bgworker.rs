@@ -7,7 +7,6 @@ use crate::block_device::bgworker::BgTask;
 use crate::{block_device::BlockDevice, stripe_source::StripeSource, Result};
 use log::{error, info};
 use std::ops::ControlFlow;
-use std::sync::mpsc::Receiver;
 
 pub enum BgWorkerRequest {
     Fetch { stripe_id: usize },
@@ -61,10 +60,7 @@ impl BgTask for LazyTask {
     }
 }
 
-pub type BgWorker = crate::block_device::bgworker::BgWorker<LazyTask>;
-
-impl BgWorker {
-    #[allow(clippy::too_many_arguments)]
+impl LazyTask {
     pub fn new(
         stripe_source: Box<dyn StripeSource>,
         target_dev: &dyn BlockDevice,
@@ -72,7 +68,6 @@ impl BgWorker {
         alignment: usize,
         autofetch: bool,
         metadata_state: SharedMetadataState,
-        req_receiver: Receiver<BgWorkerRequest>,
     ) -> Result<Self> {
         let source_sector_count = stripe_source.sector_count();
         let metadata_flusher =
@@ -85,18 +80,15 @@ impl BgWorker {
             alignment,
             autofetch,
         )?;
-        Ok(Self::with_task(
-            LazyTask {
-                stripe_fetcher,
-                metadata_flusher,
-                metadata_state,
-            },
-            req_receiver,
-        ))
+        Ok(LazyTask {
+            stripe_fetcher,
+            metadata_flusher,
+            metadata_state,
+        })
     }
 
     pub fn shared_state(&self) -> SharedMetadataState {
-        self.task().metadata_state.clone()
+        self.metadata_state.clone()
     }
 }
 
@@ -105,16 +97,17 @@ mod tests {
     use super::*;
     use crate::{
         block_device::{
-            bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, NullBlockDevice,
-            UbiMetadata,
+            bdev_lazy::SharedMetadataState,
+            bdev_test::TestBlockDevice,
+            bgworker::{BgQueues, BgSender, BgWorker},
+            NullBlockDevice, UbiMetadata,
         },
         stripe_source,
     };
-    use std::sync::mpsc::channel;
 
-    fn build_bg_worker_with_source(
+    fn build_worker_with_source(
         stripe_source: Box<dyn StripeSource>,
-    ) -> (BgWorker, std::sync::mpsc::Sender<BgWorkerRequest>) {
+    ) -> (BgWorker, BgSender<BgWorkerRequest>, SharedMetadataState) {
         let stripe_sector_count_shift = 11;
         let target_dev = TestBlockDevice::new(1024 * 1024);
         let metadata_dev = TestBlockDevice::new(1024 * 1024);
@@ -125,24 +118,25 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
 
-        let (tx, rx) = channel();
-
-        (
-            BgWorker::new(
-                stripe_source,
-                &target_dev,
-                &metadata_dev,
-                4096,
-                false,
-                metadata_state,
-                rx,
-            )
-            .unwrap(),
-            tx,
+        let task = LazyTask::new(
+            stripe_source,
+            &target_dev,
+            &metadata_dev,
+            4096,
+            false,
+            metadata_state.clone(),
         )
+        .unwrap();
+
+        let queues = BgQueues::new();
+        let (sender, requests) = queues.queue();
+        let mut worker = BgWorker::new(queues);
+        worker.add(task, requests);
+
+        (worker, sender, metadata_state)
     }
 
-    fn build_bg_worker() -> (BgWorker, std::sync::mpsc::Sender<BgWorkerRequest>) {
+    fn build_worker() -> (BgWorker, BgSender<BgWorkerRequest>, SharedMetadataState) {
         let stripe_sector_count_shift = 11;
         let stripe_sector_count = 1u64 << stripe_sector_count_shift;
         let source_dev = TestBlockDevice::new(1024 * 1024);
@@ -150,14 +144,14 @@ mod tests {
             stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
                 .unwrap(),
         );
-        build_bg_worker_with_source(stripe_source)
+        build_worker_with_source(stripe_source)
     }
 
     #[test]
     fn test_bg_worker_shutdown() {
-        let (mut bg_worker, sender) = build_bg_worker();
+        let (mut worker, sender, _) = build_worker();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
-        bg_worker.run();
+        worker.run();
     }
 
     #[test]
@@ -179,18 +173,15 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
 
-        let (_tx, rx) = channel();
-
-        BgWorker::new(
+        LazyTask::new(
             stripe_source,
             &target_dev,
             &metadata_dev,
             4096,
             false,
             metadata_state,
-            rx,
         )
-        .expect("BgWorker should support null source device");
+        .expect("LazyTask should support null source device");
     }
 
     #[test]
@@ -204,16 +195,16 @@ mod tests {
         let flaky_source =
             stripe_source::FlakyStripeSource::new(Box::new(base_source), vec![(0, 4)]);
 
-        let (mut bg_worker, sender) = build_bg_worker_with_source(Box::new(flaky_source));
+        let (mut worker, sender, metadata_state) = build_worker_with_source(Box::new(flaky_source));
         sender
             .send(BgWorkerRequest::Fetch { stripe_id: 0 })
             .unwrap();
-        bg_worker.receive_requests(false);
+        worker.receive_requests(false);
 
         for _ in 0..100 {
-            bg_worker.update();
+            worker.update();
         }
 
-        assert!(bg_worker.shared_state().is_stripe_failed(0));
+        assert!(metadata_state.is_stripe_failed(0));
     }
 }

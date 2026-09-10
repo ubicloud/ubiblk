@@ -2,13 +2,14 @@
 mod tests {
     use crate::backends::SECTOR_SIZE;
     use crate::block_device::{
-        bdev_lazy::{BgWorker, LazyBlockDevice, SharedMetadataState, UbiMetadata},
+        bdev_lazy::{LazyBlockDevice, LazyTask, SharedMetadataState, UbiMetadata},
         bdev_test::{TestBlockDevice, TestDeviceMetrics},
+        bgworker::{BgQueues, BgWorker},
         metadata_flags, BlockDevice, IoChannel,
     };
     use crate::block_device::{shared_buffer, SharedBuffer};
     use std::cell::RefCell;
-    use std::sync::{mpsc::channel, Arc, RwLock};
+    use std::sync::{Arc, RwLock};
     use std::thread::sleep;
     use std::time::Duration;
 
@@ -42,7 +43,8 @@ mod tests {
             SharedMetadataState::new(&loaded)
         };
 
-        let (bgworker_ch, bgworker_rx) = channel();
+        let queues = BgQueues::new();
+        let (bgworker_ch, bgworker_rx) = queues.queue();
 
         if with_image {
             let image_dev = TestBlockDevice::new(DEV_SIZE);
@@ -59,16 +61,17 @@ mod tests {
                 image_dev.write(0, &tmp, SECTOR_SIZE);
             }
             let image_metrics = image_dev.metrics.clone();
-            let bgworker = BgWorker::new(
+            let task = LazyTask::new(
                 stripe_source,
                 &target_dev,
                 &metadata_dev,
                 SECTOR_SIZE,
                 false,
                 metadata_state.clone(),
-                bgworker_rx,
             )
             .unwrap();
+            let mut bgworker = BgWorker::new(queues);
+            bgworker.add(task, bgworker_rx);
             let lazy = LazyBlockDevice::new(
                 Box::new(target_dev),
                 Some(Box::new(image_dev)),
@@ -100,16 +103,17 @@ mod tests {
                 tmp[..data.len()].copy_from_slice(data);
                 source_dev.write(0, &tmp, SECTOR_SIZE);
             }
-            let bgworker = BgWorker::new(
+            let task = LazyTask::new(
                 stripe_source,
                 &target_dev,
                 &metadata_dev,
                 SECTOR_SIZE,
                 false,
                 metadata_state.clone(),
-                bgworker_rx,
             )
             .unwrap();
+            let mut bgworker = BgWorker::new(queues);
+            bgworker.add(task, bgworker_rx);
             let lazy = LazyBlockDevice::new(
                 Box::new(target_dev),
                 None,

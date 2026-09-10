@@ -68,7 +68,8 @@ mod tests {
                 metadata_state.clone(),
             )
             .unwrap();
-            let bgworker = BgWorker::new(lazy_task, bgworker_rx);
+            let mut bgworker = BgWorker::new(bgworker_rx);
+            bgworker.set_lazy_task(lazy_task);
             let lazy = LazyBlockDevice::new(
                 Box::new(target_dev),
                 Some(Box::new(image_dev)),
@@ -109,7 +110,8 @@ mod tests {
                 metadata_state.clone(),
             )
             .unwrap();
-            let bgworker = BgWorker::new(lazy_task, bgworker_rx);
+            let mut bgworker = BgWorker::new(bgworker_rx);
+            bgworker.set_lazy_task(lazy_task);
             let lazy = LazyBlockDevice::new(
                 Box::new(target_dev),
                 None,

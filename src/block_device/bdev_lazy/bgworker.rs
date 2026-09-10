@@ -4,8 +4,7 @@ use super::{
 };
 
 use crate::{block_device::BlockDevice, stripe_source::StripeSource, Result};
-use log::{error, info};
-use std::sync::mpsc::{Receiver, TryRecvError};
+use log::error;
 
 pub enum BgWorkerRequest {
     Fetch { stripe_id: usize },
@@ -13,16 +12,13 @@ pub enum BgWorkerRequest {
     Shutdown,
 }
 
-pub struct BgWorker {
+pub struct LazyTask {
     stripe_fetcher: StripeFetcher,
     metadata_flusher: MetadataFlusher,
-    req_receiver: Receiver<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
-    done: bool,
 }
 
-impl BgWorker {
-    #[allow(clippy::too_many_arguments)]
+impl LazyTask {
     pub fn new(
         stripe_source: Box<dyn StripeSource>,
         target_dev: &dyn BlockDevice,
@@ -30,7 +26,6 @@ impl BgWorker {
         alignment: usize,
         autofetch: bool,
         metadata_state: SharedMetadataState,
-        req_receiver: Receiver<BgWorkerRequest>,
     ) -> Result<Self> {
         let source_sector_count = stripe_source.sector_count();
         let metadata_flusher =
@@ -43,11 +38,9 @@ impl BgWorker {
             alignment,
             autofetch,
         )?;
-        Ok(BgWorker {
+        Ok(LazyTask {
             stripe_fetcher,
             metadata_flusher,
-            req_receiver,
-            done: false,
             metadata_state,
         })
     }
@@ -56,44 +49,12 @@ impl BgWorker {
         self.metadata_state.clone()
     }
 
-    pub fn process_request(&mut self, req: BgWorkerRequest) {
-        match req {
-            BgWorkerRequest::Fetch { stripe_id } => {
-                self.stripe_fetcher.handle_fetch_request(stripe_id)
-            }
-            BgWorkerRequest::SetWritten { stripe_id } => {
-                self.metadata_flusher.set_stripe_written(stripe_id)
-            }
-            BgWorkerRequest::Shutdown => {
-                info!("Received shutdown request, stopping worker");
-                self.done = true;
-            }
-        }
+    pub fn fetch_stripe(&mut self, stripe_id: usize) {
+        self.stripe_fetcher.handle_fetch_request(stripe_id);
     }
 
-    pub fn receive_requests(&mut self, block: bool) {
-        if block {
-            match self.req_receiver.recv() {
-                Ok(req) => self.process_request(req),
-                Err(e) => {
-                    error!("Failed to receive request: {e}, stopping worker");
-                    self.done = true;
-                    return;
-                }
-            }
-        }
-
-        loop {
-            match self.req_receiver.try_recv() {
-                Ok(req) => self.process_request(req),
-                Err(TryRecvError::Disconnected) => {
-                    error!("Request channel disconnected, stopping worker");
-                    self.done = true;
-                    return;
-                }
-                Err(TryRecvError::Empty) => break,
-            }
-        }
+    pub fn set_stripe_written(&mut self, stripe_id: usize) {
+        self.metadata_flusher.set_stripe_written(stripe_id);
     }
 
     pub fn update(&mut self) {
@@ -109,13 +70,8 @@ impl BgWorker {
         self.stripe_fetcher.disconnect_from_source_if_all_fetched();
     }
 
-    pub fn run(&mut self) {
-        while !self.done {
-            let busy = self.stripe_fetcher.busy() || self.metadata_flusher.busy();
-            let block = !busy;
-            self.receive_requests(block);
-            self.update();
-        }
+    pub fn busy(&self) -> bool {
+        self.stripe_fetcher.busy() || self.metadata_flusher.busy()
     }
 }
 
@@ -124,7 +80,7 @@ mod tests {
     use super::*;
     use crate::{
         block_device::{
-            bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, NullBlockDevice,
+            bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, BgWorker, NullBlockDevice,
             UbiMetadata,
         },
         stripe_source,
@@ -133,7 +89,11 @@ mod tests {
 
     fn build_bg_worker_with_source(
         stripe_source: Box<dyn StripeSource>,
-    ) -> (BgWorker, std::sync::mpsc::Sender<BgWorkerRequest>) {
+    ) -> (
+        BgWorker,
+        std::sync::mpsc::Sender<BgWorkerRequest>,
+        SharedMetadataState,
+    ) {
         let stripe_sector_count_shift = 11;
         let target_dev = TestBlockDevice::new(1024 * 1024);
         let metadata_dev = TestBlockDevice::new(1024 * 1024);
@@ -145,23 +105,24 @@ mod tests {
         };
 
         let (tx, rx) = channel();
-
-        (
-            BgWorker::new(
-                stripe_source,
-                &target_dev,
-                &metadata_dev,
-                4096,
-                false,
-                metadata_state,
-                rx,
-            )
-            .unwrap(),
-            tx,
+        let lazy = LazyTask::new(
+            stripe_source,
+            &target_dev,
+            &metadata_dev,
+            4096,
+            false,
+            metadata_state.clone(),
         )
+        .unwrap();
+
+        (BgWorker::new(lazy, rx), tx, metadata_state)
     }
 
-    fn build_bg_worker() -> (BgWorker, std::sync::mpsc::Sender<BgWorkerRequest>) {
+    fn build_bg_worker() -> (
+        BgWorker,
+        std::sync::mpsc::Sender<BgWorkerRequest>,
+        SharedMetadataState,
+    ) {
         let stripe_sector_count_shift = 11;
         let stripe_sector_count = 1u64 << stripe_sector_count_shift;
         let source_dev = TestBlockDevice::new(1024 * 1024);
@@ -174,7 +135,7 @@ mod tests {
 
     #[test]
     fn test_bg_worker_shutdown() {
-        let (mut bg_worker, sender) = build_bg_worker();
+        let (mut bg_worker, sender, _) = build_bg_worker();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
         bg_worker.run();
     }
@@ -198,18 +159,15 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
 
-        let (_tx, rx) = channel();
-
-        BgWorker::new(
+        LazyTask::new(
             stripe_source,
             &target_dev,
             &metadata_dev,
             4096,
             false,
             metadata_state,
-            rx,
         )
-        .expect("BgWorker should support null source device");
+        .expect("a lazy task should support a null source device");
     }
 
     #[test]
@@ -223,7 +181,8 @@ mod tests {
         let flaky_source =
             stripe_source::FlakyStripeSource::new(Box::new(base_source), vec![(0, 4)]);
 
-        let (mut bg_worker, sender) = build_bg_worker_with_source(Box::new(flaky_source));
+        let (mut bg_worker, sender, metadata_state) =
+            build_bg_worker_with_source(Box::new(flaky_source));
         sender
             .send(BgWorkerRequest::Fetch { stripe_id: 0 })
             .unwrap();
@@ -233,6 +192,6 @@ mod tests {
             bg_worker.update();
         }
 
-        assert!(bg_worker.shared_state().is_stripe_failed(0));
+        assert!(metadata_state.is_stripe_failed(0));
     }
 }

@@ -270,7 +270,7 @@ mod tests {
 
     use super::*;
 
-    use std::{thread::sleep, time::Duration};
+    use std::{io::Write, thread::sleep, time::Duration};
     use tempfile::NamedTempFile;
 
     fn spin_until_complete(chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
@@ -342,24 +342,26 @@ mod tests {
         Ok(())
     }
 
-    // A read that runs off the end of the file comes back short. Reporting it
-    // as success hands the caller a buffer the disk never filled.
+    // A read that runs off the end of a file comes back short, not failed.
     #[test]
     fn a_short_read_fails() -> Result<()> {
         let mut tmpfile = NamedTempFile::new()?;
-        tmpfile.as_file_mut().set_len(SECTOR_SIZE as u64)?;
+        let pattern = vec![0xA5u8; SECTOR_SIZE];
+        tmpfile.as_file_mut().write_all(&pattern)?;
         let block_dev = UringBlockDevice::new(tmpfile.path().to_owned(), 8, true, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
-        chan.add_read(0, 2, shared_buffer(2 * SECTOR_SIZE), 1);
+        let buf = shared_buffer(2 * SECTOR_SIZE);
+        chan.add_read(0, 2, buf.clone(), 1);
         chan.submit()?;
 
         assert_eq!(spin_until_complete(&mut chan), vec![(1, false)]);
+        // It failed for being short, not for never having run.
+        assert_eq!(&buf.borrow().as_slice()[..SECTOR_SIZE], pattern.as_slice());
         Ok(())
     }
 
-    // The same read moved past the end returns nothing at all, which the
-    // kernel reports as a transfer of zero bytes rather than as an error.
+    // Moved past the end, it comes back as a transfer of zero bytes.
     #[test]
     fn a_read_past_the_end_of_the_file_fails() -> Result<()> {
         let mut tmpfile = NamedTempFile::new()?;
@@ -367,7 +369,8 @@ mod tests {
         let block_dev = UringBlockDevice::new(tmpfile.path().to_owned(), 8, true, false, false)?;
         let mut chan = block_dev.create_channel()?;
 
-        chan.add_read(4, 1, shared_buffer(SECTOR_SIZE), 1);
+        let buf = shared_buffer(SECTOR_SIZE);
+        chan.add_read(4, 1, buf.clone(), 1);
         chan.submit()?;
 
         assert_eq!(spin_until_complete(&mut chan), vec![(1, false)]);

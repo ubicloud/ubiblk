@@ -27,6 +27,7 @@ pub struct StripeArchiver {
     block_cipher: Option<XtsBlockCipher>,
     kek: KeyEncryptionCipher,
     buffer_pool: AlignedBufferPool,
+    device_sector_count: u64,
     inflight_puts: usize,
     stripe_fetch_buffers: HashMap<usize, SharedBuffer>,
     seen_object_keys: HashSet<String>,
@@ -74,6 +75,7 @@ impl StripeArchiver {
             kek,
             stripe_count,
             buffer_pool,
+            device_sector_count: bdev.sector_count(),
             inflight_puts: 0,
             stripe_fetch_buffers: HashMap::new(),
             seen_object_keys: HashSet::new(),
@@ -146,12 +148,14 @@ impl StripeArchiver {
     fn start_fetch_stripe(&mut self, stripe_id: usize, buffer: SharedBuffer) -> Result<()> {
         if self.stripe_written(stripe_id) || self.stripe_fetched(stripe_id) {
             debug!("Fetching stripe {} from block device", stripe_id,);
-            self.io_channel.add_read(
-                self.stripe_offset(stripe_id),
-                self.metadata.stripe_sector_count() as u32,
-                buffer,
-                stripe_id,
-            );
+            let offset = self.stripe_offset(stripe_id);
+            let sectors =
+                self.metadata
+                    .stripe_sector_count()
+                    .min(self.device_sector_count.saturating_sub(offset)) as u32;
+            // Pooled buffers come back with the last stripe's bytes in them.
+            buffer.borrow_mut().as_mut_slice()[sectors as usize * SECTOR_SIZE..].fill(0);
+            self.io_channel.add_read(offset, sectors, buffer, stripe_id);
             self.io_channel.submit()?;
         } else {
             debug!("Fetching stripe {} from image", stripe_id,);
@@ -424,6 +428,44 @@ mod tests {
                 assert!(!should_archive);
             }
         }
+    }
+
+    #[test]
+    fn archives_a_final_stripe_the_device_only_partly_holds() {
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let bdev = Box::new(TestBlockDevice::new(
+            2 * stripe_len as u64 - SECTOR_SIZE as u64,
+        ));
+        bdev.write(0, &vec![0xAAu8; stripe_len], stripe_len);
+        let tail = vec![0xBBu8; stripe_len - SECTOR_SIZE];
+        bdev.write(stripe_len, &tail, tail.len());
+
+        let mut metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, 2, 0);
+        metadata.stripe_headers[0] |= metadata_flags::WRITTEN;
+        metadata.stripe_headers[1] |= metadata_flags::WRITTEN;
+
+        let stripe_source =
+            BlockDeviceStripeSource::new(bdev.clone(), STRIPE_SECTOR_COUNT).unwrap();
+        let mut store = Box::new(MemStore::default());
+        let mut archiver = StripeArchiver::new(
+            Box::new(stripe_source),
+            bdev.as_ref(),
+            metadata,
+            Box::new(MemStore::new_with_objects(store.objects.clone())),
+            false,
+            ArchiveCompressionAlgorithm::None,
+            KeyEncryptionCipher::default(),
+            1,
+        )
+        .unwrap();
+
+        archiver.archive_all().unwrap();
+
+        let key = archiver.object_key(expect_hash(&archiver.stripe_hashes, 1));
+        let archived = store.get_object(&key, Duration::from_secs(5)).unwrap();
+        let mut expected = tail.clone();
+        expected.extend(vec![0u8; SECTOR_SIZE]);
+        assert_eq!(archived, expected);
     }
 
     #[test]

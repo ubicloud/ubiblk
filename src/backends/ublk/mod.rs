@@ -409,11 +409,9 @@ fn serve_ublk_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::umask_guard::UMASK_LOCK;
 
     #[test]
     fn test_create_device_symlink() {
-        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let target = tmp_dir.path().join("ublk-target");
         let link = tmp_dir.path().join("ublk-symlink");
@@ -426,7 +424,6 @@ mod tests {
 
     #[test]
     fn test_create_device_symlink_existing() {
-        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let target = tmp_dir.path().join("ublk-target");
         let link = tmp_dir.path().join("ublk-symlink");
@@ -438,7 +435,6 @@ mod tests {
 
     #[test]
     fn test_remove_device_symlink() {
-        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let link = tmp_dir.path().join("ublk-symlink");
         std::os::unix::fs::symlink("/dev/ublk-target", &link).expect("Failed to create symlink");
@@ -448,7 +444,6 @@ mod tests {
 
     #[test]
     fn test_remove_device_symlink_not_found() {
-        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let link = tmp_dir.path().join("nonexistent-symlink");
         // Should succeed silently when path doesn't exist
@@ -457,7 +452,6 @@ mod tests {
 
     #[test]
     fn test_remove_device_symlink_not_a_symlink() {
-        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let link = tmp_dir.path().join("regular-file");
         std::fs::write(&link, b"not a symlink").expect("Failed to create file");
@@ -514,7 +508,6 @@ mod tests {
 
     #[test]
     fn test_create_device_symlink_nested_parent() {
-        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let target = tmp_dir.path().join("ublk-target");
         let link = tmp_dir.path().join("a/b/c/ublk-symlink");
@@ -525,7 +518,6 @@ mod tests {
 
     #[test]
     fn test_create_device_symlink_replaces_existing_symlink() {
-        let _l = UMASK_LOCK.lock().unwrap();
         let tmp_dir = tempfile::tempdir().expect("Failed to create temp dir");
         let target1 = tmp_dir.path().join("target1");
         let target2 = tmp_dir.path().join("target2");

@@ -526,7 +526,6 @@ mod tests {
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::config::v2::stripe_source::StripeSourceConfig;
     use crate::config::v2::{self, DeviceSection};
-    use crate::utils::umask_guard::UMASK_LOCK;
     use std::os::unix::fs::symlink;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -577,7 +576,6 @@ mod tests {
 
     #[test]
     fn ensure_metadata_file_creates_with_mode_0600() {
-        let _umask_guard = UMASK_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let metadata_path = dir.path().join("metadata.bin");
 
@@ -598,7 +596,6 @@ mod tests {
 
     #[test]
     fn ensure_metadata_file_fixes_existing_mode() {
-        let _umask_guard = UMASK_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let metadata_path = dir.path().join("metadata.bin");
         std::fs::write(&metadata_path, []).unwrap();
@@ -620,7 +617,6 @@ mod tests {
 
     #[test]
     fn ensure_metadata_file_clears_special_mode_bits() {
-        let _umask_guard = UMASK_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let metadata_path = dir.path().join("metadata.bin");
         std::fs::write(&metadata_path, []).unwrap();
@@ -642,7 +638,6 @@ mod tests {
 
     #[test]
     fn ensure_metadata_file_rejects_symlink_path() {
-        let _umask_guard = UMASK_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let target_path = dir.path().join("target.bin");
         let metadata_path = dir.path().join("metadata.bin");
@@ -655,7 +650,6 @@ mod tests {
 
     #[test]
     fn ensure_metadata_file_expands_existing_file_when_too_small() {
-        let _umask_guard = UMASK_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let metadata_path = dir.path().join("metadata.bin");
         std::fs::write(&metadata_path, [0u8; 1]).unwrap();
@@ -927,7 +921,6 @@ mod tests {
 
     #[test]
     fn ensure_metadata_file_rejects_non_regular_file() {
-        let _umask_guard = UMASK_LOCK.lock().unwrap();
         // /dev/null can be opened read+write but is not a regular file
         let result = ensure_metadata_file(Path::new("/dev/null"), SECTOR_SIZE);
         assert!(result.is_err());
@@ -940,7 +933,6 @@ mod tests {
 
     #[test]
     fn ensure_metadata_file_preserves_size_when_already_large_enough() {
-        let _umask_guard = UMASK_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let metadata_path = dir.path().join("metadata.bin");
         // Create file larger than minimum

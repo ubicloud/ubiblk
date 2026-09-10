@@ -561,11 +561,10 @@ allow_env_secrets = true
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join("ubiblk-test-perms");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = tempfile::tempdir().unwrap();
 
         // File with 0644 should be detected as loose
-        let loose_path = dir.join("loose.toml");
+        let loose_path = dir.path().join("loose.toml");
         let mut f = std::fs::File::create(&loose_path).unwrap();
         f.write_all(b"[device]\ndata_path = \"/dev/x\"\n").unwrap();
         std::fs::set_permissions(&loose_path, std::fs::Permissions::from_mode(0o644)).unwrap();
@@ -578,7 +577,7 @@ allow_env_secrets = true
         );
 
         // File with 0600 should not be flagged
-        let tight_path = dir.join("tight.toml");
+        let tight_path = dir.path().join("tight.toml");
         let mut f = std::fs::File::create(&tight_path).unwrap();
         f.write_all(b"[device]\ndata_path = \"/dev/x\"\n").unwrap();
         std::fs::set_permissions(&tight_path, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -589,8 +588,6 @@ allow_env_secrets = true
         // load_root_toml should succeed (warning only, not error) even with loose perms
         let result = load_root_toml(&loose_path, "test");
         assert!(result.is_ok(), "loose permissions should warn, not error");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

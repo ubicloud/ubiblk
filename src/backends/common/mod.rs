@@ -13,7 +13,7 @@ use ubiblk_macros::error_context;
 
 use crate::{
     block_device::{
-        self, BgQueues, BgSender, BgWorker, BgWorkerRequest, BlockDevice, LazyTask,
+        self, BgQueues, BgSender, BgStopper, BgWorker, BlockDevice, LazyRequest, LazyTask,
         SharedMetadataState, StatusReporter, SyncBlockDevice, UbiMetadata, UringBlockDevice,
     },
     config::v2,
@@ -27,20 +27,20 @@ pub mod rpc;
 
 pub const SECTOR_SIZE: usize = 512;
 
-struct BgWorkerConfig {
+struct LazyTaskConfig {
     target_dev: Box<dyn BlockDevice>,
     stripe_source_builder: Box<StripeSourceBuilder>,
     metadata_dev: Box<dyn BlockDevice>,
     alignment: usize,
     autofetch: bool,
     shared_state: SharedMetadataState,
-    receiver: Receiver<BgWorkerRequest>,
+    receiver: Receiver<LazyRequest>,
 }
 
 pub struct BackendEnv {
     bdev: Box<dyn BlockDevice>,
-    bgworker: Option<(BgQueues, BgWorkerConfig)>,
-    bgworker_sender: Option<BgSender<BgWorkerRequest>>,
+    bgworker: Option<(BgQueues, LazyTaskConfig)>,
+    bgworker_stopper: Option<BgStopper>,
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
     config: v2::Config,
@@ -68,7 +68,7 @@ impl BackendEnv {
             None => Ok(BackendEnv {
                 bdev: disk_device,
                 bgworker: None,
-                bgworker_sender: None,
+                bgworker_stopper: None,
                 bgworker_thread: None,
                 alignment,
                 config: config.clone(),
@@ -100,10 +100,8 @@ impl BackendEnv {
     }
 
     pub fn stop_bgworker_thread(&mut self) {
-        if let Some(ch) = self.bgworker_sender.take() {
-            if let Err(e) = ch.send(BgWorkerRequest::Shutdown) {
-                error!("Failed to send shutdown request to bgworker: {e}");
-            }
+        if let Some(stopper) = self.bgworker_stopper.take() {
+            stopper.stop();
         }
 
         if let Some(handle) = self.bgworker_thread.take() {
@@ -145,6 +143,7 @@ impl BackendEnv {
 
         let queues = BgQueues::new();
         let (bgworker_sender, bgworker_receiver) = queues.queue();
+        let bgworker_stopper = queues.stopper();
 
         let bdev_lazy = Self::build_bdev_lazy(
             disk_device.clone(),
@@ -159,7 +158,7 @@ impl BackendEnv {
             metadata.has_fetched_all_stripes(),
         ));
 
-        let bgworker_config = BgWorkerConfig {
+        let bgworker_config = LazyTaskConfig {
             target_dev: disk_device,
             stripe_source_builder,
             metadata_dev: metadata_device,
@@ -175,7 +174,7 @@ impl BackendEnv {
         Ok(BackendEnv {
             bdev: bdev_lazy,
             bgworker: Some((queues, bgworker_config)),
-            bgworker_sender: Some(bgworker_sender),
+            bgworker_stopper: Some(bgworker_stopper),
             bgworker_thread: None,
             alignment,
             config: config.clone(),
@@ -199,7 +198,7 @@ impl BackendEnv {
     fn build_bdev_lazy(
         disk_device: Box<dyn BlockDevice>,
         config: &v2::Config,
-        bgworker_sender: BgSender<BgWorkerRequest>,
+        bgworker_sender: BgSender<LazyRequest>,
         shared_state: SharedMetadataState,
     ) -> Result<Box<dyn BlockDevice>> {
         let raw_image_device = if config
@@ -231,7 +230,7 @@ impl BackendEnv {
 
     fn spawn_bgworker_thread(
         queues: BgQueues,
-        config: BgWorkerConfig,
+        config: LazyTaskConfig,
         startup_sender: Sender<Result<()>>,
     ) -> Result<std::thread::JoinHandle<()>> {
         std::thread::Builder::new()
@@ -261,8 +260,8 @@ impl BackendEnv {
             })
     }
 
-    fn add_lazy_task(worker: &mut BgWorker, config: BgWorkerConfig) -> Result<()> {
-        let BgWorkerConfig {
+    fn add_lazy_task(worker: &mut BgWorker, config: LazyTaskConfig) -> Result<()> {
+        let LazyTaskConfig {
             target_dev,
             stripe_source_builder,
             metadata_dev,
@@ -673,7 +672,7 @@ mod tests {
         );
     }
 
-    fn build_test_bgworker_config() -> (BgQueues, BgWorkerConfig, BgSender<BgWorkerRequest>) {
+    fn build_test_lazy_task_config() -> (BgQueues, LazyTaskConfig) {
         let stripe_sector_count_shift = 11;
         let target_dev = TestBlockDevice::new(1024 * 1024);
         let metadata_dev = TestBlockDevice::new(1024 * 1024);
@@ -687,11 +686,11 @@ mod tests {
             loaded_metadata.has_fetched_all_stripes(),
         ));
         let queues = BgQueues::new();
-        let (sender, receiver) = queues.queue();
+        let (_sender, receiver) = queues.queue::<LazyRequest>();
 
         (
             queues,
-            BgWorkerConfig {
+            LazyTaskConfig {
                 target_dev: Box::new(target_dev),
                 stripe_source_builder,
                 metadata_dev: Box::new(metadata_dev),
@@ -700,14 +699,13 @@ mod tests {
                 shared_state,
                 receiver,
             },
-            sender,
         )
     }
 
     #[test]
-    fn run_bgworker_handles_shutdown_request() {
-        let (queues, config, sender) = build_test_bgworker_config();
-        sender.send(BgWorkerRequest::Shutdown).unwrap();
+    fn run_bgworker_stops_when_asked() {
+        let (queues, config) = build_test_lazy_task_config();
+        queues.stopper().stop();
         let mut worker = BgWorker::new(queues);
         BackendEnv::add_lazy_task(&mut worker, config).unwrap();
         worker.run();
@@ -715,11 +713,12 @@ mod tests {
 
     #[test]
     fn spawn_bgworker_thread_runs_and_joins() {
-        let (queues, config, sender) = build_test_bgworker_config();
+        let (queues, config) = build_test_lazy_task_config();
+        let stopper = queues.stopper();
         let (startup_sender, startup_receiver) = channel();
         let handle = BackendEnv::spawn_bgworker_thread(queues, config, startup_sender).unwrap();
         startup_receiver.recv().unwrap().unwrap();
-        sender.send(BgWorkerRequest::Shutdown).unwrap();
+        stopper.stop();
         handle.join().unwrap();
     }
 
@@ -962,6 +961,23 @@ mod tests {
             std::fs::metadata(&metadata_path).unwrap().len(),
             (SECTOR_SIZE * 8) as u64
         );
+    }
+
+    #[test]
+    fn backend_env_starts_and_stops_its_bgworker_thread() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+        let metadata_file = tempfile::NamedTempFile::new().unwrap();
+        metadata_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let config = test_config(disk_file.path(), Some(metadata_file.path()), None);
+        init_metadata(&config, 11).unwrap();
+
+        let mut env = BackendEnv::build(&config).unwrap();
+        env.run_bgworker_thread().unwrap();
+        // The device still holds a sender to the lazy task, so the stopper is
+        // the only way the thread ends: hanging here is a broken shutdown.
+        env.stop_bgworker_thread();
     }
 
     #[test]

@@ -4,7 +4,7 @@ use crate::{
 };
 
 use super::{
-    bgworker::BgWorkerRequest,
+    bgworker::LazyRequest,
     metadata::{Failed, Fetched, NoSource, NotFetched},
 };
 
@@ -40,7 +40,7 @@ struct LazyIoChannel {
     image: Option<Box<dyn IoChannel>>,
     queued_rw_requests: VecDeque<RWRequest>,
     finished_requests: Vec<(usize, bool)>,
-    bgworker_ch: BgSender<BgWorkerRequest>,
+    bgworker_ch: BgSender<LazyRequest>,
     metadata_state: SharedMetadataState,
     stripe_fetches_requested: HashSet<usize>,
     track_written: bool,
@@ -50,7 +50,7 @@ impl LazyIoChannel {
     fn new(
         base: Box<dyn IoChannel>,
         image: Option<Box<dyn IoChannel>>,
-        bgworker_ch: BgSender<BgWorkerRequest>,
+        bgworker_ch: BgSender<LazyRequest>,
         metadata_state: SharedMetadataState,
         track_written: bool,
     ) -> Self {
@@ -102,7 +102,7 @@ impl LazyIoChannel {
                 && !self.stripe_fetches_requested.contains(&stripe_id)
             {
                 self.bgworker_ch
-                    .send(BgWorkerRequest::Fetch { stripe_id })
+                    .send(LazyRequest::Fetch { stripe_id })
                     .context(format!(
                         "failed to send fetch request for stripe {stripe_id}"
                     ))?;
@@ -116,7 +116,7 @@ impl LazyIoChannel {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
             if !self.metadata_state.stripe_written(stripe_id) {
                 self.bgworker_ch
-                    .send(BgWorkerRequest::SetWritten { stripe_id })
+                    .send(LazyRequest::SetWritten { stripe_id })
                     .context(format!(
                         "failed to send set written request for stripe {stripe_id}"
                     ))?;
@@ -326,7 +326,7 @@ impl IoChannel for LazyIoChannel {
 pub struct LazyBlockDevice {
     base: Box<dyn BlockDevice>,
     image: Option<Box<dyn BlockDevice>>,
-    bgworker_ch: BgSender<BgWorkerRequest>,
+    bgworker_ch: BgSender<LazyRequest>,
     metadata_state: SharedMetadataState,
     track_written: bool,
 }
@@ -335,7 +335,7 @@ impl LazyBlockDevice {
     pub fn new(
         base: Box<dyn BlockDevice>,
         image: Option<Box<dyn BlockDevice>>,
-        bgworker_ch: BgSender<BgWorkerRequest>,
+        bgworker_ch: BgSender<LazyRequest>,
         metadata_state: SharedMetadataState,
         track_written: bool,
     ) -> Result<Box<Self>> {

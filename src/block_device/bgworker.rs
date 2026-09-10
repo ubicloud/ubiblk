@@ -6,7 +6,9 @@
 //! neighbours from sleeping.
 
 use std::ops::ControlFlow;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, SendError, Sender, TryRecvError};
+use std::sync::Arc;
 
 use log::error;
 
@@ -14,8 +16,8 @@ use log::error;
 pub trait BgTask {
     type Request;
 
-    /// Act on a request. `Break` retires the task.
-    fn handle(&mut self, request: Self::Request) -> ControlFlow<()>;
+    /// Act on a request.
+    fn handle(&mut self, request: Self::Request);
 
     /// Make progress on whatever is in flight.
     fn update(&mut self);
@@ -65,7 +67,7 @@ impl<T: BgTask> Queued for TaskQueue<T> {
     fn drain(&mut self) -> ControlFlow<()> {
         loop {
             match self.requests.try_recv() {
-                Ok(request) => self.task.handle(request)?,
+                Ok(request) => self.task.handle(request),
                 Err(TryRecvError::Empty) => return ControlFlow::Continue(()),
                 Err(TryRecvError::Disconnected) => {
                     error!("Request channel disconnected, retiring task");
@@ -84,9 +86,24 @@ impl<T: BgTask> Queued for TaskQueue<T> {
     }
 }
 
+/// Ends the run, whatever the tasks are up to.
+#[derive(Clone)]
+pub struct BgStopper {
+    stopped: Arc<AtomicBool>,
+    wakeup: Sender<()>,
+}
+
+impl BgStopper {
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let _ = self.wakeup.send(());
+    }
+}
+
 /// Hands out queues before the worker exists: a device needs its sender at
 /// build time, while the tasks are built on the worker's own thread.
 pub struct BgQueues {
+    stopped: Arc<AtomicBool>,
     wakeup_sender: Sender<()>,
     wakeup: Receiver<()>,
 }
@@ -101,8 +118,16 @@ impl BgQueues {
     pub fn new() -> Self {
         let (wakeup_sender, wakeup) = channel();
         BgQueues {
+            stopped: Arc::new(AtomicBool::new(false)),
             wakeup_sender,
             wakeup,
+        }
+    }
+
+    pub fn stopper(&self) -> BgStopper {
+        BgStopper {
+            stopped: self.stopped.clone(),
+            wakeup: self.wakeup_sender.clone(),
         }
     }
 
@@ -118,6 +143,7 @@ impl BgQueues {
 
 pub struct BgWorker {
     tasks: Vec<Box<dyn Queued>>,
+    stopped: Arc<AtomicBool>,
     wakeup: Receiver<()>,
     /// The queues' side of the wakeup channel, dropped once the worker runs so
     /// that a wait ends when the last sender goes away.
@@ -128,6 +154,7 @@ impl BgWorker {
     pub fn new(queues: BgQueues) -> Self {
         BgWorker {
             tasks: Vec::new(),
+            stopped: queues.stopped,
             wakeup: queues.wakeup,
             wakeup_sender: Some(queues.wakeup_sender),
         }
@@ -156,7 +183,7 @@ impl BgWorker {
 
     pub fn run(&mut self) {
         self.wakeup_sender = None;
-        while !self.tasks.is_empty() {
+        while !self.tasks.is_empty() && !self.stopped.load(Ordering::SeqCst) {
             let block = !self.busy();
             self.receive_requests(block);
             self.update();
@@ -180,10 +207,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::Duration;
 
-    enum Request {
-        Note(u32),
-        Stop,
-    }
+    struct Note(u32);
 
     type Log = Rc<RefCell<Vec<u32>>>;
 
@@ -195,16 +219,10 @@ mod tests {
     }
 
     impl BgTask for Recorder {
-        type Request = Request;
+        type Request = Note;
 
-        fn handle(&mut self, request: Request) -> ControlFlow<()> {
-            match request {
-                Request::Note(n) => {
-                    self.handled.borrow_mut().push(n);
-                    ControlFlow::Continue(())
-                }
-                Request::Stop => ControlFlow::Break(()),
-            }
+        fn handle(&mut self, Note(n): Note) {
+            self.handled.borrow_mut().push(n);
         }
 
         fn update(&mut self) {
@@ -235,46 +253,68 @@ mod tests {
         worker.add(recorder(&first), first_requests);
         worker.add(recorder(&second), second_requests);
 
-        to_first.send(Request::Note(1)).unwrap();
-        to_second.send(Request::Note(2)).unwrap();
-        to_first.send(Request::Note(3)).unwrap();
+        to_first.send(Note(1)).unwrap();
+        to_second.send(Note(2)).unwrap();
+        to_first.send(Note(3)).unwrap();
         worker.receive_requests(false);
 
         assert_eq!(*first.borrow(), vec![1, 3]);
         assert_eq!(*second.borrow(), vec![2]);
     }
 
+    /// Nobody is left to send to that task, and waiting for a request that
+    /// cannot arrive would keep the thread alive for the life of the process.
+    /// The tasks that still have senders carry on.
     #[test]
-    fn a_task_that_asks_to_stop_leaves_the_others_running() {
+    fn a_queue_with_no_senders_retires_only_its_own_task() {
         let queues = BgQueues::new();
-        let (to_quitter, quitter_requests) = queues.queue();
+        let (to_quitter, quitter_requests) = queues.queue::<Note>();
         let (to_survivor, survivor_requests) = queues.queue();
         let survived = Log::default();
         let mut worker = BgWorker::new(queues);
         worker.add(Recorder::default(), quitter_requests);
         worker.add(recorder(&survived), survivor_requests);
 
-        to_quitter.send(Request::Stop).unwrap();
+        drop(to_quitter);
         worker.receive_requests(false);
-        to_survivor.send(Request::Note(1)).unwrap();
+        to_survivor.send(Note(1)).unwrap();
         worker.receive_requests(false);
 
+        assert_eq!(worker.tasks.len(), 1);
         assert_eq!(*survived.borrow(), vec![1]);
     }
 
-    /// Nobody is left to send: waiting for a request that cannot arrive would
-    /// keep the thread alive for the life of the process.
     #[test]
-    fn a_queue_with_no_senders_retires_its_task() {
+    fn a_stopper_ends_the_run_with_its_tasks_still_queued() {
         let queues = BgQueues::new();
-        let (sender, requests) = queues.queue::<Request>();
+        let (sender, requests) = queues.queue::<Note>();
+        // Held no longer than the call: a live stopper is a live wakeup sender.
+        queues.stopper().stop();
         let mut worker = BgWorker::new(queues);
         worker.add(Recorder::default(), requests);
-        drop(sender);
 
+        // A worker that ignores the stop waits here for a request that is not
+        // coming; retiring the task frees it, and the count below then fails
+        // rather than the test hanging.
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            drop(sender);
+        });
         worker.run();
 
-        assert!(worker.tasks.is_empty());
+        assert_eq!(worker.tasks.len(), 1);
+    }
+
+    /// Without this the worker would sit in `wait` until something unrelated
+    /// happened to send it a request.
+    #[test]
+    fn stopping_wakes_a_waiting_worker() {
+        let queues = BgQueues::new();
+        let stopper = queues.stopper();
+
+        stopper.stop();
+
+        assert!(queues.wakeup.try_recv().is_ok());
     }
 
     #[test]
@@ -292,11 +332,12 @@ mod tests {
             requests,
         );
 
-        // Nothing is queued yet, so a worker that waits before looking at what
-        // is in flight reaches the stop request without having updated the task.
+        // Nothing is queued, so a worker that waits before looking at what is
+        // in flight is still waiting when its queue is dropped, having never
+        // updated the task.
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(50));
-            let _ = sender.send(Request::Stop);
+            drop(sender);
         });
         worker.run();
 

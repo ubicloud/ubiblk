@@ -5,13 +5,11 @@ use super::{
 
 use crate::block_device::bgworker::BgTask;
 use crate::{block_device::BlockDevice, stripe_source::StripeSource, Result};
-use log::{error, info};
-use std::ops::ControlFlow;
+use log::error;
 
-pub enum BgWorkerRequest {
+pub enum LazyRequest {
     Fetch { stripe_id: usize },
     SetWritten { stripe_id: usize },
-    Shutdown,
 }
 
 /// Fetching stripes and persisting what has been fetched, which is what a lazy
@@ -23,21 +21,13 @@ pub struct LazyTask {
 }
 
 impl BgTask for LazyTask {
-    type Request = BgWorkerRequest;
+    type Request = LazyRequest;
 
-    fn handle(&mut self, request: BgWorkerRequest) -> ControlFlow<()> {
+    fn handle(&mut self, request: LazyRequest) {
         match request {
-            BgWorkerRequest::Fetch { stripe_id } => {
-                self.stripe_fetcher.handle_fetch_request(stripe_id);
-                ControlFlow::Continue(())
-            }
-            BgWorkerRequest::SetWritten { stripe_id } => {
-                self.metadata_flusher.set_stripe_written(stripe_id);
-                ControlFlow::Continue(())
-            }
-            BgWorkerRequest::Shutdown => {
-                info!("Received shutdown request, stopping worker");
-                ControlFlow::Break(())
+            LazyRequest::Fetch { stripe_id } => self.stripe_fetcher.handle_fetch_request(stripe_id),
+            LazyRequest::SetWritten { stripe_id } => {
+                self.metadata_flusher.set_stripe_written(stripe_id)
             }
         }
     }
@@ -99,7 +89,7 @@ mod tests {
         block_device::{
             bdev_lazy::SharedMetadataState,
             bdev_test::TestBlockDevice,
-            bgworker::{BgQueues, BgSender, BgWorker},
+            bgworker::{BgQueues, BgSender, BgStopper, BgWorker},
             NullBlockDevice, UbiMetadata,
         },
         stripe_source,
@@ -107,7 +97,12 @@ mod tests {
 
     fn build_worker_with_source(
         stripe_source: Box<dyn StripeSource>,
-    ) -> (BgWorker, BgSender<BgWorkerRequest>, SharedMetadataState) {
+    ) -> (
+        BgWorker,
+        BgStopper,
+        BgSender<LazyRequest>,
+        SharedMetadataState,
+    ) {
         let stripe_sector_count_shift = 11;
         let target_dev = TestBlockDevice::new(1024 * 1024);
         let metadata_dev = TestBlockDevice::new(1024 * 1024);
@@ -130,13 +125,19 @@ mod tests {
 
         let queues = BgQueues::new();
         let (sender, requests) = queues.queue();
+        let stopper = queues.stopper();
         let mut worker = BgWorker::new(queues);
         worker.add(task, requests);
 
-        (worker, sender, metadata_state)
+        (worker, stopper, sender, metadata_state)
     }
 
-    fn build_worker() -> (BgWorker, BgSender<BgWorkerRequest>, SharedMetadataState) {
+    fn build_worker() -> (
+        BgWorker,
+        BgStopper,
+        BgSender<LazyRequest>,
+        SharedMetadataState,
+    ) {
         let stripe_sector_count_shift = 11;
         let stripe_sector_count = 1u64 << stripe_sector_count_shift;
         let source_dev = TestBlockDevice::new(1024 * 1024);
@@ -149,8 +150,15 @@ mod tests {
 
     #[test]
     fn test_bg_worker_shutdown() {
-        let (mut worker, sender, _) = build_worker();
-        sender.send(BgWorkerRequest::Shutdown).unwrap();
+        let (mut worker, stopper, sender, _) = build_worker();
+        stopper.stop();
+        // The worker stops because it was asked to, not because its queue ran
+        // dry: the delayed drop is only there to keep a regression from
+        // hanging the suite.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            drop(sender);
+        });
         worker.run();
     }
 
@@ -195,10 +203,9 @@ mod tests {
         let flaky_source =
             stripe_source::FlakyStripeSource::new(Box::new(base_source), vec![(0, 4)]);
 
-        let (mut worker, sender, metadata_state) = build_worker_with_source(Box::new(flaky_source));
-        sender
-            .send(BgWorkerRequest::Fetch { stripe_id: 0 })
-            .unwrap();
+        let (mut worker, _stopper, sender, metadata_state) =
+            build_worker_with_source(Box::new(flaky_source));
+        sender.send(LazyRequest::Fetch { stripe_id: 0 }).unwrap();
         worker.receive_requests(false);
 
         for _ in 0..100 {

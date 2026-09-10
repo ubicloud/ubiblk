@@ -51,7 +51,7 @@ mod wait_for_completion;
 pub(crate) mod bdev_test;
 
 pub use bdev_lazy::{
-    bgworker::{BgWorkerRequest, LazyTask},
+    bgworker::LazyTask,
     device::LazyBlockDevice,
     metadata::{
         save::DEFAULT_STRIPE_SECTOR_COUNT_SHIFT,
@@ -65,5 +65,5 @@ pub use bdev_crypt::CryptBlockDevice;
 pub use bdev_null::NullBlockDevice;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;
-pub use bgworker::BgWorker;
+pub use bgworker::{BgWorker, BgWorkerRequest};
 pub use wait_for_completion::wait_for_completion;

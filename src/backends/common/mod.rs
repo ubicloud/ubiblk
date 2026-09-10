@@ -282,7 +282,9 @@ impl BackendEnv {
             autofetch,
             shared_state,
         )?;
-        Ok(BgWorker::new(lazy, receiver))
+        let mut worker = BgWorker::new(receiver);
+        worker.set_lazy_task(lazy);
+        Ok(worker)
     }
 }
 

@@ -6,12 +6,6 @@ use super::{
 use crate::{block_device::BlockDevice, stripe_source::StripeSource, Result};
 use log::error;
 
-pub enum BgWorkerRequest {
-    Fetch { stripe_id: usize },
-    SetWritten { stripe_id: usize },
-    Shutdown,
-}
-
 pub struct LazyTask {
     stripe_fetcher: StripeFetcher,
     metadata_flusher: MetadataFlusher,
@@ -80,8 +74,8 @@ mod tests {
     use super::*;
     use crate::{
         block_device::{
-            bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, BgWorker, NullBlockDevice,
-            UbiMetadata,
+            bdev_lazy::SharedMetadataState, bdev_test::TestBlockDevice, BgWorker, BgWorkerRequest,
+            NullBlockDevice, UbiMetadata,
         },
         stripe_source,
     };
@@ -115,29 +109,10 @@ mod tests {
         )
         .unwrap();
 
-        (BgWorker::new(lazy, rx), tx, metadata_state)
-    }
+        let mut worker = BgWorker::new(rx);
+        worker.set_lazy_task(lazy);
 
-    fn build_bg_worker() -> (
-        BgWorker,
-        std::sync::mpsc::Sender<BgWorkerRequest>,
-        SharedMetadataState,
-    ) {
-        let stripe_sector_count_shift = 11;
-        let stripe_sector_count = 1u64 << stripe_sector_count_shift;
-        let source_dev = TestBlockDevice::new(1024 * 1024);
-        let stripe_source = Box::new(
-            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
-                .unwrap(),
-        );
-        build_bg_worker_with_source(stripe_source)
-    }
-
-    #[test]
-    fn test_bg_worker_shutdown() {
-        let (mut bg_worker, sender, _) = build_bg_worker();
-        sender.send(BgWorkerRequest::Shutdown).unwrap();
-        bg_worker.run();
+        (worker, tx, metadata_state)
     }
 
     #[test]

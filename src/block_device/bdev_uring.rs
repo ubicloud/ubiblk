@@ -4,6 +4,7 @@ use io_uring::IoUring;
 use log::error;
 use nix::errno::Errno;
 use std::{
+    collections::HashMap,
     fs::{File, OpenOptions},
     os::fd::AsRawFd,
     os::unix::fs::OpenOptionsExt,
@@ -17,6 +18,7 @@ struct UringIoChannel {
     submissions: u64,
     completions: u64,
     finished_requests: Vec<(usize, bool)>,
+    expected_bytes: HashMap<u64, u32>,
     sync_io: bool,
 }
 
@@ -57,6 +59,7 @@ impl UringIoChannel {
             submissions: 0,
             completions: 0,
             finished_requests: Vec::new(),
+            expected_bytes: HashMap::new(),
             sync_io,
         })
     }
@@ -84,6 +87,7 @@ impl IoChannel for UringIoChannel {
             self.finished_requests.push((id, false));
             return;
         }
+        self.expected_bytes.insert(id as u64, len);
         self.pending += 1;
     }
 
@@ -100,6 +104,7 @@ impl IoChannel for UringIoChannel {
             self.finished_requests.push((id, false));
             return;
         }
+        self.expected_bytes.insert(id as u64, len);
         self.pending += 1;
     }
 
@@ -117,6 +122,7 @@ impl IoChannel for UringIoChannel {
             self.finished_requests.push((id, false));
             return;
         }
+        self.expected_bytes.insert(id as u64, 0);
         self.pending += 1;
     }
 
@@ -141,12 +147,26 @@ impl IoChannel for UringIoChannel {
                 Some(entry) => {
                     let result = entry.result();
                     let id = entry.user_data();
-                    if result < 0 {
-                        finished_requests.push((id as usize, false));
+                    let expected = self.expected_bytes.remove(&id);
+                    let success = if result < 0 {
                         error!("IO request failed: {}", Errno::from_raw(-result));
+                        false
                     } else {
-                        finished_requests.push((id as usize, true));
-                    }
+                        match expected {
+                            Some(expected) if result as u32 == expected => true,
+                            Some(expected) => {
+                                error!(
+                                    "IO request transferred {result} bytes, expected {expected}"
+                                );
+                                false
+                            }
+                            None => {
+                                error!("Completion for request {id}, which is not in flight");
+                                false
+                            }
+                        }
+                    };
+                    finished_requests.push((id as usize, success));
                     self.completions += 1;
                 }
                 None => break,
@@ -298,7 +318,8 @@ mod tests {
     // writes are rejected.
     #[test]
     fn create_channel_and_basic_io_readonly() -> Result<()> {
-        let tmpfile = NamedTempFile::new()?;
+        let mut tmpfile = NamedTempFile::new()?;
+        tmpfile.as_file_mut().set_len(SECTOR_SIZE as u64)?;
         let path = tmpfile.path().to_owned();
         let block_dev = UringBlockDevice::new(path.clone(), 8, true, false, false)?;
         let mut chan = block_dev.create_channel()?;
@@ -318,6 +339,38 @@ mod tests {
         let result = spin_until_complete(&mut chan);
         assert_eq!(result, vec![(1, false)]);
 
+        Ok(())
+    }
+
+    // A read that runs off the end of the file comes back short. Reporting it
+    // as success hands the caller a buffer the disk never filled.
+    #[test]
+    fn a_short_read_fails() -> Result<()> {
+        let mut tmpfile = NamedTempFile::new()?;
+        tmpfile.as_file_mut().set_len(SECTOR_SIZE as u64)?;
+        let block_dev = UringBlockDevice::new(tmpfile.path().to_owned(), 8, true, false, false)?;
+        let mut chan = block_dev.create_channel()?;
+
+        chan.add_read(0, 2, shared_buffer(2 * SECTOR_SIZE), 1);
+        chan.submit()?;
+
+        assert_eq!(spin_until_complete(&mut chan), vec![(1, false)]);
+        Ok(())
+    }
+
+    // The same read moved past the end returns nothing at all, which the
+    // kernel reports as a transfer of zero bytes rather than as an error.
+    #[test]
+    fn a_read_past_the_end_of_the_file_fails() -> Result<()> {
+        let mut tmpfile = NamedTempFile::new()?;
+        tmpfile.as_file_mut().set_len(SECTOR_SIZE as u64)?;
+        let block_dev = UringBlockDevice::new(tmpfile.path().to_owned(), 8, true, false, false)?;
+        let mut chan = block_dev.create_channel()?;
+
+        chan.add_read(4, 1, shared_buffer(SECTOR_SIZE), 1);
+        chan.submit()?;
+
+        assert_eq!(spin_until_complete(&mut chan), vec![(1, false)]);
         Ok(())
     }
 

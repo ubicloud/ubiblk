@@ -153,10 +153,18 @@ impl StripeServerSession {
         let stripe_len_bytes = self.metadata.stripe_size();
 
         let offset = stripe_id * (stripe_sector_count as u64);
+        // A short final stripe keeps the zeros the fresh buffer came with.
+        let sectors = (stripe_sector_count as u64)
+            .min(self.device_sector_count.saturating_sub(offset)) as u32;
+        if sectors == 0 {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!("stripe {stripe_id} starts past the end of the device"),
+            }));
+        }
 
         let buffer = shared_buffer(stripe_len_bytes);
         self.stripe_channel
-            .add_read(offset, stripe_sector_count, buffer.clone(), 0);
+            .add_read(offset, sectors, buffer.clone(), 0);
         self.stripe_channel.submit()?;
         wait_for_completion(
             self.stripe_channel.as_mut(),
@@ -196,7 +204,9 @@ mod tests {
 
     use crate::backends::SECTOR_SIZE;
     use crate::block_device::bdev_test::TestBlockDevice;
+    use crate::block_device::{BlockDevice, UringBlockDevice};
     use crate::stripe_server::StripeServer;
+    use tempfile::NamedTempFile;
 
     use super::*;
 
@@ -225,7 +235,7 @@ mod tests {
     fn make_session(
         input: Vec<u8>,
         metadata: Arc<UbiMetadata>,
-        device: Arc<TestBlockDevice>,
+        device: Arc<dyn BlockDevice>,
     ) -> (StripeServerSession, Arc<Mutex<Vec<u8>>>) {
         let writes = Arc::new(Mutex::new(Vec::new()));
         let stream = TestStream {
@@ -318,6 +328,39 @@ mod tests {
         expected.extend_from_slice(&(stripe_size as u64).to_le_bytes());
         expected.extend_from_slice(&pattern);
 
+        assert_eq!(*writes.lock().unwrap(), expected);
+    }
+
+    // File-backed: the in-memory device refuses a read past its end.
+    #[test]
+    fn test_handle_read_stripe_partial_final_stripe() {
+        let mut metadata = UbiMetadata::new(2, 2, 0);
+        metadata.set_stripe_header(1, metadata_flags::WRITTEN);
+        let metadata: Arc<UbiMetadata> = Arc::from(metadata);
+        let stripe_size = metadata.stripe_size();
+
+        let mut tmpfile = NamedTempFile::new().unwrap();
+        let tail = vec![0x7Eu8; SECTOR_SIZE];
+        tmpfile
+            .as_file_mut()
+            .write_all(&vec![0u8; stripe_size])
+            .unwrap();
+        tmpfile.as_file_mut().write_all(&tail).unwrap();
+        let device: Arc<dyn BlockDevice> = Arc::from(
+            UringBlockDevice::new(tmpfile.path().to_owned(), 8, true, false, false).unwrap()
+                as Box<dyn BlockDevice>,
+        );
+
+        let mut input = vec![READ_STRIPE_CMD];
+        input.extend_from_slice(&1u64.to_le_bytes());
+        let (mut session, writes) = make_session(input, metadata, device);
+
+        session.handle_single_request().unwrap();
+
+        let mut expected = vec![STATUS_OK];
+        expected.extend_from_slice(&(stripe_size as u64).to_le_bytes());
+        expected.extend_from_slice(&tail);
+        expected.extend_from_slice(&vec![0u8; stripe_size - SECTOR_SIZE]);
         assert_eq!(*writes.lock().unwrap(), expected);
     }
 

@@ -99,17 +99,31 @@ impl Chunk {
 #[derive(Clone)]
 pub struct SharedState {
     chunks: Arc<Vec<AtomicU64>>,
+    /// Bumped whenever a chunk finishes moving. A channel waiting for one can
+    /// tell "nothing has happened since I asked" from "something did, and what
+    /// I asked for may need asking again".
+    transitions: Arc<AtomicU64>,
 }
 
 impl SharedState {
     pub fn new(chunk_count: usize) -> Self {
         SharedState {
             chunks: Arc::new((0..chunk_count).map(|_| AtomicU64::new(0)).collect()),
+            transitions: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// How many chunks have finished moving, ever.
+    pub fn transitions(&self) -> u64 {
+        self.transitions.load(Ordering::Acquire)
+    }
+
+    fn moved(&self) {
+        self.transitions.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn get(&self, chunk: usize) -> Chunk {
@@ -185,6 +199,7 @@ impl SharedState {
             c.fetch_failed = true;
             Some((c, ()))
         });
+        self.moved();
     }
 
     /// Say a chunk has content, as the map does for one it already knows about.
@@ -212,6 +227,7 @@ impl SharedState {
             c.modified = modified;
             Some((c, ()))
         })
+        .inspect(|()| self.moved())
         .is_some()
     }
 
@@ -226,6 +242,7 @@ impl SharedState {
             c.slot = 0;
             Some((c, slot))
         })
+        .inspect(|_| self.moved())
     }
 
     /// Take a chunk out of service so its slot can be reused. This is the CAS
@@ -253,6 +270,7 @@ impl SharedState {
             c.modified = false;
             Some((c, slot))
         })
+        .inspect(|_| self.moved())
     }
 
     /// The eviction failed; the chunk keeps its slot and whatever it held.
@@ -264,6 +282,7 @@ impl SharedState {
             c.state = ChunkState::Resident;
             Some((c, ()))
         })
+        .inspect(|()| self.moved())
         .is_some()
     }
 
@@ -274,6 +293,7 @@ impl SharedState {
             c.modified = false;
             Some((c, ()))
         });
+        self.moved();
     }
 }
 

@@ -5,7 +5,7 @@
 //! the transition it needs and is tried again on the next poll, so a request
 //! whose footprint is larger than the whole cache still makes progress.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -75,7 +75,7 @@ impl BlockDevice for SpillBlockDevice {
                 self.geometry.chunk_bytes(),
             ),
             next_base_id: 0,
-            asked: HashSet::new(),
+            asked: HashMap::new(),
         }))
     }
 
@@ -134,10 +134,12 @@ pub struct SpillIoChannel {
     inbox: Arc<Mutex<Vec<(usize, bool)>>>,
     scratch: AlignedBufferPool,
     next_base_id: usize,
-    /// Chunks this channel has already asked about since anything last
-    /// happened. Without it a waiting request asks again on every poll, which
-    /// is thousands of messages the task has to drain for no new information.
-    asked: HashSet<usize>,
+    /// Chunks this channel has asked about, and how many chunks had finished
+    /// moving when it asked. Without this a waiting request asks again on
+    /// every poll, which is thousands of messages saying the same thing; with
+    /// only the chunk, a request whose chunk arrived and left again would
+    /// wait for ever.
+    asked: HashMap<usize, u64>,
 }
 
 impl SpillIoChannel {
@@ -186,9 +188,13 @@ impl SpillIoChannel {
         true
     }
 
+    /// Complete a request, once. A flush that was failed by a submit error is
+    /// still owed a reply by the task, and answering that reply as well would
+    /// complete the same descriptor twice.
     fn finish(&mut self, id: usize, ok: bool) {
-        self.live.remove(&id);
-        self.finished.push((id, ok));
+        if self.live.remove(&id).is_some() {
+            self.finished.push((id, ok));
+        }
     }
 
     /// Work through the queue, starting whatever can start. A request that
@@ -280,7 +286,9 @@ impl SpillIoChannel {
                 request.ok = false;
                 return true;
             }
-            if self.asked.insert(chunk)
+            let moved = self.state.transitions();
+            let asked_when = self.asked.insert(chunk, moved);
+            if asked_when != Some(moved)
                 && (!self.ask(SpillRequest::Fetch { chunk }) || !self.ask(SpillRequest::MakeRoom))
             {
                 self.live.get_mut(&id).expect("live").ok = false;
@@ -413,11 +421,6 @@ impl IoChannel for SpillIoChannel {
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
         let completions = self.base.poll();
-        // Something moved, so what this channel asked for may have arrived and
-        // is worth asking about again if it has not.
-        if !completions.is_empty() {
-            self.asked.clear();
-        }
         for (base_id, ok) in completions {
             self.base_completed(base_id, ok);
         }
@@ -470,6 +473,7 @@ mod tests {
     struct Stack {
         channel: Box<dyn IoChannel>,
         device: Box<dyn BlockDevice>,
+        state: SharedState,
         task: SpillTask,
         inbox: Receiver<BgWorkerRequest>,
         base: Box<TestBlockDevice>,
@@ -502,10 +506,11 @@ mod tests {
         )
         .expect("task");
         let device =
-            SpillBlockDevice::new(base.clone(), state, geometry(), sender).expect("device");
+            SpillBlockDevice::new(base.clone(), state.clone(), geometry(), sender).expect("device");
         Stack {
             channel: device.create_channel().expect("channel"),
             device,
+            state,
             task,
             inbox,
             base,
@@ -514,6 +519,10 @@ mod tests {
     }
 
     impl Stack {
+        fn state_of(&self, chunk: usize) -> ChunkState {
+            self.state.get(chunk).state
+        }
+
         fn id(&mut self) -> usize {
             self.next_id += 1;
             self.next_id
@@ -747,6 +756,46 @@ mod tests {
     /// A chunk that cannot be brought in fails the request waiting for it,
     /// rather than leaving it to wait for an attempt nobody is going to make
     /// again.
+    /// A chunk that arrives and is taken away again before the request
+    /// waiting for it gets a turn. The request has to ask a second time, or it
+    /// waits for a fetch nobody is going to make.
+    #[test]
+    fn a_request_asks_again_when_its_chunk_comes_and_goes() {
+        let mut stack = stack();
+        assert!(stack.write(0, 1, 0x44));
+        assert!(stack.write(CHUNK_SECTORS, 1, 0x55));
+        assert!(stack.write(CHUNK_SECTORS * 2, 1, 0x66));
+
+        // Chunk 0 is in the store now. Ask for it, let the task bring it in,
+        // then take it away again before the channel can lease it.
+        let buf = shared_buffer(SECTOR_SIZE);
+        let id = stack.id();
+        stack.channel.add_read(0, 1, buf.clone(), id);
+        stack.channel.submit().expect("submit");
+        for _ in 0..200 {
+            while let Ok(request) = stack.inbox.try_recv() {
+                match request {
+                    BgWorkerRequest::SpillFetch { chunk } => {
+                        stack.task.handle(SpillRequest::Fetch { chunk })
+                    }
+                    BgWorkerRequest::SpillMakeRoom => stack.task.handle(SpillRequest::MakeRoom),
+                    _ => {}
+                }
+            }
+            stack.task.update();
+            if stack.state_of(0) == ChunkState::Resident {
+                break;
+            }
+        }
+        assert_eq!(stack.state_of(0), ChunkState::Resident, "never came in");
+        let (slot, _) = stack.state.begin_evict(0).expect("take it away again");
+        stack.state.finish_evict(0).expect("and free the slot");
+        stack.task.release_slot(slot);
+
+        assert_eq!(stack.run(), vec![(id, true)], "the request was stranded");
+        assert!(buf.borrow().as_slice().iter().all(|b| *b == 0x44));
+    }
+
     #[test]
     fn a_read_whose_chunk_cannot_be_fetched_fails() {
         let mut stack = stack();

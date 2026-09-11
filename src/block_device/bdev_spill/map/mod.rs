@@ -211,13 +211,14 @@ impl<S: MapStorage> Map<S> {
             return Ok(());
         }
 
-        let blocks = self.staged.len().div_ceil(JOURNAL_ENTRIES_PER_BLOCK) as u64;
-        if self.journal.blocks_used() + blocks > self.journal_blocks {
-            self.checkpoint()?;
-        }
-
         let staged = std::mem::take(&mut self.staged);
         for batch in staged.chunks(JOURNAL_ENTRIES_PER_BLOCK) {
+            // Checked for each block rather than for the batch: a commit can
+            // be larger than the whole journal, and a checkpoint in the middle
+            // of one carries what has been applied so far.
+            if !self.journal.has_room() {
+                self.checkpoint()?;
+            }
             if let Err(e) = self.journal.append(&mut self.storage, batch.to_vec()) {
                 self.failed = true;
                 return Err(e);
@@ -288,6 +289,7 @@ mod tests {
 
     const CHUNKS: u64 = 40;
     const JOURNAL_BLOCKS: u64 = 4;
+    use super::format::JOURNAL_ENTRIES_PER_BLOCK;
 
     fn binding() -> Binding {
         Binding {
@@ -428,6 +430,27 @@ mod tests {
             map.superblock_sequence > 1,
             "no checkpoint was ever written"
         );
+        Ok(())
+    }
+
+    /// A commit can be larger than the whole journal: a flush covering every
+    /// slot of a big cache is one entry per chunk.
+    #[test]
+    fn a_commit_larger_than_the_journal_still_commits() -> Result<()> {
+        let mut map = fresh();
+        let entries = (JOURNAL_ENTRIES_PER_BLOCK as u64 * JOURNAL_BLOCKS * 2).min(CHUNKS);
+        assert!(entries > JOURNAL_ENTRIES_PER_BLOCK as u64 * JOURNAL_BLOCKS);
+
+        for chunk in 0..entries {
+            map.stage(chunk, local(chunk as u32))?;
+        }
+        map.commit()?;
+
+        let reopened = reopen(&map)?;
+        for chunk in 0..entries {
+            assert_eq!(reopened.authority(chunk), local(chunk as u32));
+        }
+        assert!(!map.failed());
         Ok(())
     }
 

@@ -315,11 +315,19 @@ impl BackendEnv {
                 description: "the disk is as large as the device, so nothing can spill".to_string(),
             }));
         }
-        let slot_count = u32::try_from(slot_count).map_err(|_| {
-            crate::ubiblk_error!(InvalidParameter {
-                description: "too many slots for one device".to_string(),
-            })
-        })?;
+        // A chunk's word names its slot in 24 bits, and handing out one past
+        // that would panic where nothing could catch it.
+        if slot_count > u64::from(crate::block_device::bdev_spill::state::MAX_SLOTS) {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "{} slots of {chunk_bytes} bytes is more than the {} a device can name; \
+                     use a larger chunk_kb",
+                    slot_count,
+                    crate::block_device::bdev_spill::state::MAX_SLOTS
+                ),
+            }));
+        }
+        let slot_count = slot_count as u32;
 
         let geometry = Geometry {
             chunk_sectors,
@@ -1371,6 +1379,23 @@ mod tests {
                 "{what} was accepted by a spill device"
             );
         }
+
+        // A slot number is 24 bits wide, and handing out one past that would
+        // panic where nothing could catch it. The disk here is sparse: it is
+        // the number of slots that matters, not the bytes.
+        let huge = dir.path().join("huge.raw");
+        std::fs::File::create(&huge)
+            .unwrap()
+            .set_len(2 * 1024 * 1024 * 1024 * 1024)
+            .unwrap();
+        let mut config = spill_config(dir.path(), &huge, 4 * 1024 * 1024);
+        if let Some(spill) = &mut config.spill {
+            spill.chunk_kb = 128;
+        }
+        assert!(
+            BackendEnv::build(&config).is_err(),
+            "a cache with more slots than a chunk's word can name was accepted"
+        );
 
         // Nothing can spill when the disk is as large as the device, so the
         // layer would never do anything.

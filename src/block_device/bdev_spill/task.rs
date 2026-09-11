@@ -688,6 +688,12 @@ impl SpillTask {
         self.slots.free_count()
     }
 
+    /// Give a slot back, for a test that took a chunk out from under the task.
+    #[cfg(test)]
+    pub fn release_slot(&mut self, slot: u32) {
+        self.slots.release(slot);
+    }
+
     /// Lose everything in the store, as an operator with a delete key might.
     #[cfg(test)]
     pub fn forget_objects(&mut self) {

@@ -29,6 +29,19 @@ pub struct SpillSection {
 }
 
 impl SpillSection {
+    /// Paths in a config are relative to the config, not to wherever the
+    /// backend happens to be started from.
+    pub fn resolve_paths(&mut self, config_dir: &std::path::Path) {
+        if self.map_path.is_relative() {
+            self.map_path = config_dir.join(&self.map_path);
+        }
+        if let ArchiveStorageConfig::Filesystem { path, .. } = &mut self.store {
+            if path.is_relative() {
+                *path = config_dir.join(&*path);
+            }
+        }
+    }
+
     pub fn chunk_bytes(&self) -> u64 {
         u64::from(self.chunk_kb) * 1024
     }

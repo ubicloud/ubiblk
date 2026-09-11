@@ -44,9 +44,7 @@ impl Config {
         let mut spill: Option<crate::config::v2::spill::SpillSection> =
             parse_optional_section(&merged, "spill")?;
         if let Some(spill) = &mut spill {
-            if spill.map_path.is_relative() {
-                spill.map_path = config_dir.join(&spill.map_path);
-            }
+            spill.resolve_paths(config_dir);
             spill.uuid_bytes()?;
         }
 
@@ -360,6 +358,16 @@ mod tests {
         assert_eq!(spill.chunk_kb, 64);
         assert_eq!(spill.map_path, Path::new(".").join("map"));
         assert_eq!(spill.uuid_bytes().unwrap()[0], 0x01);
+        match &spill.store {
+            crate::config::v2::stripe_source::ArchiveStorageConfig::Filesystem { path, .. } => {
+                assert_eq!(
+                    path,
+                    &Path::new(".").join("store"),
+                    "the store path is where the config is"
+                );
+            }
+            other => panic!("unexpected store: {other:?}"),
+        }
     }
 
     #[test]

@@ -243,6 +243,7 @@ impl SpillTask {
     fn poison(&mut self, chunk: usize) {
         self.state.poison(chunk);
         self.dirty.remove(&chunk);
+        self.wanted.remove(&chunk);
         if let Err(e) = self
             .map
             .stage(chunk as u64, Authority::Unreadable)
@@ -278,8 +279,13 @@ impl SpillTask {
             }
             let seen = self.state.get(chunk);
             if seen.state != ChunkState::Idle {
-                // Somebody else got there first, or it cannot be filled.
-                self.wanted.remove(&chunk);
+                // It is here, or it never will be, or something else is
+                // already moving it. Only the first two stop us wanting it:
+                // the channel that asked will not ask twice, so a fill that
+                // fails has to leave the wanting behind.
+                if matches!(seen.state, ChunkState::Resident | ChunkState::Poisoned) {
+                    self.wanted.remove(&chunk);
+                }
                 continue;
             }
             if !self.buffers.has_available() {
@@ -324,9 +330,9 @@ impl SpillTask {
                     // served until it is repaired.
                     self.state.abandon_fill(chunk);
                     self.slots.release(slot);
+                    self.wanted.remove(&chunk);
                 }
             }
-            self.wanted.remove(&chunk);
         }
 
         if let Err(e) = self.base.submit() {
@@ -334,10 +340,16 @@ impl SpillTask {
         }
     }
 
-    /// Free a slot if anything is waiting for one.
+    /// Free a slot if anything is waiting for one. A chunk that is already
+    /// being filled has its slot, so wanting it is not a reason to take one
+    /// away from somebody else.
     fn make_room(&mut self) {
+        let waiting = self
+            .wanted
+            .iter()
+            .any(|chunk| !self.fills.contains_key(chunk));
         if self.slots.free_count() > 0
-            || self.wanted.is_empty()
+            || !waiting
             || !self.evicts.is_empty()
             || !self.buffers.has_available()
         {
@@ -399,9 +411,12 @@ impl SpillTask {
         self.buffers.return_buffer(&buffer);
         if ok {
             self.state.finish_fill(chunk, false);
+            self.wanted.remove(&chunk);
         } else {
             error!("Filling chunk {chunk} failed");
             self.state.abandon_fill(chunk);
+            self.state.mark_fetch_failed(chunk);
+            self.wanted.remove(&chunk);
             self.slots.release(slot);
         }
     }
@@ -474,6 +489,8 @@ impl SpillTask {
         let give_up = |task: &mut Self, buffer: &SharedBuffer| {
             task.buffers.return_buffer(buffer);
             task.state.abandon_fill(chunk);
+            task.state.mark_fetch_failed(chunk);
+            task.wanted.remove(&chunk);
             task.slots.release(slot);
         };
 
@@ -626,6 +643,12 @@ impl SpillTask {
     #[cfg(test)]
     pub fn free_slots(&self) -> usize {
         self.slots.free_count()
+    }
+
+    /// Lose everything in the store, as an operator with a delete key might.
+    #[cfg(test)]
+    pub fn forget_objects(&mut self) {
+        self.store = Box::new(crate::archive::MemStore::new());
     }
 }
 

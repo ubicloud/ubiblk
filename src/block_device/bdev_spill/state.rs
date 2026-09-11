@@ -26,6 +26,10 @@ const SLOT_MASK: u64 = 0xFF_FFFF << SLOT_SHIFT;
 /// served as zeroes and needs no slot; the bit is cleared before anything can
 /// write to the chunk, so an acknowledged write can never be read as nothing.
 const HAS_CONTENT_BIT: u64 = 1 << 40;
+/// Set when the last attempt to bring a chunk in failed. A request waiting for
+/// that chunk fails rather than waiting for an attempt nobody is going to make
+/// again; the next one to ask for it clears the bit and tries afresh.
+const FETCH_FAILED_BIT: u64 = 1 << 41;
 
 /// The states a chunk moves through. Only `Resident` can be leased, so a chunk
 /// in the middle of anything is untouchable rather than merely undocumented.
@@ -61,6 +65,7 @@ pub struct Chunk {
     pub state: ChunkState,
     pub modified: bool,
     pub has_content: bool,
+    pub fetch_failed: bool,
     pub leases: u32,
     pub slot: u32,
 }
@@ -71,6 +76,7 @@ impl Chunk {
             state: ChunkState::from_bits(word & STATE_BITS),
             modified: word & MODIFIED_BIT != 0,
             has_content: word & HAS_CONTENT_BIT != 0,
+            fetch_failed: word & FETCH_FAILED_BIT != 0,
             leases: ((word & LEASE_MASK) >> LEASE_SHIFT) as u32,
             slot: ((word & SLOT_MASK) >> SLOT_SHIFT) as u32,
         }
@@ -80,6 +86,11 @@ impl Chunk {
         (self.state as u64)
             | if self.modified { MODIFIED_BIT } else { 0 }
             | if self.has_content { HAS_CONTENT_BIT } else { 0 }
+            | if self.fetch_failed {
+                FETCH_FAILED_BIT
+            } else {
+                0
+            }
             | ((self.leases as u64) << LEASE_SHIFT)
             | ((self.slot as u64) << SLOT_SHIFT)
     }
@@ -158,12 +169,22 @@ impl SharedState {
             c.state = ChunkState::Filling;
             c.slot = slot;
             c.modified = false;
+            c.fetch_failed = false;
             // Before anything can be written into the slot, so a read that saw
             // no content did so before this chunk had any.
             c.has_content = true;
             Some((c, ()))
         })
         .is_some()
+    }
+
+    /// Nothing could bring this chunk in. Whoever is waiting for it should
+    /// stop rather than wait for an attempt that is not coming.
+    pub fn mark_fetch_failed(&self, chunk: usize) {
+        self.update(chunk, |mut c| {
+            c.fetch_failed = true;
+            Some((c, ()))
+        });
     }
 
     /// Say a chunk has content, as the map does for one it already knows about.
@@ -273,6 +294,7 @@ mod tests {
             state: ChunkState::Evicting,
             modified: true,
             has_content: true,
+            fetch_failed: true,
             leases: MAX_LEASES,
             slot: MAX_SLOTS,
         };
@@ -294,6 +316,20 @@ mod tests {
 
         assert!(state.finish_fill(0, true));
         assert!(!state.is_empty(0));
+    }
+
+    #[test]
+    fn a_fill_clears_the_mark_a_failed_one_left() {
+        let state = SharedState::new(2);
+        state.mark_fetch_failed(0);
+        assert!(state.get(0).fetch_failed);
+
+        assert!(state.begin_fill(0, 1));
+
+        assert!(
+            !state.get(0).fetch_failed,
+            "a fresh attempt kept the old mark"
+        );
     }
 
     #[test]

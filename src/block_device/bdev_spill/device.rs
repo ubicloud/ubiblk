@@ -5,7 +5,7 @@
 //! the transition it needs and is tried again on the next poll, so a request
 //! whose footprint is larger than the whole cache still makes progress.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -75,6 +75,7 @@ impl BlockDevice for SpillBlockDevice {
                 self.geometry.chunk_bytes(),
             ),
             next_base_id: 0,
+            asked: HashSet::new(),
         }))
     }
 
@@ -133,6 +134,10 @@ pub struct SpillIoChannel {
     inbox: Arc<Mutex<Vec<(usize, bool)>>>,
     scratch: AlignedBufferPool,
     next_base_id: usize,
+    /// Chunks this channel has already asked about since anything last
+    /// happened. Without it a waiting request asks again on every poll, which
+    /// is thousands of messages the task has to drain for no new information.
+    asked: HashSet<usize>,
 }
 
 impl SpillIoChannel {
@@ -264,12 +269,17 @@ impl SpillIoChannel {
         }
 
         let Some(slot) = self.state.try_lease(chunk) else {
-            if self.state.get(chunk).state == ChunkState::Poisoned {
+            let seen = self.state.get(chunk);
+            // Nothing can be served from a chunk whose contents are uncertain,
+            // and nothing is coming for one whose last fetch failed.
+            if seen.state == ChunkState::Poisoned || seen.fetch_failed {
                 let request = self.live.get_mut(&id).expect("live");
                 request.ok = false;
                 return true;
             }
-            if !self.ask(SpillRequest::Fetch { chunk }) || !self.ask(SpillRequest::MakeRoom) {
+            if self.asked.insert(chunk)
+                && (!self.ask(SpillRequest::Fetch { chunk }) || !self.ask(SpillRequest::MakeRoom))
+            {
                 self.live.get_mut(&id).expect("live").ok = false;
                 return true;
             }
@@ -399,7 +409,13 @@ impl IoChannel for SpillIoChannel {
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
-        for (base_id, ok) in self.base.poll() {
+        let completions = self.base.poll();
+        // Something moved, so what this channel asked for may have arrived and
+        // is worth asking about again if it has not.
+        if !completions.is_empty() {
+            self.asked.clear();
+        }
+        for (base_id, ok) in completions {
             self.base_completed(base_id, ok);
         }
         self.take_flush_replies();
@@ -723,6 +739,24 @@ mod tests {
             stack.task.map().authority(0),
             crate::block_device::bdev_spill::map::format::Authority::Unreadable
         );
+    }
+
+    /// A chunk that cannot be brought in fails the request waiting for it,
+    /// rather than leaving it to wait for an attempt nobody is going to make
+    /// again.
+    #[test]
+    fn a_read_whose_chunk_cannot_be_fetched_fails() {
+        let mut stack = stack();
+        assert!(stack.write(0, 1, 0x99));
+        // Push it to the store, then take the object away.
+        assert!(stack.write(CHUNK_SECTORS, 1, 0x01));
+        assert!(stack.write(CHUNK_SECTORS * 2, 1, 0x02));
+        stack.task.forget_objects();
+
+        assert_eq!(stack.read(0, 1), None, "a chunk with no object was served");
+
+        // Other chunks are unaffected.
+        assert!(stack.read(CHUNK_SECTORS, 1).is_some());
     }
 
     #[test]

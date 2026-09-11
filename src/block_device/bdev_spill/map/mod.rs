@@ -21,6 +21,8 @@ pub mod storage;
 pub mod superblock;
 
 #[cfg(test)]
+pub mod crash;
+#[cfg(test)]
 pub mod fake;
 
 use crate::Result;
@@ -74,6 +76,13 @@ impl<S: MapStorage> Map<S> {
                     sectors_needed(chunk_count, journal_blocks),
                     storage.sector_count()
                 ),
+            }));
+        }
+
+        if superblock::read(&storage)?.is_some() {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "a map is already here: open it rather than starting again"
+                    .to_string(),
             }));
         }
 
@@ -345,6 +354,22 @@ mod tests {
 
         assert_eq!(map.authority(1), Authority::Zero);
         assert_eq!(reopen(&map)?.authority(1), Authority::Zero);
+        Ok(())
+    }
+
+    /// Creating is for a map that is not there. Doing it over one that is
+    /// would throw away everything it knows, and the caller that asked has
+    /// mistaken a reopen for a first run.
+    #[test]
+    fn creating_a_map_where_one_already_exists_is_refused() -> Result<()> {
+        let mut map = fresh();
+        map.stage(0, local(1))?;
+        map.commit()?;
+
+        let storage = FakeStorage::from_image(map.storage().image_without_pending());
+        assert!(Map::create(storage.clone(), binding(), CHUNKS, JOURNAL_BLOCKS).is_err());
+
+        assert_eq!(Map::open(storage, binding())?.authority(0), local(1));
         Ok(())
     }
 

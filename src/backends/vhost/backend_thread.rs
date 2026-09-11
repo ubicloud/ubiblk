@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::{ops::Deref, sync::RwLockWriteGuard};
 
@@ -56,6 +57,9 @@ pub struct UbiBlkBackendThread {
     pin_attempted: bool,
     ios_pending_signal: bool,
     io_tracker: IoTracker,
+    /// Cleared until the guest has negotiated a flush. A device that cannot
+    /// make a write durable on completion must not take one.
+    writes_allowed: Arc<AtomicBool>,
 }
 
 impl UbiBlkBackendThread {
@@ -75,6 +79,7 @@ impl UbiBlkBackendThread {
         config: &v2::Config,
         alignment: usize,
         io_tracker: IoTracker,
+        writes_allowed: Arc<AtomicBool>,
     ) -> Result<Self> {
         let buf_size = config.tuning.seg_count_max * config.tuning.seg_size_max;
         let request_slots: Vec<RequestSlot> = (0..config.tuning.queue_size)
@@ -112,6 +117,7 @@ impl UbiBlkBackendThread {
             pin_attempted: false,
             ios_pending_signal: false,
             io_tracker,
+            writes_allowed,
         })
     }
 
@@ -284,6 +290,20 @@ impl UbiBlkBackendThread {
     }
 
     fn process_write(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
+        if !self.writes_allowed.load(Ordering::Acquire) {
+            error!(
+                "Refusing a write: this device needs VIRTIO_BLK_F_FLUSH, which the guest did not \
+                 negotiate"
+            );
+            self.complete_io(
+                vring,
+                desc_chain,
+                request.status_addr(),
+                VIRTIO_BLK_S_IOERR as u8,
+            );
+            return;
+        }
+
         let len = self.request_len(request);
         if !len.is_multiple_of(SECTOR_SIZE) {
             error!("write request length is not a multiple of sector size: {len}");

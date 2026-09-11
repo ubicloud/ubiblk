@@ -191,6 +191,7 @@ mod tests {
             &config,
             BUFFER_ALIGNMENT,
             IoTracker::new(64),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         )
         .unwrap();
         (thread, mem, device)

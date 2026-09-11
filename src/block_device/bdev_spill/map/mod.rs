@@ -283,6 +283,7 @@ impl<S: MapStorage> Map<S> {
 #[cfg(test)]
 mod tests {
     use super::fake::FakeStorage;
+    use super::storage::FileStorage;
     use super::*;
 
     const CHUNKS: u64 = 40;
@@ -488,6 +489,65 @@ mod tests {
         let recovered = reopen(&map)?;
 
         assert_eq!(recovered.authority(0), local(1));
+        Ok(())
+    }
+
+    #[test]
+    fn a_map_on_a_file_reopens_with_what_it_committed() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("map");
+        let sectors = sectors_needed(CHUNKS, JOURNAL_BLOCKS);
+
+        {
+            let mut map = Map::create(
+                FileStorage::create(&path, sectors)?,
+                binding(),
+                CHUNKS,
+                JOURNAL_BLOCKS,
+            )?;
+            for round in 0..(JOURNAL_BLOCKS * 3) {
+                map.stage(round % CHUNKS, local(round as u32))?;
+                map.commit()?;
+            }
+        }
+
+        let reopened = Map::open(FileStorage::open(&path)?, binding())?;
+        for round in 0..(JOURNAL_BLOCKS * 3) {
+            assert_eq!(reopened.authority(round % CHUNKS), local(round as u32));
+        }
+        Ok(())
+    }
+
+    /// The map holds nothing in user space that a graceful exit would flush, so
+    /// a process that dies outright still leaves a map with its commits in it.
+    /// The child below aborts the moment its commit returns.
+    #[test]
+    fn a_committed_map_survives_the_process_dying() -> Result<()> {
+        const CHILD: &str = "UBIBLK_MAP_ABORT_CHILD";
+        const NAME: &str =
+            "block_device::bdev_spill::map::tests::a_committed_map_survives_the_process_dying";
+
+        if let Ok(path) = std::env::var(CHILD) {
+            let path = std::path::PathBuf::from(path);
+            let storage = FileStorage::create(&path, sectors_needed(CHUNKS, JOURNAL_BLOCKS))?;
+            let mut map = Map::create(storage, binding(), CHUNKS, JOURNAL_BLOCKS)?;
+            map.stage(2, local(9))?;
+            map.commit()?;
+            std::process::abort();
+        }
+
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("map");
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([NAME, "--exact", "--nocapture"])
+            .env(CHILD, &path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+
+        assert!(!status.success(), "the child was meant to abort");
+        let map = Map::open(FileStorage::open(&path)?, binding())?;
+        assert_eq!(map.authority(2), local(9));
         Ok(())
     }
 

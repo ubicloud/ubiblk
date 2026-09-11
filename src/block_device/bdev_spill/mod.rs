@@ -2,4 +2,6 @@
 //! rest in an object store.
 
 pub mod map;
+pub mod slots;
 pub mod state;
+pub mod task;

@@ -22,6 +22,10 @@ const LEASE_SHIFT: u32 = 5;
 const LEASE_MASK: u64 = 0x7FF << LEASE_SHIFT;
 const SLOT_SHIFT: u32 = 16;
 const SLOT_MASK: u64 = 0xFF_FFFF << SLOT_SHIFT;
+/// Set once a chunk has content anywhere. A read of a chunk without it is
+/// served as zeroes and needs no slot; the bit is cleared before anything can
+/// write to the chunk, so an acknowledged write can never be read as nothing.
+const HAS_CONTENT_BIT: u64 = 1 << 40;
 
 /// The states a chunk moves through. Only `Resident` can be leased, so a chunk
 /// in the middle of anything is untouchable rather than merely undocumented.
@@ -56,6 +60,7 @@ impl ChunkState {
 pub struct Chunk {
     pub state: ChunkState,
     pub modified: bool,
+    pub has_content: bool,
     pub leases: u32,
     pub slot: u32,
 }
@@ -65,6 +70,7 @@ impl Chunk {
         Chunk {
             state: ChunkState::from_bits(word & STATE_BITS),
             modified: word & MODIFIED_BIT != 0,
+            has_content: word & HAS_CONTENT_BIT != 0,
             leases: ((word & LEASE_MASK) >> LEASE_SHIFT) as u32,
             slot: ((word & SLOT_MASK) >> SLOT_SHIFT) as u32,
         }
@@ -73,6 +79,7 @@ impl Chunk {
     fn encode(&self) -> u64 {
         (self.state as u64)
             | if self.modified { MODIFIED_BIT } else { 0 }
+            | if self.has_content { HAS_CONTENT_BIT } else { 0 }
             | ((self.leases as u64) << LEASE_SHIFT)
             | ((self.slot as u64) << SLOT_SHIFT)
     }
@@ -151,9 +158,26 @@ impl SharedState {
             c.state = ChunkState::Filling;
             c.slot = slot;
             c.modified = false;
+            // Before anything can be written into the slot, so a read that saw
+            // no content did so before this chunk had any.
+            c.has_content = true;
             Some((c, ()))
         })
         .is_some()
+    }
+
+    /// Say a chunk has content, as the map does for one it already knows about.
+    pub fn mark_content(&self, chunk: usize) {
+        self.update(chunk, |mut c| {
+            c.has_content = true;
+            Some((c, ()))
+        });
+    }
+
+    /// Whether a read has to go and get anything at all.
+    pub fn is_empty(&self, chunk: usize) -> bool {
+        let seen = self.get(chunk);
+        !seen.has_content && seen.state == ChunkState::Idle
     }
 
     /// The slot holds the chunk now. `modified` says the contents differ from
@@ -248,10 +272,36 @@ mod tests {
         let chunk = Chunk {
             state: ChunkState::Evicting,
             modified: true,
+            has_content: true,
             leases: MAX_LEASES,
             slot: MAX_SLOTS,
         };
         assert_eq!(Chunk::decode(chunk.encode()), chunk);
+    }
+
+    /// A chunk nothing has ever written is read as zeroes without a slot; one
+    /// that is being filled is not, however briefly.
+    #[test]
+    fn an_empty_chunk_stops_being_empty_before_anything_can_write_to_it() {
+        let state = SharedState::new(2);
+        assert!(state.is_empty(0));
+
+        assert!(state.begin_fill(0, 1));
+        assert!(
+            !state.is_empty(0),
+            "a chunk being filled still read as empty"
+        );
+
+        assert!(state.finish_fill(0, true));
+        assert!(!state.is_empty(0));
+    }
+
+    #[test]
+    fn a_chunk_the_map_knows_about_is_not_empty() {
+        let state = SharedState::new(2);
+        state.mark_content(1);
+        assert!(!state.is_empty(1));
+        assert!(state.is_empty(0));
     }
 
     #[test]

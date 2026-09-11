@@ -19,6 +19,24 @@ pub trait MapStorage {
     fn sector_count(&self) -> u64;
 }
 
+impl MapStorage for Box<dyn MapStorage> {
+    fn read_at(&self, sector: u64, buf: &mut [u8]) -> Result<()> {
+        (**self).read_at(sector, buf)
+    }
+
+    fn write_at(&mut self, sector: u64, buf: &[u8]) -> Result<()> {
+        (**self).write_at(sector, buf)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        (**self).flush()
+    }
+
+    fn sector_count(&self) -> u64 {
+        (**self).sector_count()
+    }
+}
+
 pub struct FileStorage {
     file: File,
     sector_count: u64,

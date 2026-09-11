@@ -26,6 +26,10 @@ use super::state::{ChunkState, SharedState};
 /// recovery.
 const FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How many slots to try in one pass when looking for room. The hand keeps its
+/// place, so the next pass carries on where this one stopped.
+const VICTIMS_PER_UPDATE: u32 = 16;
+
 /// What a channel asks the task for. Nothing here carries data: the task reads
 /// the state and the map to work out what is needed.
 pub enum SpillRequest {
@@ -276,6 +280,9 @@ impl SpillTask {
 
     /// Bring chunks that somebody is waiting for into slots.
     fn start_fills(&mut self) {
+        if self.wanted.is_empty() {
+            return;
+        }
         let wanted: Vec<usize> = self.wanted.iter().copied().collect();
         for chunk in wanted {
             if self.fills.contains_key(&chunk) {
@@ -360,7 +367,10 @@ impl SpillTask {
             return;
         }
 
-        for _ in 0..self.slots.slot_count() {
+        // Bounded, because this runs on every update: if the slots the hand
+        // passes are all held, looking at the rest of them now would only burn
+        // the thread that has to run the I/O releasing them.
+        for _ in 0..VICTIMS_PER_UPDATE.min(self.slots.slot_count()) {
             let Some((slot, chunk)) = self.slots.next_occupied() else {
                 return;
             };

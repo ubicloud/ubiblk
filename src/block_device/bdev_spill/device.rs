@@ -195,6 +195,9 @@ impl SpillIoChannel {
     /// cannot lease its next chunk stays where it is and asks for what it
     /// needs, so the queue keeps its order.
     fn advance(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
         let ids: Vec<usize> = self.queue.iter().copied().collect();
         for id in ids {
             while let Some(request) = self.live.get(&id) {

@@ -317,7 +317,7 @@ impl SpillTask {
         );
         if let Err(e) = self.base.submit() {
             error!("Failed to submit the repair of chunk {chunk}: {e}");
-            self.give_up_on_fills();
+            self.give_up_on_fills(&[chunk]);
         }
     }
 
@@ -368,6 +368,7 @@ impl SpillTask {
         if self.wanted.is_empty() {
             return;
         }
+        let mut started = Vec::new();
         let wanted: Vec<usize> = self.wanted.iter().copied().collect();
         for chunk in wanted {
             if self.fills.contains_key(&chunk) {
@@ -427,6 +428,7 @@ impl SpillTask {
                             repair: false,
                         },
                     );
+                    started.push(chunk);
                 }
                 Authority::Local { .. } | Authority::Unreadable => {
                     // Local is already resident, and an unreadable chunk is not
@@ -440,36 +442,44 @@ impl SpillTask {
 
         if let Err(e) = self.base.submit() {
             error!("Failed to submit spill fills: {e}");
-            self.give_up_on_fills();
+            self.give_up_on_fills(&started);
         }
     }
 
     /// Nothing will complete for work the channel could not submit, so the
     /// chunks it was for have to be let go of rather than left half moved.
-    fn give_up_on_fills(&mut self) {
-        for (chunk, fill) in std::mem::take(&mut self.fills) {
+    ///
+    /// Only the chunks whose I/O this submit covered: anything submitted
+    /// earlier may still be running, and taking its slot back would let the
+    /// kernel write one chunk's bytes into another chunk's slot.
+    fn give_up_on_fills(&mut self, chunks: &[usize]) {
+        for chunk in chunks {
+            let Some(fill) = self.fills.remove(chunk) else {
+                continue;
+            };
             let slot = match fill {
                 Fill::Fetching { slot, buffer, .. } | Fill::Writing { slot, buffer, .. } => {
                     self.buffers.return_buffer(&buffer);
                     slot
                 }
             };
-            self.state.abandon_fill(chunk);
-            self.state.mark_fetch_failed(chunk);
-            self.wanted.remove(&chunk);
+            self.state.abandon_fill(*chunk);
+            self.state.mark_fetch_failed(*chunk);
+            self.wanted.remove(chunk);
+            self.repairs.remove(chunk);
             self.slots.release(slot);
+            self.io
+                .retain(|_, what| !matches!(what, Io::Fill(waiting) if waiting == chunk));
         }
-        self.io.retain(|_, what| !matches!(what, Io::Fill(_)));
     }
 
-    fn give_up_on_evictions(&mut self) {
-        for (chunk, evict) in std::mem::take(&mut self.evicts) {
-            if let Evict::Reading { buffer, .. } = &evict {
-                self.buffers.return_buffer(buffer);
-            }
-            self.state.keep(chunk);
+    fn give_up_on_eviction(&mut self, chunk: usize) {
+        if let Some(Evict::Reading { buffer, .. }) = self.evicts.remove(&chunk) {
+            self.buffers.return_buffer(&buffer);
         }
-        self.io.retain(|_, what| !matches!(what, Io::Evict(_)));
+        self.state.keep(chunk);
+        self.io
+            .retain(|_, what| !matches!(what, Io::Evict(waiting) if *waiting == chunk));
     }
 
     /// Free a slot if anything is waiting for one. A chunk that is already
@@ -522,7 +532,7 @@ impl SpillTask {
             self.evicts.insert(chunk, Evict::Reading { slot, buffer });
             if let Err(e) = self.base.submit() {
                 error!("Failed to submit spill eviction read: {e}");
-                self.give_up_on_evictions();
+                self.give_up_on_eviction(chunk);
             }
             return;
         }
@@ -685,7 +695,7 @@ impl SpillTask {
         );
         if let Err(e) = self.base.submit() {
             error!("Failed to submit the write bringing chunk {chunk} in: {e}");
-            self.give_up_on_fills();
+            self.give_up_on_fills(&[chunk]);
         }
     }
 
@@ -851,6 +861,11 @@ impl SpillTask {
         self.slots.free_count()
     }
 
+    #[cfg(test)]
+    pub fn slot_owner(&self, slot: u32) -> Option<usize> {
+        self.slots.owner(slot)
+    }
+
     /// Give a slot back, for a test that took a chunk out from under the task.
     #[cfg(test)]
     pub fn release_slot(&mut self, slot: u32) {
@@ -922,6 +937,7 @@ mod tests {
     struct HeldStore {
         inner: MemStore,
         held: Vec<(String, Vec<u8>)>,
+        held_gets: Vec<String>,
         holding: std::rc::Rc<std::cell::Cell<bool>>,
     }
 
@@ -935,7 +951,11 @@ mod tests {
         }
 
         fn start_get_object(&mut self, name: &str) {
-            self.inner.start_get_object(name);
+            if self.holding.get() {
+                self.held_gets.push(name.to_string());
+            } else {
+                self.inner.start_get_object(name);
+            }
         }
 
         fn poll_puts(&mut self) -> Vec<(String, Result<()>)> {
@@ -948,6 +968,11 @@ mod tests {
         }
 
         fn poll_gets(&mut self) -> Vec<(String, Result<Vec<u8>>)> {
+            if !self.holding.get() {
+                for name in std::mem::take(&mut self.held_gets) {
+                    self.inner.start_get_object(&name);
+                }
+            }
             self.inner.poll_gets()
         }
     }
@@ -964,6 +989,7 @@ mod tests {
         let store = Box::new(HeldStore {
             inner: MemStore::new(),
             held: Vec::new(),
+            held_gets: Vec::new(),
             holding: holding.clone(),
         });
         let map = Map::create(
@@ -1362,6 +1388,68 @@ mod tests {
             "a slot was left behind"
         );
         drive(&mut h.task);
+    }
+
+    /// A failed submit only speaks for the work in that submit. A chunk whose
+    /// fill went out earlier is still in the air, and handing its slot to
+    /// somebody else would let two chunks write to the same place.
+    #[test]
+    fn a_failed_submit_leaves_the_other_fills_alone() {
+        let (mut h, holding) = harness_holding_uploads();
+        holding.set(false);
+
+        // Park chunk 0 in the store, so that asking for it back waits on a get.
+        h.task.handle(SpillRequest::Fetch { chunk: 0 });
+        drive(&mut h.task);
+        h.state.try_lease(0).expect("lease");
+        h.state.release(0, true);
+        h.task.handle(SpillRequest::Wrote { chunk: 0 });
+        for chunk in [1, 2] {
+            h.task.handle(SpillRequest::Fetch { chunk });
+            drive(&mut h.task);
+        }
+        assert_eq!(h.state.get(0).state, ChunkState::Idle);
+
+        // The get is held, so chunk 0 sits in a slot it has not filled yet.
+        holding.set(true);
+        h.task.handle(SpillRequest::Fetch { chunk: 0 });
+        for _ in 0..10 {
+            h.task.update();
+            if h.state.get(0).state == ChunkState::Filling {
+                break;
+            }
+        }
+        assert_eq!(h.state.get(0).state, ChunkState::Filling);
+        let slot = h.state.get(0).slot;
+
+        // Another chunk's fill cannot be submitted.
+        h.task.handle(SpillRequest::Fetch { chunk: 4 });
+        for _ in 0..10 {
+            h.base
+                .fail_submit
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            h.task.update();
+            if h.state.get(4).fetch_failed {
+                break;
+            }
+        }
+        h.base
+            .fail_submit
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            h.state.get(4).fetch_failed,
+            "the fill was never given up on"
+        );
+
+        assert_eq!(h.state.get(0).state, ChunkState::Filling);
+        assert_eq!(h.state.get(0).slot, slot);
+        assert!(!h.state.get(0).fetch_failed);
+        assert_ne!(h.task.slot_owner(slot), None, "the slot was handed back");
+
+        // And it still finishes once the store answers.
+        holding.set(false);
+        drive(&mut h.task);
+        assert_eq!(h.state.get(0).state, ChunkState::Resident);
     }
 
     /// What the map says on reopening is what the task starts from: chunks in

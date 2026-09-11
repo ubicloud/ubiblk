@@ -1,6 +1,7 @@
 pub mod includes;
 pub mod load;
 pub mod secrets;
+pub mod spill;
 pub mod stripe_source;
 pub mod tuning;
 
@@ -26,6 +27,7 @@ pub struct Config {
     pub encryption: Option<EncryptionSection>,
     pub danger_zone: DangerZone,
     pub stripe_source: Option<stripe_source::StripeSourceConfig>,
+    pub spill: Option<spill::SpillSection>,
 
     /// Resolved secret values keyed by name.
     pub secrets: HashMap<String, secrets::ResolvedSecret>,

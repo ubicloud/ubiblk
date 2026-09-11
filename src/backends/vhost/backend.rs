@@ -28,6 +28,11 @@ type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
 
 pub struct UbiBlkBackend {
     threads: Vec<Mutex<UbiBlkBackendThread>>,
+    /// Whether the negotiated features let this device take writes.
+    writes_allowed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// A device whose durability depends on flushes cannot serve a guest that
+    /// did not take one.
+    needs_flush: bool,
     config: VirtioBlockConfig,
     queues_per_thread: Vec<u64>,
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
@@ -64,6 +69,12 @@ impl UbiBlkBackend {
 
         info!("virtio_config: {virtio_config:?}");
 
+        // A spill device makes a write durable at a flush, not at completion,
+        // so it cannot serve a guest that negotiated no flush. Anything else
+        // is allowed to write from the start.
+        let needs_flush = config.spill.is_some();
+        let writes_allowed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(!needs_flush));
+
         let threads = (0..config.tuning.num_queues)
             .map(|idx| {
                 let io_channel = block_device.create_channel()?;
@@ -71,8 +82,15 @@ impl UbiBlkBackend {
                     .get(idx)
                     .cloned()
                     .unwrap_or_else(|| IoTracker::new(config.tuning.queue_size));
-                UbiBlkBackendThread::new(mem.clone(), io_channel, config, alignment, io_tracker)
-                    .map(Mutex::new)
+                UbiBlkBackendThread::new(
+                    mem.clone(),
+                    io_channel,
+                    config,
+                    alignment,
+                    io_tracker,
+                    writes_allowed.clone(),
+                )
+                .map(Mutex::new)
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -82,6 +100,8 @@ impl UbiBlkBackend {
 
         Ok(UbiBlkBackend {
             threads,
+            writes_allowed,
+            needs_flush,
             config: virtio_config,
             queues_per_thread,
             mem,
@@ -128,13 +148,20 @@ impl VhostUserBackend for UbiBlkBackend {
     }
 
     fn features(&self) -> u64 {
-        (1 << VIRTIO_BLK_F_SEG_MAX)
+        // CONFIG_WCE lets a guest ask for write-through, which this device
+        // does not implement, and which it would otherwise accept by ignoring.
+        let cache_mode = if self.needs_flush {
+            0
+        } else {
+            1 << VIRTIO_BLK_F_CONFIG_WCE
+        };
+        cache_mode
+            | (1 << VIRTIO_BLK_F_SEG_MAX)
             | (1 << VIRTIO_BLK_F_BLK_SIZE)
             | (1 << VIRTIO_BLK_F_SIZE_MAX)
             | (1 << VIRTIO_BLK_F_FLUSH)
             | (1 << VIRTIO_BLK_F_TOPOLOGY)
             | (1 << VIRTIO_BLK_F_MQ)
-            | (1 << VIRTIO_BLK_F_CONFIG_WCE)
             | (1 << VIRTIO_RING_F_EVENT_IDX) // https://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-370007
             | (1 << VIRTIO_F_VERSION_1)
             | (1 << VIRTIO_RING_F_INDIRECT_DESC) // https://docs.oasis-open.org/virtio/virtio/v1.0/cs04/virtio-v1.0-cs04.html#x1-330003
@@ -148,6 +175,18 @@ impl VhostUserBackend for UbiBlkBackend {
             features_to_str(features)
         );
         info!("{log}");
+
+        // A guest that takes neither a flush nor a cache mode is entitled to
+        // writes being durable when they complete, which this device does not
+        // promise. Rather than break that promise quietly, it takes no writes.
+        let flush = features & (1 << VIRTIO_BLK_F_FLUSH) != 0;
+        if self.needs_flush && !flush {
+            error!("The guest negotiated no flush, so this device will refuse writes");
+        }
+        self.writes_allowed.store(
+            flush || !self.needs_flush,
+            std::sync::atomic::Ordering::Release,
+        );
     }
 
     fn protocol_features(&self) -> VhostUserProtocolFeatures {
@@ -331,6 +370,7 @@ mod tests {
                 metadata_path: None,
             },
             stripe_source: None,
+            spill: None,
             secrets: std::collections::HashMap::new(),
             tuning: v2::tuning::TuningSection::default(),
             encryption: None,
@@ -353,6 +393,25 @@ mod tests {
 
     fn default_backend() -> UbiBlkBackend {
         let config = default_config("img".to_string());
+        build_backend(&config).unwrap()
+    }
+
+    /// A backend whose durability comes from flushes rather than from write
+    /// completion. Only the presence of the section matters here.
+    fn spill_backend() -> UbiBlkBackend {
+        let mut config = default_config("img".to_string());
+        config.spill = Some(v2::spill::SpillSection {
+            size_mb: 64,
+            map_path: "map".into(),
+            prefix: "spill".to_string(),
+            device_uuid: "0123456789abcdef0123456789abcdef".to_string(),
+            chunk_kb: 64,
+            store: v2::stripe_source::ArchiveStorageConfig::Filesystem {
+                path: "/tmp/store".into(),
+                archive_kek: None,
+                autofetch: false,
+            },
+        });
         build_backend(&config).unwrap()
     }
 
@@ -484,6 +543,40 @@ mod tests {
     }
 
     /// The features method should advertise common virtio features.
+    /// A spill device does not offer a cache mode the guest could switch, and
+    /// takes no writes from a guest that negotiated no flush.
+    #[test]
+    fn a_spill_device_needs_a_flush_before_it_takes_writes() {
+        let backend = spill_backend();
+
+        assert_eq!(
+            backend.features() & (1 << VIRTIO_BLK_F_CONFIG_WCE),
+            0,
+            "a spill device offered a cache mode it does not implement"
+        );
+
+        backend.acked_features(1 << VIRTIO_BLK_F_SEG_MAX);
+        assert!(!backend
+            .writes_allowed
+            .load(std::sync::atomic::Ordering::Acquire));
+
+        backend.acked_features(1 << VIRTIO_BLK_F_FLUSH);
+        assert!(backend
+            .writes_allowed
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn a_device_that_is_durable_on_completion_needs_no_such_check() {
+        let backend = default_backend();
+
+        assert_ne!(backend.features() & (1 << VIRTIO_BLK_F_CONFIG_WCE), 0);
+        backend.acked_features(0);
+        assert!(backend
+            .writes_allowed
+            .load(std::sync::atomic::Ordering::Acquire));
+    }
+
     #[test]
     fn features_advertise_bits() {
         let backend = default_backend();

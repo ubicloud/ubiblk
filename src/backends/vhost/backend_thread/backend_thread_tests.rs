@@ -143,6 +143,7 @@ mod tests {
 
     fn default_config(path: &str) -> v2::Config {
         v2::Config {
+            spill: None,
             device: v2::DeviceSection {
                 data_path: path.into(),
                 metadata_path: None,
@@ -190,6 +191,7 @@ mod tests {
             &config,
             BUFFER_ALIGNMENT,
             IoTracker::new(64),
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         )
         .unwrap();
         (thread, mem, device)

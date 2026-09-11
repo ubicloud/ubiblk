@@ -3,15 +3,23 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use log::{error, info};
 
 use super::bdev_lazy::bgworker::LazyTask;
+use super::bdev_spill::task::{FlushReply, SpillRequest, SpillTask};
 
 pub enum BgWorkerRequest {
     Fetch { stripe_id: usize },
     SetWritten { stripe_id: usize },
+    SpillFetch { chunk: usize },
+    SpillMakeRoom,
+    SpillFlush { reply: FlushReply },
+    SpillWrote { chunk: usize },
+    SpillPoison { chunk: usize },
+    SpillRepair { chunk: usize },
     Shutdown,
 }
 
 pub struct BgWorker {
     lazy: Option<LazyTask>,
+    spill: Option<SpillTask>,
     requests: Receiver<BgWorkerRequest>,
     done: bool,
 }
@@ -20,6 +28,7 @@ impl BgWorker {
     pub fn new(requests: Receiver<BgWorkerRequest>) -> Self {
         BgWorker {
             lazy: None,
+            spill: None,
             requests,
             done: false,
         }
@@ -27,6 +36,17 @@ impl BgWorker {
 
     pub fn set_lazy_task(&mut self, lazy: LazyTask) {
         self.lazy = Some(lazy);
+    }
+
+    pub fn set_spill_task(&mut self, spill: SpillTask) {
+        self.spill = Some(spill);
+    }
+
+    fn spill(&mut self) -> Option<&mut SpillTask> {
+        if self.spill.is_none() {
+            error!("Request for a spill task the worker does not have");
+        }
+        self.spill.as_mut()
     }
 
     fn lazy(&mut self) -> Option<&mut LazyTask> {
@@ -48,8 +68,41 @@ impl BgWorker {
                     lazy.set_stripe_written(stripe_id);
                 }
             }
+            BgWorkerRequest::SpillFetch { chunk } => {
+                if let Some(spill) = self.spill() {
+                    spill.handle(SpillRequest::Fetch { chunk });
+                }
+            }
+            BgWorkerRequest::SpillMakeRoom => {
+                if let Some(spill) = self.spill() {
+                    spill.handle(SpillRequest::MakeRoom);
+                }
+            }
+            BgWorkerRequest::SpillFlush { reply } => {
+                if let Some(spill) = self.spill() {
+                    spill.handle(SpillRequest::Flush { reply });
+                }
+            }
+            BgWorkerRequest::SpillWrote { chunk } => {
+                if let Some(spill) = self.spill() {
+                    spill.handle(SpillRequest::Wrote { chunk });
+                }
+            }
+            BgWorkerRequest::SpillPoison { chunk } => {
+                if let Some(spill) = self.spill() {
+                    spill.handle(SpillRequest::Poison { chunk });
+                }
+            }
+            BgWorkerRequest::SpillRepair { chunk } => {
+                if let Some(spill) = self.spill() {
+                    spill.handle(SpillRequest::Repair { chunk });
+                }
+            }
             BgWorkerRequest::Shutdown => {
                 info!("Received shutdown request, stopping worker");
+                if let Some(spill) = &mut self.spill {
+                    spill.finish();
+                }
                 self.done = true;
             }
         }
@@ -84,10 +137,14 @@ impl BgWorker {
         if let Some(lazy) = &mut self.lazy {
             lazy.update();
         }
+        if let Some(spill) = &mut self.spill {
+            spill.update();
+        }
     }
 
     fn busy(&self) -> bool {
         self.lazy.as_ref().is_some_and(|lazy| lazy.busy())
+            || self.spill.as_ref().is_some_and(|spill| spill.busy())
     }
 
     pub fn run(&mut self) {

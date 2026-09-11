@@ -15,6 +15,7 @@ A config file has these top-level sections:
 | `[encryption]` | yes* | Encryption key reference |
 | `[danger_zone]` | no | Safety overrides for development |
 | `[stripe_source]` | no | Where to fetch stripes from |
+| `[spill]` | no | A device larger than the disk under it |
 | `[secrets.*]` | no | Named secret definitions |
 
 \* Encryption is required unless `danger_zone.allow_unencrypted_disk = true`.
@@ -315,6 +316,61 @@ secret.ref = "psk-secret"
 
 PSK is required unless `danger_zone.allow_unencrypted_connection` is enabled.
 The PSK secret must be at least 16 bytes.
+
+## `[spill]`
+
+Presents a device larger than `device.data_path`, keeping what does not fit in
+an object store. The disk becomes a pool of chunk-sized slots; a map next to it
+records, for every chunk, whether the slot or an object holds it.
+
+```toml
+[spill]
+size_mb = 512                                        # what the guest sees
+map_path = "map"                                     # next to the data
+prefix = "devices/db-1"                              # objects go under here
+device_uuid = "0123456789abcdef0123456789abcdef"     # checked against the map
+chunk_kb = 128                                       # optional, default: 128
+
+[spill.store]
+storage = "filesystem"
+path = "/var/lib/ubiblk/store"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `size_mb` | integer | yes | — | Size of the device presented to the guest |
+| `map_path` | string | yes | — | Where the authority map lives |
+| `prefix` | string | yes | — | Object namespace; never share one between devices |
+| `device_uuid` | string | yes | — | 32 hex digits, with or without dashes |
+| `chunk_kb` | integer | no | 128 | Unit of movement between disk and store |
+| `[spill.store]` | table | yes | — | Where the cold tier lives, as in `[stripe_source]` |
+
+Objects are named for the chunk, the open that wrote them and a generation, and
+nothing deletes the older ones: a chunk that is written out repeatedly leaves an
+object behind each time, so store usage grows with how much the device is used
+rather than with how large it is. Collecting them is not part of this version.
+
+The map records which of the two tiers holds each chunk, so it belongs with the
+data: losing it loses the device. The prefix and the store location are part of
+what the map is checked against, so the same prefix in another bucket is a
+different namespace and will be refused.
+
+Version one refuses configurations it cannot honour, at startup rather than
+halfway through serving:
+
+- no encryption — objects leave the host, and the promise that they are
+  ciphertext is only true when encryption is configured
+- `[stripe_source]`, which also decides what is local
+- `device.metadata_path`
+- `tuning.write_through`, and `tuning.io_engine = "sync"`
+- `chunk_kb` larger than `seg_size_max * seg_count_max`, since a guest that
+  cannot write a whole chunk in one request cannot repair one
+- a disk as large as the device, where nothing can ever spill
+
+Over vhost-user, a spill device does not offer `VIRTIO_BLK_F_CONFIG_WCE` and
+takes no writes until the guest has negotiated `VIRTIO_BLK_F_FLUSH`: its writes
+become recoverable at a flush, so a guest expecting durability on completion is
+refused rather than quietly disappointed.
 
 ## Example Configs
 

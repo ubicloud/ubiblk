@@ -49,3 +49,6 @@ jobs:
 
       - name: Run the ublk tests
         run: python3 tests/ublk/run_all.py
+
+      - name: Run the spill layer tests
+        run: python3 tests/spill/run_all.py

@@ -41,6 +41,13 @@ impl Config {
             stripe_source.validate(&common.danger_zone, &common.secrets)?;
         }
 
+        let mut spill: Option<crate::config::v2::spill::SpillSection> =
+            parse_optional_section(&merged, "spill")?;
+        if let Some(spill) = &mut spill {
+            spill.resolve_paths(config_dir);
+            spill.uuid_bytes()?;
+        }
+
         if let Some(encryption) = &encryption {
             encryption.validate_secrets(&common.secrets)?;
         } else if !(common.danger_zone.enabled && common.danger_zone.allow_unencrypted_disk) {
@@ -55,17 +62,19 @@ impl Config {
             encryption,
             danger_zone: common.danger_zone,
             stripe_source,
+            spill,
             secrets: common.secrets,
         })
     }
 
-    fn allowed_top_level_keys() -> [&'static str; 6] {
+    fn allowed_top_level_keys() -> [&'static str; 7] {
         [
             "device",
             "tuning",
             "encryption",
             "danger_zone",
             "stripe_source",
+            "spill",
             "secrets",
         ]
     }
@@ -314,6 +323,80 @@ mod tests {
     fn parse_config(toml: &str) -> Result<Config> {
         let value: toml::Value = toml::from_str(toml).unwrap();
         Config::load_from_value(value, Path::new("."))
+    }
+
+    /// The section has to survive the loader, not only the struct: an unknown
+    /// top-level key is refused, and a relative map path is resolved like the
+    /// rest of them.
+    #[test]
+    fn loads_a_spill_section() {
+        let config = parse_config(
+            r#"
+            [device]
+            data_path = "disk.raw"
+
+            [spill]
+            size_mb = 512
+            map_path = "map"
+            prefix = "dev1"
+            device_uuid = "0123456789abcdef0123456789abcdef"
+            chunk_kb = 64
+
+            [spill.store]
+            storage = "filesystem"
+            path = "store"
+
+            [danger_zone]
+            enabled = true
+            allow_unencrypted_disk = true
+            "#,
+        )
+        .expect("a config with a spill section");
+
+        let spill = config.spill.expect("the section was read");
+        assert_eq!(spill.size_mb, 512);
+        assert_eq!(spill.chunk_kb, 64);
+        assert_eq!(spill.map_path, Path::new(".").join("map"));
+        assert_eq!(spill.uuid_bytes().unwrap()[0], 0x01);
+        match &spill.store {
+            crate::config::v2::stripe_source::ArchiveStorageConfig::Filesystem { path, .. } => {
+                assert_eq!(
+                    path,
+                    &Path::new(".").join("store"),
+                    "the store path is where the config is"
+                );
+            }
+            other => panic!("unexpected store: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuses_a_spill_section_with_a_uuid_that_is_not_one() {
+        let result = parse_config(
+            r#"
+            [device]
+            data_path = "disk.raw"
+
+            [spill]
+            size_mb = 512
+            map_path = "map"
+            prefix = "dev1"
+            device_uuid = "not-a-uuid"
+
+            [spill.store]
+            storage = "filesystem"
+            path = "store"
+
+            [danger_zone]
+            enabled = true
+            allow_unencrypted_disk = true
+            "#,
+        );
+
+        assert!(
+            result.is_err(),
+            "a device_uuid that is not one was accepted"
+        );
     }
 
     #[test]

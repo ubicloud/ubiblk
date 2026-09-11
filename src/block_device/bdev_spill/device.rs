@@ -93,6 +93,15 @@ impl BlockDevice for SpillBlockDevice {
     }
 }
 
+/// The questions a channel asks about a chunk, kept apart so that asking one
+/// does not count as having asked another.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Ask {
+    Bring,
+    Wrote,
+    Repair,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Read,
@@ -134,12 +143,12 @@ pub struct SpillIoChannel {
     inbox: Arc<Mutex<Vec<(usize, bool)>>>,
     scratch: AlignedBufferPool,
     next_base_id: usize,
-    /// Chunks this channel has asked about, and how many chunks had finished
+    /// What this channel has asked about, and how many chunks had finished
     /// moving when it asked. Without this a waiting request asks again on
     /// every poll, which is thousands of messages saying the same thing; with
-    /// only the chunk, a request whose chunk arrived and left again would
-    /// wait for ever.
-    asked: HashMap<usize, u64>,
+    /// only the chunk, a request whose chunk arrived and left again would wait
+    /// for ever, and one kind of question would silence another.
+    asked: HashMap<(usize, Ask), u64>,
 }
 
 impl SpillIoChannel {
@@ -192,11 +201,11 @@ impl SpillIoChannel {
     /// Complete a request, once. A flush that was failed by a submit error is
     /// still owed a reply by the task, and answering that reply as well would
     /// complete the same descriptor twice.
-    /// Ask for something about a chunk, unless this channel already asked and
-    /// nothing has moved since.
-    fn ask_once(&mut self, chunk: usize, request: SpillRequest) -> bool {
+    /// Ask something about a chunk, unless this channel asked the same thing
+    /// and nothing has moved since.
+    fn ask_once(&mut self, chunk: usize, what: Ask, request: SpillRequest) -> bool {
         let moved = self.state.transitions();
-        if self.asked.insert(chunk, moved) == Some(moved) {
+        if self.asked.insert((chunk, what), moved) == Some(moved) {
             return true;
         }
         self.ask(request)
@@ -295,7 +304,7 @@ impl SpillIoChannel {
                 // this chunk makes what was uncertain about it irrelevant.
                 let live = self.geometry.live_sectors(chunk);
                 if kind == Kind::Write && within == 0 && u64::from(sectors) == live {
-                    self.ask_once(chunk, SpillRequest::Repair { chunk });
+                    self.ask_once(chunk, Ask::Repair, SpillRequest::Repair { chunk });
                     return false;
                 }
                 self.live.get_mut(&id).expect("live").ok = false;
@@ -307,7 +316,7 @@ impl SpillIoChannel {
                 request.ok = false;
                 return true;
             }
-            if !self.ask_once(chunk, SpillRequest::Fetch { chunk })
+            if !self.ask_once(chunk, Ask::Bring, SpillRequest::Fetch { chunk })
                 || !self.ask(SpillRequest::MakeRoom)
             {
                 self.live.get_mut(&id).expect("live").ok = false;
@@ -383,7 +392,14 @@ impl SpillIoChannel {
         self.state.release(op.chunk, ok && op.kind == Kind::Write);
         if op.kind == Kind::Write {
             if ok {
-                self.ask(SpillRequest::Wrote { chunk: op.chunk });
+                // Once per chunk, not once per write: what the task does with
+                // this is record where the chunk is, and it is in the same
+                // slot until something moves it - which is what resets this.
+                self.ask_once(
+                    op.chunk,
+                    Ask::Wrote,
+                    SpillRequest::Wrote { chunk: op.chunk },
+                );
             } else {
                 // The slot's contents are now uncertain: nothing may read it,
                 // and nothing may upload it as though it were the chunk.
@@ -497,6 +513,7 @@ mod tests {
         inbox: Receiver<BgWorkerRequest>,
         base: Box<TestBlockDevice>,
         next_id: usize,
+        messages: usize,
     }
 
     fn stack() -> Stack {
@@ -534,6 +551,7 @@ mod tests {
             inbox,
             base,
             next_id: 0,
+            messages: 0,
         }
     }
 
@@ -562,6 +580,7 @@ mod tests {
             }
             for _ in 0..2000 {
                 while let Ok(request) = self.inbox.try_recv() {
+                    self.messages += 1;
                     match request {
                         BgWorkerRequest::SpillFetch { chunk } => {
                             self.task.handle(SpillRequest::Fetch { chunk })
@@ -742,6 +761,26 @@ mod tests {
             .iter()
             .all(|x| *x == 0xAA));
         assert!(read[2 * SECTOR_SIZE..].iter().all(|x| *x == 0xBB));
+    }
+
+    /// Writing the same chunk over and over tells the task once, not once per
+    /// write: what it does with that is record where the chunk is, and it does
+    /// not move in between.
+    #[test]
+    fn a_run_of_writes_to_one_chunk_is_one_message() {
+        let mut stack = stack();
+        assert!(stack.write(0, 1, 0x01));
+
+        let before = stack.messages;
+        for byte in 2..12u8 {
+            assert!(stack.write(0, 1, byte));
+        }
+
+        let sent = stack.messages - before;
+        assert!(
+            sent <= 2,
+            "ten writes to one chunk sent {sent} messages to the task"
+        );
     }
 
     #[test]

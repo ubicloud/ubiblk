@@ -217,14 +217,16 @@ impl SpillIoChannel {
         }
 
         if let Err(e) = self.base.submit() {
+            // The pieces that were just added may or may not run: a failed
+            // submit says nothing about what the kernel already took. They
+            // keep their leases, so the slots they hold are never handed to
+            // another chunk while something might still be writing into them.
+            // A leaked slot costs capacity; a reused one costs the data.
             error!("Failed to submit spill I/O: {e}");
-            for id in std::mem::take(&mut self.queue) {
-                if let Some(request) = self.live.get_mut(&id) {
-                    if !request.in_flight {
-                        request.ok = false;
-                    }
+            for id in self.queue.iter() {
+                if let Some(request) = self.live.get_mut(id) {
+                    request.ok = false;
                 }
-                self.queue.push_back(id);
             }
         }
     }

@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use log::{error, warn};
+use log::error;
 use sha2::{Digest, Sha256};
 
 use crate::archive::ArchiveStore;
@@ -71,22 +71,21 @@ impl Geometry {
         self.device_sectors.div_ceil(self.chunk_sectors)
     }
 
-    /// How many sectors of a chunk the guest can address. Only the last one is
-    /// ever short, and the rest of its slot is padding.
-    pub fn live_sectors(&self, chunk: usize) -> u64 {
-        let start = chunk as u64 * self.chunk_sectors;
-        self.chunk_sectors
-            .min(self.device_sectors.saturating_sub(start))
-    }
-
     pub fn slot_sector(&self, slot: u32) -> u64 {
         slot as u64 * self.chunk_sectors
     }
 }
 
 enum Fill {
-    Fetching { slot: u32, name: String },
-    Writing { slot: u32, buffer: SharedBuffer },
+    Fetching {
+        slot: u32,
+        name: String,
+        buffer: SharedBuffer,
+    },
+    Writing {
+        slot: u32,
+        buffer: SharedBuffer,
+    },
 }
 
 enum Evict {
@@ -299,9 +298,14 @@ impl SpillTask {
                 Authority::Remote {
                     open, generation, ..
                 } => {
+                    // Taken now rather than when the object arrives: a fetch
+                    // that finds no buffer at the end has spent a round trip
+                    // for nothing.
+                    let buffer = self.buffers.get_buffer().expect("checked above");
                     let name = self.object_name(chunk, open, generation);
                     self.store.start_get_object(&name);
-                    self.fills.insert(chunk, Fill::Fetching { slot, name });
+                    self.fills
+                        .insert(chunk, Fill::Fetching { slot, name, buffer });
                 }
                 Authority::Zero => {
                     let buffer = self.buffers.get_buffer().expect("checked above");
@@ -464,15 +468,19 @@ impl SpillTask {
     }
 
     fn fetched(&mut self, chunk: usize, result: Result<Vec<u8>>) {
-        let Some(Fill::Fetching { slot, .. }) = self.fills.remove(&chunk) else {
+        let Some(Fill::Fetching { slot, buffer, .. }) = self.fills.remove(&chunk) else {
             return;
+        };
+        let give_up = |task: &mut Self, buffer: &SharedBuffer| {
+            task.buffers.return_buffer(buffer);
+            task.state.abandon_fill(chunk);
+            task.slots.release(slot);
         };
 
         let expected_digest = match self.map.authority(chunk as u64) {
             Authority::Remote { digest, .. } => digest,
             _ => {
-                self.state.abandon_fill(chunk);
-                self.slots.release(slot);
+                give_up(self, &buffer);
                 return;
             }
         };
@@ -481,8 +489,7 @@ impl SpillTask {
             Ok(data) => data,
             Err(e) => {
                 error!("Fetching chunk {chunk} failed: {e}");
-                self.state.abandon_fill(chunk);
-                self.slots.release(slot);
+                give_up(self, &buffer);
                 return;
             }
         };
@@ -491,17 +498,10 @@ impl SpillTask {
                 "The object for chunk {chunk} is not what the map describes: {} bytes",
                 data.len()
             );
-            self.state.abandon_fill(chunk);
-            self.slots.release(slot);
+            give_up(self, &buffer);
             return;
         }
 
-        let Some(buffer) = self.buffers.get_buffer() else {
-            warn!("No buffer to bring chunk {chunk} in with; it will be asked for again");
-            self.state.abandon_fill(chunk);
-            self.slots.release(slot);
-            return;
-        };
         buffer.borrow_mut().as_mut_slice().copy_from_slice(&data);
         let id = self.next_io_id(Io::Fill(chunk));
         self.base.add_write(

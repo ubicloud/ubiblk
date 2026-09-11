@@ -155,6 +155,9 @@ pub struct SpillTask {
     next_io: usize,
     /// Chunks whose slot holds more than the map's authority does.
     dirty: HashSet<usize>,
+    /// Chunks a guest is waiting to overwrite whole. They need a slot like a
+    /// fetch does, and like a fetch they wait rather than being forgotten.
+    repairs: HashSet<usize>,
     waiting_flushes: Vec<FlushReply>,
     running_flush: Option<PendingFlush>,
     wanted: HashSet<usize>,
@@ -204,6 +207,8 @@ impl SpillTask {
             }
         }
 
+        slots.finish_claims();
+
         Ok(SpillTask {
             state,
             slots,
@@ -224,6 +229,7 @@ impl SpillTask {
             io: HashMap::new(),
             next_io: 0,
             dirty: HashSet::new(),
+            repairs: HashSet::new(),
             waiting_flushes: Vec::new(),
             running_flush: None,
             wanted: HashSet::new(),
@@ -257,37 +263,40 @@ impl SpillTask {
                 self.dirty.insert(chunk);
             }
             SpillRequest::Poison { chunk } => self.poison(chunk),
-            SpillRequest::Repair { chunk } => self.repair(chunk),
+            SpillRequest::Repair { chunk } => {
+                self.repairs.insert(chunk);
+            }
         }
     }
 
     /// Give a chunk whose contents were uncertain a fresh slot. The map goes
     /// on saying it is unreadable until the guest's overwrite is flushed, so a
     /// crash in between leaves it failing reads rather than serving zeroes.
-    fn repair(&mut self, chunk: usize) {
-        let seen = self.state.get(chunk);
-        if seen.state != ChunkState::Poisoned || !self.buffers.has_available() {
-            return;
-        }
-        // A chunk poisoned by a failed write kept the slot it failed in; one
-        // the map called unreadable when it was opened has never had one.
-        let mut allocated = false;
-        let slot = match self.slots.owner(seen.slot) {
-            Some(owner) if owner == chunk => seen.slot,
-            _ => match self.slots.allocate(chunk) {
-                Some(slot) => {
-                    allocated = true;
-                    slot
-                }
-                None => return,
-            },
-        };
-        if !self.state.begin_repair(chunk, slot) {
-            if allocated {
-                self.slots.release(slot);
+    fn start_repairs(&mut self) {
+        for chunk in self.repairs.iter().copied().collect::<Vec<_>>() {
+            if self.state.get(chunk).state != ChunkState::Poisoned {
+                // Somebody else repaired it, or it was never poisoned.
+                self.repairs.remove(&chunk);
+                continue;
             }
+            if !self.buffers.has_available() {
+                return;
+            }
+            let Some(slot) = self.slots.allocate(chunk) else {
+                // No room yet. `make_room` counts repairs as demand, so one
+                // will come.
+                return;
+            };
+            self.repair(chunk, slot);
+        }
+    }
+
+    fn repair(&mut self, chunk: usize, slot: u32) {
+        if !self.state.begin_repair(chunk, slot) {
+            self.slots.release(slot);
             return;
         }
+        self.repairs.remove(&chunk);
 
         let buffer = self.buffers.get_buffer().expect("checked above");
         buffer.borrow_mut().as_mut_slice().fill(0);
@@ -308,6 +317,7 @@ impl SpillTask {
         );
         if let Err(e) = self.base.submit() {
             error!("Failed to submit the repair of chunk {chunk}: {e}");
+            self.give_up_on_fills();
         }
     }
 
@@ -318,6 +328,13 @@ impl SpillTask {
         self.state.poison(chunk);
         self.dirty.remove(&chunk);
         self.wanted.remove(&chunk);
+        // Nothing may read the slot and nothing may upload it, so holding on
+        // to it would cost the device a slot for every failed write.
+        let slot = self.state.get(chunk).slot;
+        if self.slots.owner(slot) == Some(chunk) {
+            self.slots.release(slot);
+        }
+        self.state.forget_slot(chunk);
         if let Err(e) = self
             .map
             .stage(chunk as u64, Authority::Unreadable)
@@ -331,6 +348,7 @@ impl SpillTask {
         !self.fills.is_empty()
             || !self.evicts.is_empty()
             || !self.wanted.is_empty()
+            || !self.repairs.is_empty()
             || !self.waiting_flushes.is_empty()
             || self.running_flush.is_some()
             || self.base.busy()
@@ -340,6 +358,7 @@ impl SpillTask {
         self.poll_base();
         self.poll_store();
         self.start_fills();
+        self.start_repairs();
         self.make_room();
         self.start_flush();
     }
@@ -421,17 +440,47 @@ impl SpillTask {
 
         if let Err(e) = self.base.submit() {
             error!("Failed to submit spill fills: {e}");
+            self.give_up_on_fills();
         }
+    }
+
+    /// Nothing will complete for work the channel could not submit, so the
+    /// chunks it was for have to be let go of rather than left half moved.
+    fn give_up_on_fills(&mut self) {
+        for (chunk, fill) in std::mem::take(&mut self.fills) {
+            let slot = match fill {
+                Fill::Fetching { slot, buffer, .. } | Fill::Writing { slot, buffer, .. } => {
+                    self.buffers.return_buffer(&buffer);
+                    slot
+                }
+            };
+            self.state.abandon_fill(chunk);
+            self.state.mark_fetch_failed(chunk);
+            self.wanted.remove(&chunk);
+            self.slots.release(slot);
+        }
+        self.io.retain(|_, what| !matches!(what, Io::Fill(_)));
+    }
+
+    fn give_up_on_evictions(&mut self) {
+        for (chunk, evict) in std::mem::take(&mut self.evicts) {
+            if let Evict::Reading { buffer, .. } = &evict {
+                self.buffers.return_buffer(buffer);
+            }
+            self.state.keep(chunk);
+        }
+        self.io.retain(|_, what| !matches!(what, Io::Evict(_)));
     }
 
     /// Free a slot if anything is waiting for one. A chunk that is already
     /// being filled has its slot, so wanting it is not a reason to take one
     /// away from somebody else.
     fn make_room(&mut self) {
-        let waiting = self
-            .wanted
-            .iter()
-            .any(|chunk| !self.fills.contains_key(chunk));
+        let waiting = !self.repairs.is_empty()
+            || self
+                .wanted
+                .iter()
+                .any(|chunk| !self.fills.contains_key(chunk));
         if self.slots.free_count() > 0
             || !waiting
             || !self.evicts.is_empty()
@@ -456,8 +505,9 @@ impl SpillTask {
                 || matches!(self.map.authority(chunk as u64), Authority::Local { .. })
                 || self.dirty.contains(&chunk);
             if !keeps_its_contents {
-                self.state.finish_evict(chunk);
-                self.slots.release(slot);
+                if self.state.finish_evict(chunk).is_some() {
+                    self.slots.release(slot);
+                }
                 return;
             }
 
@@ -472,6 +522,7 @@ impl SpillTask {
             self.evicts.insert(chunk, Evict::Reading { slot, buffer });
             if let Err(e) = self.base.submit() {
                 error!("Failed to submit spill eviction read: {e}");
+                self.give_up_on_evictions();
             }
             return;
         }
@@ -634,6 +685,7 @@ impl SpillTask {
         );
         if let Err(e) = self.base.submit() {
             error!("Failed to submit the write bringing chunk {chunk} in: {e}");
+            self.give_up_on_fills();
         }
     }
 
@@ -670,12 +722,28 @@ impl SpillTask {
         }
 
         self.dirty.remove(&chunk);
-        self.state.finish_evict(chunk);
-        self.slots.release(slot);
+        if self.state.finish_evict(chunk).is_some() {
+            self.slots.release(slot);
+        } else {
+            // Something took the chunk out of service while it was being
+            // uploaded. Its word still names the slot, so the slot is not free.
+            error!("Chunk {chunk} left its eviction before it finished");
+        }
     }
 
     fn start_flush(&mut self) {
         if self.running_flush.is_some() || self.waiting_flushes.is_empty() {
+            return;
+        }
+        // A chunk on its way to the store is in neither tier durably yet: the
+        // slot is not published and the object is not there. Flushing around
+        // it would say a write is safe while it is nowhere, so the flush waits
+        // for the eviction to land or fail.
+        if self
+            .dirty
+            .iter()
+            .any(|chunk| self.evicts.contains_key(chunk))
+        {
             return;
         }
         // Fixed here, so a write that lands after this point waits for the next
@@ -774,6 +842,11 @@ impl SpillTask {
     }
 
     #[cfg(test)]
+    pub fn evicting(&self, chunk: usize) -> bool {
+        self.evicts.contains_key(&chunk)
+    }
+
+    #[cfg(test)]
     pub fn free_slots(&self) -> usize {
         self.slots.free_count()
     }
@@ -786,8 +859,27 @@ impl SpillTask {
 
     /// Lose everything in the store, as an operator with a delete key might.
     #[cfg(test)]
-    pub fn forget_objects(&mut self) {
-        self.store = Box::new(crate::archive::MemStore::new());
+    pub fn forget_objects(&mut self) -> std::rc::Rc<std::cell::RefCell<HashMap<String, Vec<u8>>>> {
+        let store = crate::archive::MemStore::new();
+        let objects = store.objects.clone();
+        let old = std::mem::replace(&mut self.store, Box::new(store));
+        drop(old);
+        objects
+    }
+
+    /// Put a store back, as a blip ending might.
+    #[cfg(test)]
+    pub fn set_objects(
+        &mut self,
+        objects: std::rc::Rc<std::cell::RefCell<HashMap<String, Vec<u8>>>>,
+    ) {
+        self.store = Box::new(crate::archive::MemStore::new_with_objects(objects));
+    }
+
+    /// Whether anything is still being brought in or moved out.
+    #[cfg(test)]
+    pub fn moving_anything(&self) -> bool {
+        !self.fills.is_empty() || !self.evicts.is_empty()
     }
 }
 
@@ -825,11 +917,88 @@ mod tests {
         }
     }
 
+    /// A store that holds its uploads until it is told to let them go, so a
+    /// test can keep a chunk in the air the way a real round trip does.
+    struct HeldStore {
+        inner: MemStore,
+        held: Vec<(String, Vec<u8>)>,
+        holding: std::rc::Rc<std::cell::Cell<bool>>,
+    }
+
+    impl ArchiveStore for HeldStore {
+        fn start_put_object(&mut self, name: &str, data: Vec<u8>) {
+            if self.holding.get() {
+                self.held.push((name.to_string(), data));
+            } else {
+                self.inner.start_put_object(name, data);
+            }
+        }
+
+        fn start_get_object(&mut self, name: &str) {
+            self.inner.start_get_object(name);
+        }
+
+        fn poll_puts(&mut self) -> Vec<(String, Result<()>)> {
+            if !self.holding.get() {
+                for (name, data) in std::mem::take(&mut self.held) {
+                    self.inner.start_put_object(&name, data);
+                }
+            }
+            self.inner.poll_puts()
+        }
+
+        fn poll_gets(&mut self) -> Vec<(String, Result<Vec<u8>>)> {
+            self.inner.poll_gets()
+        }
+    }
+
     struct Harness {
         task: SpillTask,
         state: SharedState,
         base: Box<TestBlockDevice>,
         objects: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>>>,
+    }
+
+    fn harness_holding_uploads() -> (Harness, std::rc::Rc<std::cell::Cell<bool>>) {
+        let holding = std::rc::Rc::new(std::cell::Cell::new(true));
+        let store = Box::new(HeldStore {
+            inner: MemStore::new(),
+            held: Vec::new(),
+            holding: holding.clone(),
+        });
+        let map = Map::create(
+            Box::new(FakeStorage::new(sectors_needed(CHUNKS, JOURNAL_BLOCKS)))
+                as Box<dyn MapStorage>,
+            binding(),
+            CHUNKS,
+            JOURNAL_BLOCKS,
+        )
+        .expect("map");
+        let state = SharedState::new(CHUNKS as usize);
+        let base = Box::new(TestBlockDevice::new(
+            SLOTS as u64 * CHUNK_SECTORS * SECTOR_SIZE as u64,
+        ));
+        let objects = store.inner.objects.clone();
+        let task = SpillTask::new(
+            state.clone(),
+            map,
+            store,
+            base.create_channel().expect("channel"),
+            geometry(),
+            PREFIX.to_string(),
+            42,
+            4,
+        )
+        .expect("task");
+        (
+            Harness {
+                task,
+                state,
+                base,
+                objects,
+            },
+            holding,
+        )
     }
 
     fn harness() -> Harness {
@@ -1110,6 +1279,89 @@ mod tests {
                 "the flush published a chunk that had moved (refetched: {refetched})"
             );
         }
+    }
+
+    /// A chunk on its way to the store is durable in neither tier: the slot is
+    /// not published and the object is not there yet. A flush that answered
+    /// around it would call a write safe while it was nowhere.
+    #[test]
+    fn a_flush_waits_for_a_chunk_that_is_on_its_way_out() {
+        let (mut h, holding) = harness_holding_uploads();
+        h.task.handle(SpillRequest::Fetch { chunk: 0 });
+        drive(&mut h.task);
+        h.state.try_lease(0).expect("lease");
+        h.state.release(0, true);
+        h.task.handle(SpillRequest::Wrote { chunk: 0 });
+
+        // Start moving it out, and stop before the upload lands.
+        h.task.handle(SpillRequest::Fetch { chunk: 1 });
+        h.task.handle(SpillRequest::Fetch { chunk: 2 });
+        for _ in 0..3 {
+            h.task.update();
+        }
+        assert!(h.task.evicting(0), "chunk 0 is not on its way out");
+
+        let inbox = Arc::new(Mutex::new(Vec::new()));
+        h.task.handle(SpillRequest::Flush {
+            reply: FlushReply::new(inbox.clone(), 1),
+        });
+        for _ in 0..5 {
+            h.task.update();
+            assert!(
+                inbox.lock().unwrap().is_empty(),
+                "the flush answered while the chunk was in neither tier"
+            );
+        }
+
+        holding.set(false);
+        drive(&mut h.task);
+        assert_eq!(*inbox.lock().unwrap(), vec![(1, true)]);
+        assert!(
+            matches!(h.task.map().authority(0), Authority::Remote { .. }),
+            "the chunk was not published anywhere"
+        );
+    }
+
+    /// A failed write takes the chunk out of service, and its slot with it:
+    /// holding on would cost the device a slot for every failure.
+    #[test]
+    fn a_poisoned_chunk_gives_its_slot_back() {
+        let mut h = harness();
+        h.task.handle(SpillRequest::Fetch { chunk: 0 });
+        drive(&mut h.task);
+        let free_before = h.task.free_slots();
+
+        h.state.try_lease(0).expect("lease");
+        h.state.release_failed(0);
+        h.task.handle(SpillRequest::Poison { chunk: 0 });
+
+        assert_eq!(h.task.free_slots(), free_before + 1);
+        assert_eq!(h.task.map().authority(0), Authority::Unreadable);
+    }
+
+    /// Nothing completes for work the channel refused to submit, so the task
+    /// has to let the chunk go rather than leave it half moved: a chunk stuck
+    /// in Filling is unleaseable, and a task that thinks it is busy never
+    /// stops.
+    #[test]
+    fn a_fill_that_cannot_be_submitted_does_not_hang_the_task() {
+        let mut h = harness();
+        h.base
+            .fail_submit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        h.task.handle(SpillRequest::Fetch { chunk: 0 });
+        h.task.update();
+
+        assert!(!h.task.moving_anything(), "the fill is still in the air");
+        assert_eq!(h.state.get(0).state, ChunkState::Idle);
+        assert!(h.state.get(0).fetch_failed);
+        assert_eq!(
+            h.task.free_slots(),
+            SLOTS as usize,
+            "a slot was left behind"
+        );
+        drive(&mut h.task);
     }
 
     /// What the map says on reopening is what the task starts from: chunks in

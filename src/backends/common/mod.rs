@@ -405,10 +405,17 @@ impl BackendEnv {
     fn build_spill_task(config: SpillTaskConfig) -> Result<SpillTask> {
         let chunk_count = config.geometry.chunk_count();
         let sectors = sectors_needed(chunk_count, MAP_JOURNAL_BLOCKS);
-        let exists = config
-            .map_path
-            .metadata()
-            .is_ok_and(|metadata| metadata.len() > 0);
+        // What decides is whether there is a map here, not whether there is a
+        // file: a creation interrupted after the file was sized leaves a
+        // full-length file with nothing in it, and that has to be a fresh
+        // start rather than a device that can never be opened again.
+        let exists = FileStorage::open(&config.map_path)
+            .ok()
+            .and_then(|storage| {
+                crate::block_device::bdev_spill::map::superblock::read(&storage).ok()
+            })
+            .flatten()
+            .is_some();
 
         let map = if exists {
             Map::open(

@@ -192,6 +192,46 @@ impl SharedState {
         .is_some()
     }
 
+    /// Give a lease back for a write that failed, and take the chunk out of
+    /// service in the same step. Two steps would let an evictor take the slot
+    /// in between and upload bytes nobody can vouch for.
+    pub fn release_failed(&self, chunk: usize) {
+        self.update(chunk, |mut c| {
+            debug_assert!(c.leases > 0, "released a lease that was not held");
+            c.leases = c.leases.saturating_sub(1);
+            c.state = ChunkState::Poisoned;
+            c.modified = false;
+            Some((c, ()))
+        });
+        self.moved();
+    }
+
+    /// Forget the slot a chunk was in, as the worker does when it gives that
+    /// slot back to the pool. Only a chunk nobody can lease may forget one;
+    /// whether it still has one to give is the pool's business, not this
+    /// word's, since slot zero is a slot like any other.
+    pub fn forget_slot(&self, chunk: usize) {
+        self.update(chunk, |mut c| {
+            if c.state != ChunkState::Poisoned {
+                return None;
+            }
+            c.slot = 0;
+            Some((c, ()))
+        });
+    }
+
+    /// Let the next request try the chunk again, after telling this one that
+    /// bringing it in failed.
+    pub fn clear_fetch_failed(&self, chunk: usize) {
+        self.update(chunk, |mut c| {
+            if !c.fetch_failed {
+                return None;
+            }
+            c.fetch_failed = false;
+            Some((c, ()))
+        });
+    }
+
     /// Start again on a chunk whose contents were uncertain. The caller is
     /// about to overwrite every sector the guest can address in it, so what
     /// was there does not matter - but the map still says it is unreadable
@@ -443,6 +483,46 @@ mod tests {
 
         assert_eq!(state.abandon_fill(0), Some(5));
         assert_eq!(state.get(0).state, ChunkState::Idle);
+    }
+
+    /// The failure path has to be one step for the same reason the success
+    /// path is: an evictor watching for the last lease must never see a
+    /// chunk whose write failed as one it can take.
+    #[test]
+    fn a_failed_write_gives_up_its_lease_and_the_chunk_together() {
+        let state = SharedState::new(2);
+        resident(&state, 0, 3);
+        state.try_lease(0).expect("lease");
+
+        state.release_failed(0);
+
+        let seen = state.get(0);
+        assert_eq!(seen.state, ChunkState::Poisoned);
+        assert_eq!(seen.leases, 0);
+        assert_eq!(state.begin_evict(0), None);
+    }
+
+    #[test]
+    fn a_chunk_can_be_asked_for_again_after_a_failed_fetch() {
+        let state = SharedState::new(2);
+        state.mark_fetch_failed(0);
+        assert!(state.get(0).fetch_failed);
+
+        state.clear_fetch_failed(0);
+
+        assert!(!state.get(0).fetch_failed);
+    }
+
+    #[test]
+    fn a_poisoned_chunk_gives_its_slot_back() {
+        let state = SharedState::new(2);
+        resident(&state, 0, 3);
+        state.poison(0);
+
+        assert_eq!(state.get(0).slot, 3);
+        state.forget_slot(0);
+
+        assert_eq!(state.get(0).slot, 0);
     }
 
     #[test]

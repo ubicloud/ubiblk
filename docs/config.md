@@ -345,6 +345,11 @@ path = "/var/lib/ubiblk/store"
 | `chunk_kb` | integer | no | 128 | Unit of movement between disk and store |
 | `[spill.store]` | table | yes | — | Where the cold tier lives, as in `[stripe_source]` |
 
+Objects are named for the chunk, the open that wrote them and a generation, and
+nothing deletes the older ones: a chunk that is written out repeatedly leaves an
+object behind each time, so store usage grows with how much the device is used
+rather than with how large it is. Collecting them is not part of this version.
+
 The map records which of the two tiers holds each chunk, so it belongs with the
 data: losing it loses the device. The prefix and the store location are part of
 what the map is checked against, so the same prefix in another bucket is a

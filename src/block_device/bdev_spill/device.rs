@@ -23,6 +23,10 @@ use super::task::{FlushReply, Geometry, SpillRequest};
 /// requests that span more than one chunk.
 const SCRATCH_BUFFERS: usize = 4;
 
+/// How many questions a channel remembers having asked. Forgetting one only
+/// means asking it again, so this is a bound on memory, not on correctness.
+const MAX_ASKED: usize = 4096;
+
 pub struct SpillBlockDevice {
     base: Box<dyn BlockDevice>,
     state: SharedState,
@@ -297,6 +301,11 @@ impl SpillIoChannel {
             return true;
         }
 
+        if self.asked.len() > MAX_ASKED {
+            // Forgetting only costs a repeated question.
+            self.asked.clear();
+        }
+
         let Some(slot) = self.state.try_lease(chunk) else {
             let seen = self.state.get(chunk);
             if seen.state == ChunkState::Poisoned {
@@ -310,21 +319,26 @@ impl SpillIoChannel {
                 self.live.get_mut(&id).expect("live").ok = false;
                 return true;
             }
-            // Nothing is coming for a chunk whose last fetch failed.
+            // Nothing is coming for a chunk whose last fetch failed, so this
+            // request fails - but the mark goes with it, so the next request
+            // tries afresh rather than inheriting an old blip for ever.
             if seen.fetch_failed {
+                self.state.clear_fetch_failed(chunk);
                 let request = self.live.get_mut(&id).expect("live");
                 request.ok = false;
                 return true;
             }
-            if !self.ask_once(chunk, Ask::Bring, SpillRequest::Fetch { chunk })
-                || !self.ask(SpillRequest::MakeRoom)
-            {
+            // No `MakeRoom` here: the task makes room for what it has been
+            // asked to bring in, and sending one per poll would put thousands
+            // of messages behind the fetch this request is waiting for.
+            if !self.ask_once(chunk, Ask::Bring, SpillRequest::Fetch { chunk }) {
                 self.live.get_mut(&id).expect("live").ok = false;
                 return true;
             }
             return false;
         };
 
+        self.asked.remove(&(chunk, Ask::Bring));
         let at = self.geometry.slot_sector(slot) + within;
         let buf_sector = sector - first_sector;
         let guest = self.live[&id].buf.clone();
@@ -509,6 +523,7 @@ mod tests {
         channel: Box<dyn IoChannel>,
         device: Box<dyn BlockDevice>,
         state: SharedState,
+        objects: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<String, Vec<u8>>>>,
         task: SpillTask,
         inbox: Receiver<BgWorkerRequest>,
         base: Box<TestBlockDevice>,
@@ -530,10 +545,12 @@ mod tests {
             SLOTS as u64 * CHUNK_SECTORS * SECTOR_SIZE as u64,
         ));
         let (sender, inbox) = channel();
+        let store = Box::new(MemStore::new());
+        let objects = store.objects.clone();
         let task = SpillTask::new(
             state.clone(),
             map,
-            Box::new(MemStore::new()),
+            store,
             base.create_channel().expect("channel"),
             geometry(),
             "spill/dev".to_string(),
@@ -547,6 +564,7 @@ mod tests {
             channel: device.create_channel().expect("channel"),
             device,
             state,
+            objects,
             task,
             inbox,
             base,
@@ -864,12 +882,21 @@ mod tests {
         // Push it to the store, then take the object away.
         assert!(stack.write(CHUNK_SECTORS, 1, 0x01));
         assert!(stack.write(CHUNK_SECTORS * 2, 1, 0x02));
+        let objects = stack.objects.borrow().clone();
         stack.task.forget_objects();
 
         assert_eq!(stack.read(0, 1), None, "a chunk with no object was served");
 
         // Other chunks are unaffected.
         assert!(stack.read(CHUNK_SECTORS, 1).is_some());
+
+        // And when the store comes back, so does the chunk: a blip must not
+        // take a chunk out for the life of the process.
+        stack
+            .task
+            .set_objects(std::rc::Rc::new(std::cell::RefCell::new(objects)));
+        let read = stack.read(0, 1).expect("the chunk is readable again");
+        assert!(read.iter().all(|b| *b == 0x99));
     }
 
     /// A chunk taken out of service by a failed write comes back when the

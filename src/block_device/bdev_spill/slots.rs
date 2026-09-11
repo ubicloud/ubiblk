@@ -33,6 +33,10 @@ impl SlotPool {
 
     /// Say that a slot already belongs to a chunk, as the map says after a
     /// restart. Two chunks claiming one slot is a corrupt map, not a race.
+    ///
+    /// The free list is not touched here: a device that shut down cleanly
+    /// claims every occupied slot, and taking each one out of a list costs a
+    /// scan of it. `finish_claims` rebuilds the list once instead.
     pub fn claim(&mut self, slot: u32, chunk: usize) -> Result<()> {
         let Some(owner) = self.owner.get_mut(slot as usize) else {
             return Err(crate::ubiblk_error!(InvalidParameter {
@@ -45,8 +49,14 @@ impl SlotPool {
             }));
         }
         *owner = Some(chunk);
-        self.free.retain(|free| *free != slot);
         Ok(())
+    }
+
+    /// Rebuild the free list from what is claimed, once every claim is in.
+    pub fn finish_claims(&mut self) {
+        self.free = (0..self.slot_count())
+            .filter(|slot| self.owner[*slot as usize].is_none())
+            .collect();
     }
 
     /// Who a slot belongs to, if anyone.
@@ -150,6 +160,7 @@ mod tests {
     fn a_claimed_slot_is_not_handed_out_again() {
         let mut pool = SlotPool::new(2);
         pool.claim(0, 5).expect("claim");
+        pool.finish_claims();
 
         assert_eq!(pool.allocate(6), Some(1));
         assert_eq!(pool.allocate(7), None);

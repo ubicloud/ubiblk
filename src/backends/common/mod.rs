@@ -1083,6 +1083,22 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("metadata_path"));
     }
 
+    fn walkdir(path: &std::path::Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| {
+                if entry.path().is_dir() {
+                    walkdir(&entry.path())
+                } else {
+                    1
+                }
+            })
+            .sum()
+    }
+
     fn spill_config(dir: &std::path::Path, disk: &std::path::Path, size_mb: u64) -> v2::Config {
         use crate::config::v2::secrets::{
             resolve_secrets, SecretDef, SecretEncoding, SecretRef, SecretSource,
@@ -1168,6 +1184,83 @@ mod tests {
             assert!(
                 buf.borrow().as_slice().iter().all(|b| *b == byte),
                 "chunk {i} came back as something else"
+            );
+        }
+
+        env.stop_bgworker_thread();
+    }
+
+    /// Everything together: a device larger than its disk, written across
+    /// more chunks than the cache holds, flushed, closed, and opened again
+    /// from the same map and store.
+    #[test]
+    fn a_spill_device_comes_back_with_what_it_was_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("disk.raw");
+        std::fs::write(&disk, vec![0u8; 256 * 1024]).unwrap();
+        std::fs::create_dir_all(dir.path().join("store")).unwrap();
+        let config = spill_config(dir.path(), &disk, 4);
+
+        let chunk_sectors = 64 * 1024 / SECTOR_SIZE as u64;
+        let written: Vec<(u64, u8)> = (0..8u64)
+            .map(|i| (i * chunk_sectors + i, 0x10 + i as u8))
+            .collect();
+
+        {
+            let mut env = BackendEnv::build(&config).expect("a spill device");
+            env.run_bgworker_thread().expect("the worker starts");
+            let bdev = env.bdev();
+            let mut channel = bdev.create_channel().unwrap();
+
+            for (at, byte) in &written {
+                let buf = crate::block_device::shared_buffer(SECTOR_SIZE);
+                buf.borrow_mut().as_mut_slice().fill(*byte);
+                channel.add_write(*at, 1, buf, 1);
+                channel.submit().unwrap();
+                crate::block_device::wait_for_completion(
+                    channel.as_mut(),
+                    1,
+                    std::time::Duration::from_secs(10),
+                )
+                .expect("write");
+            }
+
+            channel.add_flush(2);
+            channel.submit().unwrap();
+            crate::block_device::wait_for_completion(
+                channel.as_mut(),
+                2,
+                std::time::Duration::from_secs(10),
+            )
+            .expect("flush");
+
+            env.stop_bgworker_thread();
+        }
+
+        let objects = walkdir(&dir.path().join("store"));
+        assert!(
+            objects > 0,
+            "nothing was uploaded, so this never exercised the cold tier"
+        );
+
+        let mut env = BackendEnv::build(&config).expect("the device opens again");
+        env.run_bgworker_thread().expect("the worker starts again");
+        let bdev = env.bdev();
+        let mut channel = bdev.create_channel().unwrap();
+
+        for (at, byte) in &written {
+            let buf = crate::block_device::shared_buffer(SECTOR_SIZE);
+            channel.add_read(*at, 1, buf.clone(), 3);
+            channel.submit().unwrap();
+            crate::block_device::wait_for_completion(
+                channel.as_mut(),
+                3,
+                std::time::Duration::from_secs(10),
+            )
+            .unwrap_or_else(|e| panic!("reading sector {at} back: {e}"));
+            assert!(
+                buf.borrow().as_slice().iter().all(|b| *b == *byte),
+                "sector {at} came back as something else after a restart"
             );
         }
 

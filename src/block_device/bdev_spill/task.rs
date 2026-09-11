@@ -31,6 +31,11 @@ pub enum SpillRequest {
     MakeRoom,
     /// Everything completed before now must be recoverable.
     Flush { reply: FlushReply },
+    /// A write landed in this chunk's slot, so the slot now holds more than
+    /// the map says.
+    Wrote { chunk: usize },
+    /// A write into this chunk's slot failed and its contents are uncertain.
+    Poison { chunk: usize },
 }
 
 /// Where a flush's answer goes. The channel that asked drains it in `poll`.
@@ -223,6 +228,25 @@ impl SpillTask {
             }
             SpillRequest::MakeRoom => {}
             SpillRequest::Flush { reply } => self.waiting_flushes.push(reply),
+            SpillRequest::Wrote { chunk } => {
+                self.dirty.insert(chunk);
+            }
+            SpillRequest::Poison { chunk } => self.poison(chunk),
+        }
+    }
+
+    /// A failed write leaves a slot nobody can trust. The chunk is out of
+    /// service until it is repaired, and the record says so, so a restart does
+    /// not hand the bytes back as though they were the chunk.
+    fn poison(&mut self, chunk: usize) {
+        self.state.poison(chunk);
+        self.dirty.remove(&chunk);
+        if let Err(e) = self
+            .map
+            .stage(chunk as u64, Authority::Unreadable)
+            .and_then(|()| self.map.commit())
+        {
+            error!("Recording chunk {chunk} as unreadable failed: {e}");
         }
     }
 
@@ -526,13 +550,6 @@ impl SpillTask {
         self.slots.release(slot);
     }
 
-    /// A write leaves its slot holding more than the map says. This is how the
-    /// task learns of it, so a flush knows what it owes without looking at
-    /// every chunk on the device.
-    pub fn note_written(&mut self, chunk: usize) {
-        self.dirty.insert(chunk);
-    }
-
     fn start_flush(&mut self) {
         if self.running_flush.is_some() || self.waiting_flushes.is_empty() {
             return;
@@ -717,7 +734,7 @@ mod tests {
         );
         h.state.try_lease(0).expect("lease");
         h.state.release(0, true);
-        h.task.note_written(0);
+        h.task.handle(SpillRequest::Wrote { chunk: 0 });
 
         // Two more chunks need slots, so chunk 0 has to go.
         for chunk in [1, 2] {
@@ -769,7 +786,7 @@ mod tests {
         );
         h.state.try_lease(0).expect("lease");
         h.state.release(0, true);
-        h.task.note_written(0);
+        h.task.handle(SpillRequest::Wrote { chunk: 0 });
         for chunk in [1, 2] {
             h.task.handle(SpillRequest::Fetch { chunk });
             drive(&mut h.task);
@@ -802,7 +819,7 @@ mod tests {
         );
         h.state.try_lease(0).expect("lease");
         h.state.release(0, true);
-        h.task.note_written(0);
+        h.task.handle(SpillRequest::Wrote { chunk: 0 });
         for chunk in [1, 2] {
             h.task.handle(SpillRequest::Fetch { chunk });
             drive(&mut h.task);
@@ -831,7 +848,7 @@ mod tests {
         drive(&mut h.task);
         h.state.try_lease(0).expect("lease");
         h.state.release(0, true);
-        h.task.note_written(0);
+        h.task.handle(SpillRequest::Wrote { chunk: 0 });
 
         let inbox = Arc::new(Mutex::new(Vec::new()));
         h.task.handle(SpillRequest::Flush {
@@ -855,7 +872,7 @@ mod tests {
         }
         h.state.try_lease(0).expect("lease");
         h.state.release(0, true);
-        h.task.note_written(0);
+        h.task.handle(SpillRequest::Wrote { chunk: 0 });
 
         let inbox = Arc::new(Mutex::new(Vec::new()));
         h.task.handle(SpillRequest::Flush {
@@ -865,7 +882,7 @@ mod tests {
 
         h.state.try_lease(1).expect("lease");
         h.state.release(1, true);
-        h.task.note_written(1);
+        h.task.handle(SpillRequest::Wrote { chunk: 1 });
         drive(&mut h.task);
 
         assert_eq!(*inbox.lock().unwrap(), vec![(1, true)]);
@@ -886,7 +903,7 @@ mod tests {
         drive(&mut h.task);
         h.state.try_lease(5).expect("lease");
         h.state.release(5, true);
-        h.task.note_written(5);
+        h.task.handle(SpillRequest::Wrote { chunk: 5 });
         let inbox = Arc::new(Mutex::new(Vec::new()));
         h.task.handle(SpillRequest::Flush {
             reply: FlushReply::new(inbox, 1),

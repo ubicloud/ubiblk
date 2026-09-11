@@ -180,6 +180,7 @@ impl SpillIoChannel {
             SpillRequest::Flush { reply } => BgWorkerRequest::SpillFlush { reply },
             SpillRequest::Wrote { chunk } => BgWorkerRequest::SpillWrote { chunk },
             SpillRequest::Poison { chunk } => BgWorkerRequest::SpillPoison { chunk },
+            SpillRequest::Repair { chunk } => BgWorkerRequest::SpillRepair { chunk },
         };
         if let Err(e) = self.requests.send(message) {
             error!("The spill task is not listening: {e}");
@@ -191,6 +192,16 @@ impl SpillIoChannel {
     /// Complete a request, once. A flush that was failed by a submit error is
     /// still owed a reply by the task, and answering that reply as well would
     /// complete the same descriptor twice.
+    /// Ask for something about a chunk, unless this channel already asked and
+    /// nothing has moved since.
+    fn ask_once(&mut self, chunk: usize, request: SpillRequest) -> bool {
+        let moved = self.state.transitions();
+        if self.asked.insert(chunk, moved) == Some(moved) {
+            return true;
+        }
+        self.ask(request)
+    }
+
     fn finish(&mut self, id: usize, ok: bool) {
         if self.live.remove(&id).is_some() {
             self.finished.push((id, ok));
@@ -279,17 +290,25 @@ impl SpillIoChannel {
 
         let Some(slot) = self.state.try_lease(chunk) else {
             let seen = self.state.get(chunk);
-            // Nothing can be served from a chunk whose contents are uncertain,
-            // and nothing is coming for one whose last fetch failed.
-            if seen.state == ChunkState::Poisoned || seen.fetch_failed {
+            if seen.state == ChunkState::Poisoned {
+                // A write that covers every sector the guest can address in
+                // this chunk makes what was uncertain about it irrelevant.
+                let live = self.geometry.live_sectors(chunk);
+                if kind == Kind::Write && within == 0 && u64::from(sectors) == live {
+                    self.ask_once(chunk, SpillRequest::Repair { chunk });
+                    return false;
+                }
+                self.live.get_mut(&id).expect("live").ok = false;
+                return true;
+            }
+            // Nothing is coming for a chunk whose last fetch failed.
+            if seen.fetch_failed {
                 let request = self.live.get_mut(&id).expect("live");
                 request.ok = false;
                 return true;
             }
-            let moved = self.state.transitions();
-            let asked_when = self.asked.insert(chunk, moved);
-            if asked_when != Some(moved)
-                && (!self.ask(SpillRequest::Fetch { chunk }) || !self.ask(SpillRequest::MakeRoom))
+            if !self.ask_once(chunk, SpillRequest::Fetch { chunk })
+                || !self.ask(SpillRequest::MakeRoom)
             {
                 self.live.get_mut(&id).expect("live").ok = false;
                 return true;
@@ -557,6 +576,9 @@ mod tests {
                         BgWorkerRequest::SpillPoison { chunk } => {
                             self.task.handle(SpillRequest::Poison { chunk })
                         }
+                        BgWorkerRequest::SpillRepair { chunk } => {
+                            self.task.handle(SpillRequest::Repair { chunk })
+                        }
                         _ => {}
                     }
                 }
@@ -809,6 +831,46 @@ mod tests {
 
         // Other chunks are unaffected.
         assert!(stack.read(CHUNK_SECTORS, 1).is_some());
+    }
+
+    /// A chunk taken out of service by a failed write comes back when the
+    /// guest overwrites all of it - and not before. The map goes on saying it
+    /// is unreadable until that overwrite has been flushed, so a crash in
+    /// between leaves reads failing rather than serving zeroes.
+    #[test]
+    fn a_chunk_is_repaired_by_overwriting_the_whole_of_it() {
+        let mut stack = stack();
+        assert!(stack.write(0, 1, 0x22));
+        stack
+            .base
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!stack.write(0, 1, 0x33));
+        assert_eq!(stack.read(0, 1), None, "a poisoned chunk was read");
+
+        // Part of it is not enough.
+        assert!(!stack.write(0, 1, 0x44), "a partial write repaired a chunk");
+        assert_eq!(
+            stack.task.map().authority(0),
+            crate::block_device::bdev_spill::map::format::Authority::Unreadable
+        );
+
+        // All of it is.
+        assert!(
+            stack.write(0, CHUNK_SECTORS as u32, 0x55),
+            "a whole-chunk write did not repair it"
+        );
+        let read = stack.read(0, CHUNK_SECTORS as u32).expect("read");
+        assert!(read.iter().all(|b| *b == 0x55));
+
+        assert!(stack.flush());
+        assert!(
+            matches!(
+                stack.task.map().authority(0),
+                crate::block_device::bdev_spill::map::format::Authority::Local { .. }
+            ),
+            "the repair was not recorded"
+        );
     }
 
     #[test]

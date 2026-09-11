@@ -192,6 +192,25 @@ impl SharedState {
         .is_some()
     }
 
+    /// Start again on a chunk whose contents were uncertain. The caller is
+    /// about to overwrite every sector the guest can address in it, so what
+    /// was there does not matter - but the map still says it is unreadable
+    /// until the new contents are durable.
+    pub fn begin_repair(&self, chunk: usize, slot: u32) -> bool {
+        assert!(slot <= MAX_SLOTS);
+        self.update(chunk, |mut c| {
+            if c.state != ChunkState::Poisoned {
+                return None;
+            }
+            c.state = ChunkState::Filling;
+            c.slot = slot;
+            c.modified = false;
+            c.fetch_failed = false;
+            Some((c, ()))
+        })
+        .is_some()
+    }
+
     /// Nothing could bring this chunk in. Whoever is waiting for it should
     /// stop rather than wait for an attempt that is not coming.
     pub fn mark_fetch_failed(&self, chunk: usize) {
@@ -435,6 +454,19 @@ mod tests {
         assert_eq!(state.try_lease(0), None);
         assert_eq!(state.begin_evict(0), None);
         assert!(!state.finish_fill(0, false));
+    }
+
+    #[test]
+    fn a_poisoned_chunk_can_be_started_again() {
+        let state = SharedState::new(2);
+        resident(&state, 0, 1);
+        state.poison(0);
+
+        assert!(state.begin_repair(0, 2));
+        assert!(state.finish_fill(0, true));
+
+        assert_eq!(state.try_lease(0), Some(2));
+        assert!(!state.begin_repair(1, 0), "a healthy chunk was repaired");
     }
 
     #[test]

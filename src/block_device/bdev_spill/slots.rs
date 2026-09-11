@@ -49,6 +49,11 @@ impl SlotPool {
         Ok(())
     }
 
+    /// Who a slot belongs to, if anyone.
+    pub fn owner(&self, slot: u32) -> Option<usize> {
+        self.owner.get(slot as usize).copied().flatten()
+    }
+
     pub fn allocate(&mut self, chunk: usize) -> Option<u32> {
         let slot = self.free.pop_front()?;
         self.owner[slot as usize] = Some(chunk);
@@ -111,6 +116,19 @@ mod tests {
             Some((0, 100)),
             "the hand did not wrap"
         );
+    }
+
+    #[test]
+    fn a_slot_says_who_it_belongs_to() {
+        let mut pool = SlotPool::new(2);
+        let slot = pool.allocate(9).expect("a free slot");
+
+        assert_eq!(pool.owner(slot), Some(9));
+        assert_eq!(pool.owner(1 - slot), None);
+        assert_eq!(pool.owner(7), None, "a slot that is not there");
+
+        pool.release(slot);
+        assert_eq!(pool.owner(slot), None);
     }
 
     #[test]

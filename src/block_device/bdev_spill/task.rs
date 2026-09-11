@@ -44,6 +44,9 @@ pub enum SpillRequest {
     Wrote { chunk: usize },
     /// A write into this chunk's slot failed and its contents are uncertain.
     Poison { chunk: usize },
+    /// Every sector of this chunk is about to be overwritten, so whatever was
+    /// uncertain about it no longer matters.
+    Repair { chunk: usize },
 }
 
 /// Where a flush's answer goes. The channel that asked drains it in `poll`.
@@ -79,6 +82,15 @@ impl Geometry {
         self.device_sectors.div_ceil(self.chunk_sectors)
     }
 
+    /// How many sectors of a chunk the guest can address. Only the last chunk
+    /// of a device the chunk size does not divide is short, and the rest of
+    /// its slot is padding.
+    pub fn live_sectors(&self, chunk: usize) -> u64 {
+        let start = chunk as u64 * self.chunk_sectors;
+        self.chunk_sectors
+            .min(self.device_sectors.saturating_sub(start))
+    }
+
     pub fn slot_sector(&self, slot: u32) -> u64 {
         slot as u64 * self.chunk_sectors
     }
@@ -93,6 +105,9 @@ enum Fill {
     Writing {
         slot: u32,
         buffer: SharedBuffer,
+        /// A repair fills a slot the guest is about to write over, so the
+        /// slot holds more than the map says the moment it is resident.
+        repair: bool,
     },
 }
 
@@ -242,6 +257,57 @@ impl SpillTask {
                 self.dirty.insert(chunk);
             }
             SpillRequest::Poison { chunk } => self.poison(chunk),
+            SpillRequest::Repair { chunk } => self.repair(chunk),
+        }
+    }
+
+    /// Give a chunk whose contents were uncertain a fresh slot. The map goes
+    /// on saying it is unreadable until the guest's overwrite is flushed, so a
+    /// crash in between leaves it failing reads rather than serving zeroes.
+    fn repair(&mut self, chunk: usize) {
+        let seen = self.state.get(chunk);
+        if seen.state != ChunkState::Poisoned || !self.buffers.has_available() {
+            return;
+        }
+        // A chunk poisoned by a failed write kept the slot it failed in; one
+        // the map called unreadable when it was opened has never had one.
+        let mut allocated = false;
+        let slot = match self.slots.owner(seen.slot) {
+            Some(owner) if owner == chunk => seen.slot,
+            _ => match self.slots.allocate(chunk) {
+                Some(slot) => {
+                    allocated = true;
+                    slot
+                }
+                None => return,
+            },
+        };
+        if !self.state.begin_repair(chunk, slot) {
+            if allocated {
+                self.slots.release(slot);
+            }
+            return;
+        }
+
+        let buffer = self.buffers.get_buffer().expect("checked above");
+        buffer.borrow_mut().as_mut_slice().fill(0);
+        let id = self.next_io_id(Io::Fill(chunk));
+        self.base.add_write(
+            self.geometry.slot_sector(slot),
+            self.geometry.chunk_sectors as u32,
+            buffer.clone(),
+            id,
+        );
+        self.fills.insert(
+            chunk,
+            Fill::Writing {
+                slot,
+                buffer,
+                repair: true,
+            },
+        );
+        if let Err(e) = self.base.submit() {
+            error!("Failed to submit the repair of chunk {chunk}: {e}");
         }
     }
 
@@ -334,7 +400,14 @@ impl SpillTask {
                         buffer.clone(),
                         id,
                     );
-                    self.fills.insert(chunk, Fill::Writing { slot, buffer });
+                    self.fills.insert(
+                        chunk,
+                        Fill::Writing {
+                            slot,
+                            buffer,
+                            repair: false,
+                        },
+                    );
                 }
                 Authority::Local { .. } | Authority::Unreadable => {
                     // Local is already resident, and an unreadable chunk is not
@@ -419,12 +492,22 @@ impl SpillTask {
         let Some(fill) = self.fills.remove(&chunk) else {
             return;
         };
-        let Fill::Writing { slot, buffer } = fill else {
+        let Fill::Writing {
+            slot,
+            buffer,
+            repair,
+        } = fill
+        else {
             return;
         };
         self.buffers.return_buffer(&buffer);
         if ok {
-            self.state.finish_fill(chunk, false);
+            self.state.finish_fill(chunk, repair);
+            if repair {
+                // The slot is zeroes where the map says the chunk cannot be
+                // read, so it owes a record either way.
+                self.dirty.insert(chunk);
+            }
             self.wanted.remove(&chunk);
         } else {
             error!("Filling chunk {chunk} failed");
@@ -541,7 +624,14 @@ impl SpillTask {
             buffer.clone(),
             id,
         );
-        self.fills.insert(chunk, Fill::Writing { slot, buffer });
+        self.fills.insert(
+            chunk,
+            Fill::Writing {
+                slot,
+                buffer,
+                repair: false,
+            },
+        );
         if let Err(e) = self.base.submit() {
             error!("Failed to submit the write bringing chunk {chunk} in: {e}");
         }

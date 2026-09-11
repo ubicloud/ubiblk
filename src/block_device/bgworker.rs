@@ -13,6 +13,7 @@ pub enum BgWorkerRequest {
     SpillFlush { reply: FlushReply },
     SpillWrote { chunk: usize },
     SpillPoison { chunk: usize },
+    SpillRepair { chunk: usize },
     Shutdown,
 }
 
@@ -90,6 +91,11 @@ impl BgWorker {
             BgWorkerRequest::SpillPoison { chunk } => {
                 if let Some(spill) = self.spill() {
                     spill.handle(SpillRequest::Poison { chunk });
+                }
+            }
+            BgWorkerRequest::SpillRepair { chunk } => {
+                if let Some(spill) = self.spill() {
+                    spill.handle(SpillRequest::Repair { chunk });
                 }
             }
             BgWorkerRequest::Shutdown => {

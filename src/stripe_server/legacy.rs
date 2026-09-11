@@ -250,6 +250,7 @@ pub fn load_legacy_config(config_path: &Path, kek_path: Option<&Path>) -> Result
             queue_size: 128,
             ..Default::default()
         },
+        spill: None,
         encryption,
         danger_zone,
         stripe_source: options

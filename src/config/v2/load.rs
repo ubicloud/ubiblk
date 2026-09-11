@@ -41,6 +41,15 @@ impl Config {
             stripe_source.validate(&common.danger_zone, &common.secrets)?;
         }
 
+        let mut spill: Option<crate::config::v2::spill::SpillSection> =
+            parse_optional_section(&merged, "spill")?;
+        if let Some(spill) = &mut spill {
+            if spill.map_path.is_relative() {
+                spill.map_path = config_dir.join(&spill.map_path);
+            }
+            spill.uuid_bytes()?;
+        }
+
         if let Some(encryption) = &encryption {
             encryption.validate_secrets(&common.secrets)?;
         } else if !(common.danger_zone.enabled && common.danger_zone.allow_unencrypted_disk) {
@@ -55,6 +64,7 @@ impl Config {
             encryption,
             danger_zone: common.danger_zone,
             stripe_source,
+            spill,
             secrets: common.secrets,
         })
     }

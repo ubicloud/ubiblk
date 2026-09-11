@@ -331,6 +331,7 @@ mod tests {
                 metadata_path: None,
             },
             stripe_source: None,
+            spill: None,
             secrets: std::collections::HashMap::new(),
             tuning: v2::tuning::TuningSection::default(),
             encryption: None,

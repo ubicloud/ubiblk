@@ -1267,6 +1267,57 @@ mod tests {
         env.stop_bgworker_thread();
     }
 
+    /// A guest that never flushed still gets its writes back after an orderly
+    /// shutdown: stopping records where everything is. A crash is what the
+    /// flush contract is about; this is not one.
+    #[test]
+    fn stopping_a_spill_device_records_what_was_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("disk.raw");
+        std::fs::write(&disk, vec![0u8; 256 * 1024]).unwrap();
+        std::fs::create_dir_all(dir.path().join("store")).unwrap();
+        let config = spill_config(dir.path(), &disk, 4);
+
+        {
+            let mut env = BackendEnv::build(&config).expect("a spill device");
+            env.run_bgworker_thread().expect("the worker starts");
+            let bdev = env.bdev();
+            let mut channel = bdev.create_channel().unwrap();
+            let buf = crate::block_device::shared_buffer(SECTOR_SIZE);
+            buf.borrow_mut().as_mut_slice().fill(0x5C);
+            channel.add_write(9, 1, buf, 1);
+            channel.submit().unwrap();
+            crate::block_device::wait_for_completion(
+                channel.as_mut(),
+                1,
+                std::time::Duration::from_secs(10),
+            )
+            .expect("write");
+            // No flush from the guest at all.
+            env.stop_bgworker_thread();
+        }
+
+        let mut env = BackendEnv::build(&config).expect("the device opens again");
+        env.run_bgworker_thread().expect("the worker starts again");
+        let bdev = env.bdev();
+        let mut channel = bdev.create_channel().unwrap();
+        let buf = crate::block_device::shared_buffer(SECTOR_SIZE);
+        channel.add_read(9, 1, buf.clone(), 2);
+        channel.submit().unwrap();
+        crate::block_device::wait_for_completion(
+            channel.as_mut(),
+            2,
+            std::time::Duration::from_secs(10),
+        )
+        .expect("read");
+
+        assert!(
+            buf.borrow().as_slice().iter().all(|b| *b == 0x5C),
+            "an orderly shutdown lost a write"
+        );
+        env.stop_bgworker_thread();
+    }
+
     #[test]
     fn what_a_spill_device_does_not_support_is_refused() {
         let dir = tempfile::tempdir().unwrap();

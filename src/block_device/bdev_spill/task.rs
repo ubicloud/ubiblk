@@ -22,6 +22,10 @@ use super::map::Map;
 use super::slots::SlotPool;
 use super::state::{ChunkState, SharedState};
 
+/// How long shutting down waits for what is in flight, before leaving it to
+/// recovery.
+const FINISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// What a channel asks the task for. Nothing here carries data: the task reads
 /// the state and the map to work out what is needed.
 pub enum SpillRequest {
@@ -633,6 +637,35 @@ impl SpillTask {
         for reply in flush.replies {
             reply.answer(answer);
         }
+    }
+
+    /// Stop, having written down where everything is. A crash is allowed to
+    /// lose writes the guest never flushed; an orderly shutdown is not, and
+    /// this is the difference between the two.
+    pub fn finish(&mut self) {
+        let deadline = std::time::Instant::now() + FINISH_TIMEOUT;
+        while (!self.fills.is_empty() || !self.evicts.is_empty())
+            && std::time::Instant::now() < deadline
+        {
+            self.update();
+        }
+
+        let inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        self.handle(SpillRequest::Flush {
+            reply: FlushReply::new(inbox.clone(), 0),
+        });
+        while std::time::Instant::now() < deadline {
+            self.update();
+            match inbox.lock().expect("flush inbox").first() {
+                Some((_, true)) => return,
+                Some((_, false)) => {
+                    error!("The last flush before shutting down failed");
+                    return;
+                }
+                None => {}
+            }
+        }
+        error!("Gave up waiting for the last flush before shutting down");
     }
 
     #[cfg(test)]

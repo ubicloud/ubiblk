@@ -94,6 +94,9 @@ impl BgWorker {
             }
             BgWorkerRequest::Shutdown => {
                 info!("Received shutdown request, stopping worker");
+                if let Some(spill) = &mut self.spill {
+                    spill.finish();
+                }
                 self.done = true;
             }
         }

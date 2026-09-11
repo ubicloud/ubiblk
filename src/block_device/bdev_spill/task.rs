@@ -110,7 +110,10 @@ enum Io {
 
 struct PendingFlush {
     replies: Vec<FlushReply>,
-    chunks: Vec<usize>,
+    /// Chunk and the slot it was in when the flush was admitted. A chunk that
+    /// has moved since is not published from here: whatever moved it made it
+    /// recoverable its own way.
+    chunks: Vec<(usize, u32)>,
 }
 
 pub struct SpillTask {
@@ -556,7 +559,14 @@ impl SpillTask {
         }
         // Fixed here, so a write that lands after this point waits for the next
         // flush rather than being published before its bytes are durable.
-        let chunks: Vec<usize> = self.dirty.iter().copied().collect();
+        let chunks: Vec<(usize, u32)> = self
+            .dirty
+            .iter()
+            .filter_map(|chunk| {
+                let seen = self.state.get(*chunk);
+                (seen.state == ChunkState::Resident).then_some((*chunk, seen.slot))
+            })
+            .collect();
         let replies = std::mem::take(&mut self.waiting_flushes);
         let id = self.next_io_id(Io::Flush);
         self.base.add_flush(id);
@@ -573,14 +583,17 @@ impl SpillTask {
         let mut answer = ok;
 
         if ok {
-            for chunk in &flush.chunks {
+            for (chunk, slot) in &flush.chunks {
                 let seen = self.state.get(*chunk);
-                if seen.state != ChunkState::Resident && seen.state != ChunkState::Evicting {
+                // A chunk that left its slot while the flush was in flight was
+                // made recoverable by whatever moved it, and the slot it is in
+                // now may hold bytes this flush did not cover.
+                if seen.state != ChunkState::Resident || seen.slot != *slot {
                     continue;
                 }
                 if let Err(e) = self
                     .map
-                    .stage(*chunk as u64, Authority::Local { slot: seen.slot })
+                    .stage(*chunk as u64, Authority::Local { slot: *slot })
                 {
                     error!("Recording chunk {chunk} as local failed: {e}");
                     answer = false;
@@ -593,8 +606,11 @@ impl SpillTask {
         }
 
         if answer {
-            for chunk in &flush.chunks {
-                self.dirty.remove(chunk);
+            for (chunk, slot) in &flush.chunks {
+                let seen = self.state.get(*chunk);
+                if seen.state == ChunkState::Resident && seen.slot == *slot {
+                    self.dirty.remove(chunk);
+                }
             }
         }
         for reply in flush.replies {
@@ -892,6 +908,46 @@ mod tests {
             Authority::Zero,
             "a write that arrived after the flush was admitted was published by it"
         );
+    }
+
+    /// A chunk that leaves its slot while a flush is in flight is not
+    /// published by that flush: whatever moved it made it recoverable its own
+    /// way, and the slot it is in now may hold bytes the flush did not cover.
+    #[test]
+    fn a_flush_does_not_publish_a_chunk_that_moved_under_it() {
+        for refetched in [false, true] {
+            let mut h = harness();
+            h.task.handle(SpillRequest::Fetch { chunk: 0 });
+            drive(&mut h.task);
+            h.state.try_lease(0).expect("lease");
+            h.state.release(0, true);
+            h.task.handle(SpillRequest::Wrote { chunk: 0 });
+
+            let inbox = Arc::new(Mutex::new(Vec::new()));
+            h.task.handle(SpillRequest::Flush {
+                reply: FlushReply::new(inbox.clone(), 1),
+            });
+            h.task.update(); // the base flush is on its way
+
+            // The evictor takes it, and it may come back somewhere else.
+            let slot = h.state.get(0).slot;
+            h.state.begin_evict(0).expect("evict");
+            h.state.finish_evict(0).expect("finish");
+            if refetched {
+                let elsewhere = (slot + 1) % SLOTS;
+                assert!(h.state.begin_fill(0, elsewhere));
+                assert!(h.state.finish_fill(0, false));
+            }
+
+            drive(&mut h.task);
+
+            assert_eq!(*inbox.lock().unwrap(), vec![(1, true)]);
+            assert_eq!(
+                h.task.map().authority(0),
+                Authority::Zero,
+                "the flush published a chunk that had moved (refetched: {refetched})"
+            );
+        }
     }
 
     /// What the map says on reopening is what the task starts from: chunks in

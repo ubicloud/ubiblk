@@ -166,7 +166,7 @@ impl SpillIoChannel {
         self.queue.push_back(id);
     }
 
-    fn ask(&self, request: SpillRequest) {
+    fn ask(&self, request: SpillRequest) -> bool {
         let message = match request {
             SpillRequest::Fetch { chunk } => BgWorkerRequest::SpillFetch { chunk },
             SpillRequest::MakeRoom => BgWorkerRequest::SpillMakeRoom,
@@ -176,7 +176,9 @@ impl SpillIoChannel {
         };
         if let Err(e) = self.requests.send(message) {
             error!("The spill task is not listening: {e}");
+            return false;
         }
+        true
     }
 
     fn finish(&mut self, id: usize, ok: bool) {
@@ -265,8 +267,10 @@ impl SpillIoChannel {
                 request.ok = false;
                 return true;
             }
-            self.ask(SpillRequest::Fetch { chunk });
-            self.ask(SpillRequest::MakeRoom);
+            if !self.ask(SpillRequest::Fetch { chunk }) || !self.ask(SpillRequest::MakeRoom) {
+                self.live.get_mut(&id).expect("live").ok = false;
+                return true;
+            }
             return false;
         };
 
@@ -377,9 +381,14 @@ impl IoChannel for SpillIoChannel {
 
     fn add_flush(&mut self, id: usize) {
         self.add(Kind::Flush, 0, 0, None, id);
-        self.ask(SpillRequest::Flush {
+        // Nothing else will ever answer it, so a flush the task cannot be told
+        // about fails now rather than waiting for a reply that is not coming.
+        if !self.ask(SpillRequest::Flush {
             reply: FlushReply::new(self.inbox.clone(), id),
-        });
+        }) {
+            self.queue.retain(|queued| *queued != id);
+            self.finish(id, false);
+        }
     }
 
     fn submit(&mut self) -> Result<()> {

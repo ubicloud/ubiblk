@@ -46,6 +46,10 @@ const MAP_JOURNAL_BLOCKS: u64 = 1024;
 /// How many chunks the spill task moves at once.
 const SPILL_CONCURRENCY: usize = 4;
 
+/// How much memory the per-chunk state may take. At the default chunk size
+/// this is a device of about 4 TiB; a larger one needs larger chunks.
+const MAX_CHUNK_STATE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// What the worker thread needs to build the spill task once it is on it.
 struct SpillTaskConfig {
     base: Box<dyn BlockDevice>,
@@ -291,13 +295,31 @@ impl BackendEnv {
         .context("Failed to build the disk the slots live on")?;
 
         let chunk_sectors = chunk_bytes / SECTOR_SIZE as u64;
-        let device_sectors = spill
-            .size_mb
-            .saturating_mul(1024 * 1024)
-            .div_ceil(SECTOR_SIZE as u64);
+        let device_bytes = spill.size_mb.checked_mul(1024 * 1024).ok_or_else(|| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: format!("size_mb {} is not a size", spill.size_mb),
+            })
+        })?;
+        let device_sectors = device_bytes.div_ceil(SECTOR_SIZE as u64);
         if device_sectors == 0 {
             return Err(crate::ubiblk_error!(InvalidParameter {
                 description: "size_mb is zero, so there is no device".to_string(),
+            }));
+        }
+        // Every chunk costs a word of memory whether or not anything is ever
+        // written to it, so a device can be too large to serve with a chunk
+        // this small.
+        let chunk_count = device_sectors.div_ceil(chunk_sectors);
+        let state_bytes = chunk_count.saturating_mul(8);
+        if state_bytes > MAX_CHUNK_STATE_BYTES {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "a {} MiB device in {} KiB chunks needs {} MiB just to track them; \
+                     use a larger chunk_kb",
+                    spill.size_mb,
+                    spill.chunk_kb,
+                    state_bytes / (1024 * 1024)
+                ),
             }));
         }
         let slot_count = base.sector_count() / chunk_sectors;
@@ -1358,6 +1380,23 @@ mod tests {
                 Box::new(|c: &mut v2::Config| {
                     if let Some(spill) = &mut c.spill {
                         spill.chunk_kb = 1024;
+                    }
+                }),
+            ),
+            (
+                "a device too large to track in chunks that small",
+                Box::new(|c: &mut v2::Config| {
+                    if let Some(spill) = &mut c.spill {
+                        spill.size_mb = 64 * 1024 * 1024; // 64 TiB
+                        spill.chunk_kb = 4;
+                    }
+                }),
+            ),
+            (
+                "a size that is not a size",
+                Box::new(|c: &mut v2::Config| {
+                    if let Some(spill) = &mut c.spill {
+                        spill.size_mb = u64::MAX;
                     }
                 }),
             ),

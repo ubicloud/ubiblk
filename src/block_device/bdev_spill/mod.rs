@@ -2,3 +2,4 @@
 //! rest in an object store.
 
 pub mod map;
+pub mod state;

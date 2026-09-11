@@ -439,6 +439,7 @@ mod tests {
 
     struct Stack {
         channel: Box<dyn IoChannel>,
+        device: Box<dyn BlockDevice>,
         task: SpillTask,
         inbox: Receiver<BgWorkerRequest>,
         base: Box<TestBlockDevice>,
@@ -474,6 +475,7 @@ mod tests {
             SpillBlockDevice::new(base.clone(), state, geometry(), sender).expect("device");
         Stack {
             channel: device.create_channel().expect("channel"),
+            device,
             task,
             inbox,
             base,
@@ -490,8 +492,16 @@ mod tests {
         /// Drive both sides until the channel has nothing left, as a frontend
         /// and the worker thread would between them.
         fn run(&mut self) -> Vec<(usize, bool)> {
+            self.run_with(&mut [])
+        }
+
+        /// The same, with other channels of the same device in play.
+        fn run_with(&mut self, others: &mut [Box<dyn IoChannel>]) -> Vec<(usize, bool)> {
             let mut done = Vec::new();
             self.channel.submit().expect("submit");
+            for other in others.iter_mut() {
+                other.submit().expect("submit");
+            }
             for _ in 0..2000 {
                 while let Ok(request) = self.inbox.try_recv() {
                     match request {
@@ -513,7 +523,10 @@ mod tests {
                 }
                 self.task.update();
                 done.extend(self.channel.poll());
-                if !self.channel.busy() {
+                for other in others.iter_mut() {
+                    done.extend(other.poll());
+                }
+                if !self.channel.busy() && !others.iter().any(|other| other.busy()) {
                     return done;
                 }
             }
@@ -615,6 +628,59 @@ mod tests {
             read.iter().all(|b| *b == 0xD4),
             "what came back is not what was written before the chunk was evicted"
         );
+    }
+
+    /// Two channels wanting the same chunk at the same time. One fetch brings
+    /// it in and both get the data; neither installs a second copy.
+    #[test]
+    fn two_channels_missing_the_same_chunk_both_get_it() {
+        let mut stack = stack();
+        assert!(stack.write(0, 1, 0x77));
+        // Push it out to the store.
+        assert!(stack.write(CHUNK_SECTORS, 1, 0x01));
+        assert!(stack.write(CHUNK_SECTORS * 2, 1, 0x02));
+
+        let mut second = stack.device.create_channel().expect("a second channel");
+        let first_buf = shared_buffer(SECTOR_SIZE);
+        let second_buf = shared_buffer(SECTOR_SIZE);
+        let (a, b) = (stack.id(), stack.id());
+        stack.channel.add_read(0, 1, first_buf.clone(), a);
+        second.add_read(0, 1, second_buf.clone(), b);
+
+        let mut done = stack.run_with(std::slice::from_mut(&mut second));
+        done.sort();
+
+        assert_eq!(done, vec![(a, true), (b, true)]);
+        assert!(first_buf.borrow().as_slice().iter().all(|x| *x == 0x77));
+        assert!(second_buf.borrow().as_slice().iter().all(|x| *x == 0x77));
+    }
+
+    /// Two channels writing different parts of one chunk. Both land: neither
+    /// reads the slot, changes its copy and writes the whole thing back.
+    #[test]
+    fn two_channels_writing_one_chunk_do_not_lose_each_other() {
+        let mut stack = stack();
+        assert!(stack.write(0, 1, 0x10));
+
+        let mut second = stack.device.create_channel().expect("a second channel");
+        let first_buf = shared_buffer(SECTOR_SIZE);
+        first_buf.borrow_mut().as_mut_slice().fill(0xAA);
+        let second_buf = shared_buffer(SECTOR_SIZE);
+        second_buf.borrow_mut().as_mut_slice().fill(0xBB);
+        let (a, b) = (stack.id(), stack.id());
+        stack.channel.add_write(1, 1, first_buf, a);
+        second.add_write(2, 1, second_buf, b);
+
+        let mut done = stack.run_with(std::slice::from_mut(&mut second));
+        done.sort();
+        assert_eq!(done, vec![(a, true), (b, true)]);
+
+        let read = stack.read(0, 3).expect("read");
+        assert!(read[..SECTOR_SIZE].iter().all(|x| *x == 0x10));
+        assert!(read[SECTOR_SIZE..2 * SECTOR_SIZE]
+            .iter()
+            .all(|x| *x == 0xAA));
+        assert!(read[2 * SECTOR_SIZE..].iter().all(|x| *x == 0xBB));
     }
 
     #[test]

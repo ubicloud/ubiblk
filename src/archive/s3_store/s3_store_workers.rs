@@ -165,9 +165,10 @@ mod tests {
 
     use aws_sdk_s3::error::ErrorMetadata;
     use aws_sdk_s3::operation::{get_object::GetObjectOutput, put_object::PutObjectOutput};
-    use aws_smithy_mocks::{mock, mock_client, Rule};
+    use aws_smithy_mocks::{mock, Rule};
     use crossbeam_channel::unbounded;
 
+    use super::super::tests::mock_s3_client;
     use super::*;
 
     #[derive(Debug)]
@@ -226,7 +227,7 @@ mod tests {
         let (request_tx, request_rx) = unbounded();
         let (result_tx, result_rx) = unbounded();
         let workers = spawn_workers(
-            mock_client!(aws_sdk_s3, rules),
+            mock_s3_client(rules),
             Arc::new("test-bucket".to_string()),
             1,
             request_rx,

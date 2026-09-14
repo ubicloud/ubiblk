@@ -253,7 +253,9 @@ mod tests {
             });
 
         v2::Config {
+            spill: None,
             device: DeviceSection {
+                stripe_sector_count_shift: None,
                 data_path: "/tmp/non-existent-disk".into(),
                 metadata_path: None,
                 vhost_socket: None,

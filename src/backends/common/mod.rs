@@ -537,7 +537,9 @@ mod tests {
         stripe_source: Option<StripeSourceConfig>,
     ) -> v2::Config {
         v2::Config {
+            spill: None,
             device: DeviceSection {
+                stripe_sector_count_shift: None,
                 data_path: data_path.to_path_buf(),
                 metadata_path: metadata_path.map(|path| path.to_path_buf()),
                 vhost_socket: None,

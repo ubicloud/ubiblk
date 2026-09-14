@@ -1,6 +1,7 @@
 pub mod includes;
 pub mod load;
 pub mod secrets;
+pub mod spill;
 pub mod stripe_source;
 pub mod tuning;
 
@@ -21,6 +22,7 @@ pub const MAX_NUM_QUEUES: usize = 63;
 /// validation checks have passed.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub spill: Option<spill::SpillSection>,
     pub device: DeviceSection,
     pub tuning: tuning::TuningSection,
     pub encryption: Option<EncryptionSection>,
@@ -121,6 +123,7 @@ impl DangerZone {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct DeviceSection {
+    pub stripe_sector_count_shift: Option<u8>,
     pub data_path: PathBuf,
     pub metadata_path: Option<PathBuf>,
     pub vhost_socket: Option<PathBuf>,

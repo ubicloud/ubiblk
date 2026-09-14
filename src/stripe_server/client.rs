@@ -604,7 +604,9 @@ mod tests {
         let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, stripe_count, stripe_count));
 
         let config = v2::Config {
+            spill: None,
             device: DeviceSection {
+                stripe_sector_count_shift: None,
                 data_path: overlay_file.path().into(),
                 metadata_path: None,
                 vhost_socket: None,

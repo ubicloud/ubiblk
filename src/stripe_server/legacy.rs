@@ -238,7 +238,9 @@ pub fn load_legacy_config(config_path: &Path, kek_path: Option<&Path>) -> Result
     };
 
     Ok(v2::Config {
+        spill: None,
         device: DeviceSection {
+            stripe_sector_count_shift: None,
             data_path: options.path.into(),
             metadata_path: options.metadata_path.map(Into::into),
             vhost_socket: None,

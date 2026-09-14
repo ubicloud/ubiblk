@@ -104,7 +104,9 @@ mod tests {
         socket_path: Option<&std::path::Path>,
     ) -> v2::Config {
         v2::Config {
+            spill: None,
             device: v2::DeviceSection {
+                stripe_sector_count_shift: None,
                 data_path: disk_path.to_path_buf(),
                 vhost_socket: socket_path.map(|p| p.to_path_buf()),
                 metadata_path: None,

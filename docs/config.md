@@ -15,6 +15,7 @@ A config file has these top-level sections:
 | `[encryption]` | yes* | Encryption key reference |
 | `[danger_zone]` | no | Safety overrides for development |
 | `[stripe_source]` | no | Where to fetch stripes from |
+| `[spill]` | no | Nonpersistent single-queue spill device; see [spill](spill.md) |
 | `[secrets.*]` | no | Named secret definitions |
 
 \* Encryption is required unless `danger_zone.allow_unencrypted_disk = true`.
@@ -54,6 +55,7 @@ track_written = false                    # optional, default: false
 |-------|------|----------|---------|-------------|
 | `data_path` | path | yes | — | Base block device or file |
 | `metadata_path` | path | no | — | Stripe metadata file |
+| `stripe_sector_count_shift` | integer | no | 11 for spill without metadata | Common stripe geometry; 6–16, must match supplied metadata |
 | `vhost_socket` | path | no | — | vhost-user socket path (required for `vhost-backend`) |
 | `rpc_socket` | path | no | — | RPC Unix socket path |
 | `device_id` | string | no | `"ubiblk"` | Identifier returned to the guest |
@@ -454,3 +456,14 @@ autofetch = true
 identity = "client1"
 secret.ref = "psk-secret"
 ```
+
+## `[spill]`
+
+The [single-queue spill prototype](spill.md) exposes `size_mb` MiB over a smaller
+local disk. It requires ublk with `num_queues = 1` and encryption, and refuses
+write-through and lazy stripe sources. The nested `[spill.store]` uses the
+existing archive storage schema, including its path or S3 prefix.
+
+This mode starts a fresh logical device on each run. FLUSH is a no-op, and
+previous objects are neither recovered nor collected. Generic tool paths and
+virtio/vhost reject spill configurations.

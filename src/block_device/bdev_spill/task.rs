@@ -85,6 +85,10 @@ pub struct SpillTask {
     eviction_failures: u32,
     cursor: usize,
     deadline: Duration,
+    /// Store operations started and not yet answered, including ones given up
+    /// on at their deadline: the store still holds them, and their data.
+    store_ops: usize,
+    max_transfers: usize,
 }
 
 impl SpillTask {
@@ -126,11 +130,27 @@ impl SpillTask {
             eviction_failures: 0,
             cursor: 0,
             deadline: STORE_DEADLINE,
+            store_ops: 0,
+            max_transfers,
         }
     }
 
     pub fn busy(&self) -> bool {
-        !self.fetches.is_empty() || !self.evictions.is_empty() || self.channel.busy()
+        !self.fetches.is_empty()
+            || !self.evictions.is_empty()
+            || self.store_ops > 0
+            || self.channel.busy()
+    }
+
+    /// Whether another store operation may start. Evictions still reading
+    /// their slot count too, since each is about to upload.
+    fn store_has_room(&self) -> bool {
+        let reading = self
+            .evictions
+            .values()
+            .filter(|evict| matches!(evict.state, EvictState::ReadingSlot))
+            .count();
+        self.store_ops + reading < self.max_transfers
     }
 
     pub fn handle_fetch_request(&mut self, stripe: usize, attempt: u64) {
@@ -189,6 +209,10 @@ impl SpillTask {
                 self.slots[slot as usize] = Slot::Filling(stripe);
                 self.fetches.get_mut(&stripe).expect("fetch").slot = Some(slot);
             }
+            if self.objects.contains_key(&stripe) && !self.store_has_room() {
+                waiting.push_back(stripe);
+                continue;
+            }
             let Some(buffer) = self.buffers.get_buffer() else {
                 waiting.push_back(stripe);
                 continue;
@@ -208,6 +232,7 @@ impl SpillTask {
                         since: Instant::now(),
                     };
                     self.store.start_get_object(name);
+                    self.store_ops += 1;
                 }
             }
         }
@@ -258,7 +283,10 @@ impl SpillTask {
     }
 
     fn poll_store(&mut self) {
-        for (name, result) in self.store.poll_gets() {
+        let gets = self.store.poll_gets();
+        let puts = self.store.poll_puts();
+        self.store_ops -= gets.len() + puts.len();
+        for (name, result) in gets {
             let stripe = self
                 .fetches
                 .iter()
@@ -270,7 +298,7 @@ impl SpillTask {
                 self.fetched(stripe, result);
             }
         }
-        for (name, result) in self.store.poll_puts() {
+        for (name, result) in puts {
             let stripe = self
                 .evictions
                 .iter()
@@ -372,6 +400,10 @@ impl SpillTask {
                 needed -= 1;
                 continue;
             }
+            if !self.store_has_room() {
+                self.metadata.abort_eviction(stripe);
+                return;
+            }
             let Some(buffer) = self.buffers.get_buffer() else {
                 self.metadata.abort_eviction(stripe);
                 return;
@@ -412,6 +444,7 @@ impl SpillTask {
         let name = format!("{}/stripe-{stripe}/{}", self.run_id, self.next_object);
         self.next_object += 1;
         self.store.start_put_object(&name, data);
+        self.store_ops += 1;
         evict.state = EvictState::Uploading {
             name,
             digest,
@@ -516,25 +549,34 @@ mod tests {
     const STRIPE_SECTORS: u64 = 8;
     const STRIPE_BYTES: usize = STRIPE_SECTORS as usize * SECTOR_SIZE;
 
-    /// A store that can be told to fail uploads or to never answer fetches.
+    type HeldGets = Rc<std::cell::RefCell<Vec<String>>>;
+    type HeldPuts = Rc<std::cell::RefCell<Vec<(String, Vec<u8>)>>>;
+
+    /// A store that can be told to fail uploads, or to sit on every request
+    /// until it is told to answer.
     struct TestStore {
         inner: MemStore,
         fail_puts: Rc<Cell<bool>>,
-        hang_gets: Rc<Cell<bool>>,
+        hang: Rc<Cell<bool>>,
+        held_gets: HeldGets,
+        held_puts: HeldPuts,
     }
 
     impl ArchiveStore for TestStore {
         fn start_put_object(&mut self, name: &str, data: Vec<u8>) {
-            self.inner.start_put_object(name, data);
+            self.held_puts.borrow_mut().push((name.to_string(), data));
         }
 
         fn start_get_object(&mut self, name: &str) {
-            if !self.hang_gets.get() {
-                self.inner.start_get_object(name);
-            }
+            self.held_gets.borrow_mut().push(name.to_string());
         }
 
         fn poll_puts(&mut self) -> Vec<(String, crate::Result<()>)> {
+            if !self.hang.get() {
+                for (name, data) in self.held_puts.borrow_mut().drain(..) {
+                    self.inner.start_put_object(&name, data);
+                }
+            }
             let fail = self.fail_puts.get();
             self.inner
                 .poll_puts()
@@ -554,6 +596,11 @@ mod tests {
         }
 
         fn poll_gets(&mut self) -> Vec<(String, crate::Result<Vec<u8>>)> {
+            if !self.hang.get() {
+                for name in std::mem::take(&mut *self.held_gets.borrow_mut()) {
+                    self.inner.start_get_object(&name);
+                }
+            }
             self.inner.poll_gets()
         }
     }
@@ -564,7 +611,9 @@ mod tests {
         disk: TestBlockDevice,
         objects: Rc<std::cell::RefCell<HashMap<String, Vec<u8>>>>,
         fail_puts: Rc<Cell<bool>>,
-        hang_gets: Rc<Cell<bool>>,
+        hang: Rc<Cell<bool>>,
+        held_gets: HeldGets,
+        held_puts: HeldPuts,
     }
 
     fn harness(stripes: usize, slots: u32) -> Harness {
@@ -573,11 +622,15 @@ mod tests {
         let inner = MemStore::new();
         let objects = inner.objects.clone();
         let fail_puts = Rc::new(Cell::new(false));
-        let hang_gets = Rc::new(Cell::new(false));
+        let hang = Rc::new(Cell::new(false));
+        let held_gets = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let held_puts = Rc::new(std::cell::RefCell::new(Vec::new()));
         let store = TestStore {
             inner,
             fail_puts: fail_puts.clone(),
-            hang_gets: hang_gets.clone(),
+            hang: hang.clone(),
+            held_gets: held_gets.clone(),
+            held_puts: held_puts.clone(),
         };
         let task = SpillTask::new(
             metadata.clone(),
@@ -594,7 +647,9 @@ mod tests {
             disk,
             objects,
             fail_puts,
-            hang_gets,
+            hang,
+            held_gets,
+            held_puts,
         }
     }
 
@@ -646,6 +701,46 @@ mod tests {
                 STRIPE_BYTES,
             );
             self.metadata.finish(stripe, true, true);
+        }
+
+        /// Admit a request for a stripe, as a new guest request would, without
+        /// waiting for the answer. Returns the attempt it joined.
+        fn start(&mut self, stripe: usize) -> Option<u64> {
+            let mut joined = None;
+            if let Decision::Wait {
+                fetch: Some(attempt),
+            } = self.metadata.admit(stripe, &mut joined)
+            {
+                self.task.handle_fetch_request(stripe, attempt);
+            }
+            joined
+        }
+
+        /// See requests from `start` through to their end, together, since a
+        /// request holding its stripe can be what another is waiting for.
+        fn settle(&mut self, mut requests: Vec<(usize, Option<u64>)>) {
+            for _ in 0..1000 {
+                requests.retain_mut(|(stripe, joined)| {
+                    match self.metadata.retry(*stripe, joined) {
+                        Decision::Ready { .. } => {
+                            self.metadata.finish(*stripe, false, true);
+                            false
+                        }
+                        Decision::Fail => false,
+                        Decision::Wait { fetch } => {
+                            if let Some(attempt) = fetch {
+                                self.task.handle_fetch_request(*stripe, attempt);
+                            }
+                            true
+                        }
+                    }
+                });
+                if requests.is_empty() {
+                    return;
+                }
+                self.task.update();
+            }
+            panic!("{} requests never settled", requests.len());
         }
 
         fn state(&self, stripe: usize) -> StripeState {
@@ -808,10 +903,80 @@ mod tests {
         let mut h = harness(4, 1);
         h.write(0, 0xAB);
         h.read(1);
-        h.hang_gets.set(true);
+        h.hang.set(true);
         h.task.set_deadline(Duration::ZERO);
 
         assert_eq!(h.admit(0), Decision::Fail);
+
+        // The store still has the request, so the task keeps listening for it.
+        assert!(h.task.busy());
+        h.hang.set(false);
+        h.run(1);
         assert!(!h.task.busy());
+    }
+
+    /// The same for fetches: a stripe asked for again after its fetch timed
+    /// out does not start another request while the store holds too many.
+    #[test]
+    fn fetches_given_up_on_still_count_against_the_transfer_limit() {
+        let mut h = harness(64, 4);
+        for stripe in 0..9 {
+            h.write(stripe, stripe as u8);
+        }
+        for stripe in 60..64 {
+            h.read(stripe);
+        }
+        assert!(h.objects.borrow().len() >= 9, "not everything was uploaded");
+        h.hang.set(true);
+        h.task.set_deadline(Duration::ZERO);
+
+        let mut requests = Vec::new();
+        for _ in 0..5 {
+            for stripe in 0..9 {
+                requests.push((stripe, h.start(stripe)));
+                h.run(3);
+                assert!(
+                    h.held_gets.borrow().len() <= 4,
+                    "{} fetches outstanding with 4 transfers allowed",
+                    h.held_gets.borrow().len()
+                );
+            }
+        }
+
+        h.hang.set(false);
+        h.task.set_deadline(STORE_DEADLINE);
+        h.settle(requests);
+        assert_eq!(h.read(3).expect("read")[0], 3);
+    }
+
+    /// Giving up on a store request at its deadline does not take it out of
+    /// the store, which keeps its own copy of the data. Those still count, so
+    /// a store that stops answering holds at most `max_transfers` of them.
+    #[test]
+    fn requests_given_up_on_still_count_against_the_transfer_limit() {
+        let mut h = harness(64, 2);
+        h.write(0, 0x11);
+        h.write(1, 0x22);
+        h.hang.set(true);
+        h.task.set_deadline(Duration::ZERO);
+
+        let mut requests = Vec::new();
+        for stripe in 2..20 {
+            requests.push((stripe, h.start(stripe)));
+            h.run(10);
+            assert!(
+                h.held_puts.borrow().len() <= 4,
+                "{} uploads outstanding with 4 transfers allowed",
+                h.held_puts.borrow().len()
+            );
+        }
+        assert!(h.task.busy());
+
+        // Once the store answers, the budget comes back and room can be made.
+        h.hang.set(false);
+        h.task.set_deadline(STORE_DEADLINE);
+        h.settle(requests);
+        h.write(20, 0x33);
+        assert_eq!(h.read(20).expect("read")[0], 0x33);
     }
 }

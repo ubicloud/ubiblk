@@ -80,6 +80,7 @@ jobs:
           export PATH="$PWD/target/debug:$PATH"
           blkbench="$PWD/blkbench-src/blkbench"
           cd target/tests/blkbench
+          rm -f vhost.sock
           vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
           pid=$!
           for _ in $(seq 1 50); do [ -S vhost.sock ] && break; sleep 0.1; done
@@ -101,6 +102,7 @@ jobs:
           export PATH="$PWD/target/debug:$PATH"
           blkbench="$PWD/blkbench-src/blkbench"
           cd target/tests/blkbench
+          rm -f vhost.sock
           vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
           pid=$!
           for _ in $(seq 1 50); do [ -S vhost.sock ] && break; sleep 0.1; done

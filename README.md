@@ -176,7 +176,7 @@ init-metadata --config <CONFIG_TOML> [--stripe-sector-count-shift <SHIFT>]
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
 | `--config` | `-f` | yes | Path to the backend configuration file |
-| `--stripe-sector-count-shift` | `-s` | no | Stripe size as a power of two sectors (default: 11) |
+| `--stripe-sector-count-shift` | `-s` | no | Stripe size as a power of two sectors (default: `device.stripe_sector_count_shift`, else 11) |
 
 ## Developer Tools
 

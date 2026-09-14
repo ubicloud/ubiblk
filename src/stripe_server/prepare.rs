@@ -22,6 +22,13 @@ fn mark_no_source_stripes_written(metadata: &mut UbiMetadata) {
 }
 
 pub fn prepare_stripe_server(config: &v2::Config) -> Result<Arc<StripeServer>> {
+    if config.spill.is_some() {
+        // Its data disk is a pool of slots in no particular order, not the
+        // device, and what did not fit is in the store.
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "a spill device cannot be served as a stripe source".to_string(),
+        }));
+    }
     let stripe_device = build_block_device(&config.device.data_path, config, false)?;
     let (metadata, source_builder): (Arc<UbiMetadata>, Option<StripeSourceBuilder>) =
         if let Some(metadata_path) = config.device.metadata_path.as_deref() {
@@ -93,6 +100,7 @@ mod tests {
                 rpc_socket: None,
                 device_id: "ubiblk".to_string(),
                 track_written,
+                stripe_sector_count_shift: None,
             },
             tuning: v2::tuning::TuningSection {
                 queue_size: 128,
@@ -108,8 +116,33 @@ mod tests {
                 allow_env_secrets: false,
             },
             stripe_source: None,
+            spill: None,
             secrets: std::collections::HashMap::new(),
         }
+    }
+
+    #[test]
+    fn a_spill_device_is_not_served() -> Result<()> {
+        let storage_file = NamedTempFile::new()?;
+        storage_file.as_file().set_len(16 * STRIPE_SIZE)?;
+        let mut config = config(
+            storage_file.path().to_str().unwrap().to_string(),
+            None,
+            false,
+        );
+        config.spill = Some(v2::spill::SpillSection {
+            size_mb: 1024,
+            store: v2::stripe_source::ArchiveStorageConfig::Filesystem {
+                path: "cold".into(),
+                archive_kek: None,
+                autofetch: false,
+            },
+            max_concurrent_transfers: 1,
+        });
+
+        let err = prepare_stripe_server(&config).err().expect("refused");
+        assert!(err.to_string().contains("cannot be served"), "{err}");
+        Ok(())
     }
 
     #[test]

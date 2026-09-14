@@ -16,6 +16,11 @@ use crate::{
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
 
 pub fn block_backend_loop(config: &v2::Config) -> Result<()> {
+    if config.spill.is_some() {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "spill is only supported by the ublk backend".to_string(),
+        }));
+    }
     run_backend_loop(config, "vhost-user-blk", true, serve_vhost)
 }
 
@@ -111,11 +116,13 @@ mod tests {
                 rpc_socket: None,
                 device_id: "test-device".to_string(),
                 track_written: false,
+                stripe_sector_count_shift: None,
             },
             tuning: v2::tuning::TuningSection::default(),
             encryption: None,
             danger_zone: test_danger_zone(),
             stripe_source: None,
+            spill: None,
             secrets: std::collections::HashMap::new(),
         }
     }
@@ -133,6 +140,33 @@ mod tests {
             crate::UbiblkError::InvalidParameter { description, .. }
             if description == "socket must be specified for the vhost backend"
         ));
+    }
+
+    #[test]
+    fn the_vhost_backend_refuses_spill() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = test_config_with_socket(
+            &dir.path().join("disk.raw"),
+            Some(&dir.path().join("vhost.sock")),
+        );
+        config.spill = Some(v2::spill::SpillSection {
+            size_mb: 64,
+            store: v2::stripe_source::ArchiveStorageConfig::Filesystem {
+                path: dir.path().join("cold"),
+                archive_kek: None,
+                autofetch: false,
+            },
+            max_concurrent_transfers: 1,
+        });
+
+        let err = block_backend_loop(&config).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("only supported by the ublk backend"),
+            "{err}"
+        );
+        assert!(!dir.path().join("vhost.sock").exists());
     }
 
     /// Test that serve_vhost creates a socket, sets permissions, and handles

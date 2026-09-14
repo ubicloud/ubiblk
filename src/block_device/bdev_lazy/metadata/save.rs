@@ -9,7 +9,8 @@ use crate::{
 
 pub const METADATA_WRITE_ID: usize = 0;
 pub const METADATA_FLUSH_ID: usize = 1;
-pub const DEFAULT_STRIPE_SECTOR_COUNT_SHIFT: u8 = 11;
+pub const DEFAULT_STRIPE_SECTOR_COUNT_SHIFT: u8 =
+    crate::config::v2::DEFAULT_STRIPE_SECTOR_COUNT_SHIFT;
 
 impl UbiMetadata {
     #[error_context("Failed to save metadata to block device")]

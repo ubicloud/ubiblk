@@ -15,6 +15,10 @@ stops ublk devices being created at all is otherwise green everywhere.
 | `device_appears_with_the_right_size` | A device is created and the kernel reports the size it was configured with. |
 | `data_reads_back_as_written` | 64 MiB written through the device reads back unchanged. |
 | `shutdown_removes_the_device` | SIGINT takes the device node and its symlink away rather than leaving a node nothing serves. |
+| `a_device_the_kernel_refuses_is_reported` | A queue depth the kernel refuses makes the backend exit with an error instead of waiting. |
+| `a_spill_device_is_larger_than_its_disk` | A 512 MiB spill device over a 64 MiB disk has the configured size, and the kernel splits requests at the stripe size. |
+| `a_spill_device_keeps_more_than_its_disk_holds` | 192 MiB written through that device reads back unchanged, with the stripes that did not fit in the store. |
+| `a_request_across_stripes_is_split_by_the_kernel` | A write straddling two stripes succeeds and reads back. |
 
 ## Files
 

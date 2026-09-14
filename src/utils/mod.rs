@@ -4,6 +4,7 @@ pub mod block;
 pub mod hash;
 pub mod s3;
 pub mod security;
+pub mod spin_lock;
 pub mod umask_guard;
 
 pub use aligned_buffer::AlignedBuf;

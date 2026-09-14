@@ -3,15 +3,18 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use log::{error, info};
 
 use super::bdev_lazy::bgworker::LazyTask;
+use super::bdev_spill::task::SpillTask;
 
 pub enum BgWorkerRequest {
     Fetch { stripe_id: usize },
     SetWritten { stripe_id: usize },
+    SpillFetch { stripe: usize, attempt: u64 },
     Shutdown,
 }
 
 pub struct BgWorker {
     lazy: Option<LazyTask>,
+    spill: Option<SpillTask>,
     requests: Receiver<BgWorkerRequest>,
     done: bool,
 }
@@ -20,6 +23,7 @@ impl BgWorker {
     pub fn new(requests: Receiver<BgWorkerRequest>) -> Self {
         BgWorker {
             lazy: None,
+            spill: None,
             requests,
             done: false,
         }
@@ -27,6 +31,10 @@ impl BgWorker {
 
     pub fn set_lazy_task(&mut self, lazy: LazyTask) {
         self.lazy = Some(lazy);
+    }
+
+    pub fn set_spill_task(&mut self, spill: SpillTask) {
+        self.spill = Some(spill);
     }
 
     fn lazy(&mut self) -> Option<&mut LazyTask> {
@@ -48,6 +56,10 @@ impl BgWorker {
                     lazy.set_stripe_written(stripe_id);
                 }
             }
+            BgWorkerRequest::SpillFetch { stripe, attempt } => match &mut self.spill {
+                Some(spill) => spill.handle_fetch_request(stripe, attempt),
+                None => error!("Request for a spill task the worker does not have"),
+            },
             BgWorkerRequest::Shutdown => {
                 info!("Received shutdown request, stopping worker");
                 self.done = true;
@@ -84,10 +96,14 @@ impl BgWorker {
         if let Some(lazy) = &mut self.lazy {
             lazy.update();
         }
+        if let Some(spill) = &mut self.spill {
+            spill.update();
+        }
     }
 
     fn busy(&self) -> bool {
         self.lazy.as_ref().is_some_and(|lazy| lazy.busy())
+            || self.spill.as_ref().is_some_and(|spill| spill.busy())
     }
 
     pub fn run(&mut self) {

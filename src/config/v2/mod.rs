@@ -1,6 +1,7 @@
 pub mod includes;
 pub mod load;
 pub mod secrets;
+pub mod spill;
 pub mod stripe_source;
 pub mod tuning;
 
@@ -15,6 +16,12 @@ use crate::config::v2::{
 
 pub const MAX_NUM_QUEUES: usize = 63;
 
+/// Stripe geometry shared by the lazy and spill layers: a stripe is
+/// `2^shift` sectors.
+pub const DEFAULT_STRIPE_SECTOR_COUNT_SHIFT: u8 = 11;
+pub const MIN_STRIPE_SECTOR_COUNT_SHIFT: u8 = 6;
+pub const MAX_STRIPE_SECTOR_COUNT_SHIFT: u8 = 16;
+
 /// Fully resolved configuration loaded from TOML files.
 ///
 /// All secret references have been resolved to byte values, and all
@@ -26,6 +33,7 @@ pub struct Config {
     pub encryption: Option<EncryptionSection>,
     pub danger_zone: DangerZone,
     pub stripe_source: Option<stripe_source::StripeSourceConfig>,
+    pub spill: Option<spill::SpillSection>,
 
     /// Resolved secret values keyed by name.
     pub secrets: HashMap<String, secrets::ResolvedSecret>,
@@ -129,6 +137,26 @@ pub struct DeviceSection {
     pub device_id: String,
     #[serde(default)]
     pub track_written: bool,
+    #[serde(default)]
+    pub stripe_sector_count_shift: Option<u8>,
+}
+
+impl DeviceSection {
+    /// The configured stripe shift, or the default when none is set.
+    pub fn stripe_sector_count_shift(&self) -> crate::Result<u8> {
+        let shift = self
+            .stripe_sector_count_shift
+            .unwrap_or(DEFAULT_STRIPE_SECTOR_COUNT_SHIFT);
+        if !(MIN_STRIPE_SECTOR_COUNT_SHIFT..=MAX_STRIPE_SECTOR_COUNT_SHIFT).contains(&shift) {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "stripe_sector_count_shift {shift} is out of range \
+                     (must be {MIN_STRIPE_SECTOR_COUNT_SHIFT}..={MAX_STRIPE_SECTOR_COUNT_SHIFT})"
+                ),
+            }));
+        }
+        Ok(shift)
+    }
 }
 
 fn default_device_id() -> String {

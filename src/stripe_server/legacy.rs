@@ -245,6 +245,7 @@ pub fn load_legacy_config(config_path: &Path, kek_path: Option<&Path>) -> Result
             rpc_socket: None,
             device_id: "ubiblk".to_string(),
             track_written: options.track_written,
+            stripe_sector_count_shift: None,
         },
         tuning: v2::tuning::TuningSection {
             queue_size: 128,
@@ -259,6 +260,7 @@ pub fn load_legacy_config(config_path: &Path, kek_path: Option<&Path>) -> Result
                 autofetch: false,
                 copy_on_read: false,
             }),
+        spill: None,
         secrets,
     })
 }

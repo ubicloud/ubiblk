@@ -75,6 +75,12 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
 
     let (created_sender, created_receiver) = std::sync::mpsc::channel();
     let device = Device {
+        stripe_sectors: config
+            .spill
+            .as_ref()
+            .map(|_| config.device.stripe_sectors())
+            .transpose()?
+            .map(|n| n as u32),
         name: device_name,
         size: device_size,
         num_queues,
@@ -137,6 +143,7 @@ fn await_device_creation(
 
 /// What the device thread needs to build and serve the device.
 struct Device {
+    stripe_sectors: Option<u32>,
     name: String,
     size: u64,
     num_queues: u16,
@@ -187,14 +194,44 @@ fn run_ublk_device(
     let device_size = device.size;
     let alignment = device.alignment;
     let announce_symlink = device.symlink.clone();
+    let stripe_sectors = device.stripe_sectors;
+    let request_sectors = device.io_buf_bytes / SECTOR_SIZE as u32;
+    let (checked_tx, checked_rx) = std::sync::mpsc::channel();
     ctrl.run_target(
-        move |dev| configure_ublk_device(dev, device_size),
+        move |dev| {
+            configure_ublk_device(dev, device_size)?;
+            if let Some(stripe) = stripe_sectors {
+                apply_spill_limits(&mut dev.tgt.params.basic, stripe);
+            }
+            Ok(())
+        },
         move |qid, dev| {
             let io_tracker = io_trackers[qid as usize].clone();
             serve_ublk_queue(qid, dev, bdev.clone(), alignment, io_tracker)
         },
-        move |ctrl| announce_ublk_device(ctrl, announce_symlink.as_deref()),
+        move |ctrl| {
+            let checked = if let Some(stripe) = stripe_sectors {
+                let path =
+                    PathBuf::from(format!("/sys/block/ublkb{}/queue", ctrl.dev_info().dev_id));
+                verify_spill_limits(&path, stripe, request_sectors.min(stripe))
+            } else {
+                Ok(())
+            };
+            if checked.is_ok() {
+                announce_ublk_device(ctrl, announce_symlink.as_deref());
+            } else {
+                error!("Spill queue limits could not be verified; deleting device");
+                let _ = ctrl.del_dev();
+            }
+            let _ = checked_tx.send(checked);
+        },
     )?;
+
+    checked_rx.recv().map_err(|_| {
+        crate::ubiblk_error!(InvalidParameter {
+            description: "ublk startup did not verify queue limits".to_string()
+        })
+    })??;
 
     if let Some(symlink_path) = device.symlink.as_deref() {
         if let Err(err) = remove_device_symlink(symlink_path) {
@@ -227,6 +264,31 @@ fn configure_ublk_device(
     device_size: u64,
 ) -> std::result::Result<(), UblkError> {
     dev.set_default_params(device_size);
+    Ok(())
+}
+
+fn apply_spill_limits(params: &mut libublk::sys::ublk_param_basic, stripe: u32) {
+    params.chunk_sectors = stripe;
+    params.max_sectors = params.max_sectors.min(stripe);
+}
+
+fn verify_spill_limits(queue_path: &Path, stripe: u32, max_sectors: u32) -> Result<()> {
+    let read = |name: &str| -> Result<u64> {
+        let value = std::fs::read_to_string(queue_path.join(name))?;
+        value.trim().parse().map_err(|_| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: format!("invalid ublk queue limit {name}")
+            })
+        })
+    };
+    if read("chunk_sectors")? != u64::from(stripe)
+        || read("max_sectors_kb")?.saturating_mul(2) > u64::from(max_sectors)
+    {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "kernel did not preserve spill stripe boundaries or request size"
+                .to_string()
+        }));
+    }
     Ok(())
 }
 
@@ -597,5 +659,27 @@ mod tests {
             .expect_err("a creation that never completes must not succeed");
 
         assert!(err.contains("UBLK_U_CMD_ADD_DEV"), "{err}");
+    }
+    #[test]
+    fn spill_limits_cap_size_and_verify_the_kernel_boundary() {
+        let mut params = libublk::sys::ublk_param_basic {
+            max_sectors: 4096,
+            ..Default::default()
+        };
+        apply_spill_limits(&mut params, 2048);
+        assert_eq!(params.chunk_sectors, 2048);
+        assert_eq!(params.max_sectors, 2048);
+        params.max_sectors = 128;
+        apply_spill_limits(&mut params, 2048);
+        assert_eq!(params.max_sectors, 128);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("chunk_sectors"), "2048\n").unwrap();
+        std::fs::write(dir.path().join("max_sectors_kb"), "64\n").unwrap();
+        verify_spill_limits(dir.path(), 2048, 128).unwrap();
+        std::fs::write(dir.path().join("chunk_sectors"), "0\n").unwrap();
+        assert!(verify_spill_limits(dir.path(), 2048, 128).is_err());
+        std::fs::write(dir.path().join("chunk_sectors"), "2048\n").unwrap();
+        std::fs::write(dir.path().join("max_sectors_kb"), "128\n").unwrap();
+        assert!(verify_spill_limits(dir.path(), 2048, 128).is_err());
     }
 }

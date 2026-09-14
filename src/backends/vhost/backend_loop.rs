@@ -16,6 +16,11 @@ use crate::{
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
 
 pub fn block_backend_loop(config: &v2::Config) -> Result<()> {
+    if config.spill.is_some() {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "spill supports ublk only, not virtio/vhost".to_string()
+        }));
+    }
     run_backend_loop(config, "vhost-user-blk", true, serve_vhost)
 }
 

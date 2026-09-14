@@ -52,6 +52,10 @@ impl BackendEnv {
     #[error_context("Failed to build backend environment")]
     pub fn build(config: &v2::Config) -> Result<Self> {
         let alignment = Self::determine_alignment(&config.device.data_path)?;
+        config.device.validate_stripe_geometry()?;
+        if config.spill.is_some() {
+            return Self::build_with_spill(config, alignment);
+        }
 
         let disk_device = build_block_device(&config.device.data_path, config, false)
             .context("Failed to build disk device")?;
@@ -79,6 +83,82 @@ impl BackendEnv {
                 Self::build_with_bgworker(disk_device, metadata_dev, config, alignment)
             }
         }
+    }
+
+    fn build_with_spill(config: &v2::Config, alignment: usize) -> Result<Self> {
+        use crate::block_device::bdev_spill::{Geometry, SpillBlockDevice};
+        let refuse = |message: &str| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: message.to_string()
+            })
+        };
+        if config.tuning.num_queues != 1 || config.tuning.write_through {
+            return Err(refuse(
+                "spill requires num_queues = 1 and write_through = false",
+            ));
+        }
+        if config.stripe_source.is_some() {
+            return Err(refuse(
+                "a fresh, nonpersistent spill device cannot use a lazy stripe source",
+            ));
+        }
+        if config.encryption.is_none() {
+            return Err(refuse(
+                "spill requires encryption above its local and object storage",
+            ));
+        }
+        let mut config = config.clone();
+        // A metadata file can supply geometry, but its fetched/written bits
+        // cannot describe this run's fresh logical device.
+        if let Some(path) = &config.device.metadata_path {
+            let mut metadata_config = config.clone();
+            metadata_config.spill = None;
+            let metadata_device = build_block_device(path, &metadata_config, true)?;
+            let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
+            Self::check_stripe_geometry(&config, metadata.stripe_sector_count())?;
+            config.device.stripe_sector_count_shift =
+                Some(metadata.stripe_sector_count().trailing_zeros() as u8);
+        }
+        let spill = config.spill.as_ref().expect("checked spill");
+        spill.validate(&config.secrets)?;
+        let base = create_io_engine_device(
+            config.tuning.io_engine.clone(),
+            config.device.data_path.clone(),
+            config.tuning.queue_size,
+            false,
+            true,
+            false,
+        )?;
+        let geometry = Geometry::new(
+            config.device.stripe_sectors()?,
+            spill.sector_count()?,
+            base.sector_count(),
+        )?;
+        let bdev =
+            SpillBlockDevice::new(base, geometry, spill.store.clone(), config.secrets.clone());
+        let bdev = wrap_with_encryption(bdev, &config)?;
+        let io_trackers = Self::build_io_trackers(&config);
+        Ok(Self {
+            bdev,
+            bgworker_config: None,
+            bgworker_sender: None,
+            bgworker_thread: None,
+            alignment,
+            config,
+            status_reporter: None,
+            io_trackers,
+        })
+    }
+
+    fn check_stripe_geometry(config: &v2::Config, sectors: u64) -> Result<()> {
+        if config.device.stripe_sector_count_shift.is_some()
+            && config.device.stripe_sectors()? != sectors
+        {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: "configured stripe geometry conflicts with lazy metadata".to_string(),
+            }));
+        }
+        Ok(())
     }
 
     #[error_context("Failed to run bgworker thread")]
@@ -139,6 +219,7 @@ impl BackendEnv {
         alignment: usize,
     ) -> Result<Self> {
         let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
+        Self::check_stripe_geometry(config, metadata.stripe_sector_count())?;
         let shared_state = SharedMetadataState::new(&metadata);
         let status_reporter = StatusReporter::new(shared_state.clone(), disk_device.sector_count());
 
@@ -490,7 +571,12 @@ pub fn build_block_device(
     config: &v2::Config,
     readonly: bool,
 ) -> Result<Box<dyn BlockDevice>> {
-    let mut block_device: Box<dyn BlockDevice> = create_io_engine_device(
+    if config.spill.is_some() {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "spill is only supported by the single-queue ublk data path".to_string()
+        }));
+    }
+    let block_device: Box<dyn BlockDevice> = create_io_engine_device(
         config.tuning.io_engine.clone(),
         PathBuf::from(path),
         config.tuning.queue_size,
@@ -499,6 +585,13 @@ pub fn build_block_device(
         config.tuning.write_through,
     )?;
 
+    wrap_with_encryption(block_device, config)
+}
+
+fn wrap_with_encryption(
+    mut block_device: Box<dyn BlockDevice>,
+    config: &v2::Config,
+) -> Result<Box<dyn BlockDevice>> {
     if let Some(encryption) = &config.encryption {
         let xts_key = config
             .secrets
@@ -986,5 +1079,114 @@ mod tests {
             true,
         );
         assert!(result.is_ok());
+    }
+    fn single_queue_spill_config(dir: &Path) -> v2::Config {
+        use crate::config::v2::secrets::{
+            resolve_secrets, SecretDef, SecretEncoding, SecretRef, SecretSource,
+        };
+        use base64::Engine;
+        let disk = dir.join("hot.raw");
+        std::fs::write(&disk, vec![0u8; 32 * 1024]).unwrap();
+        let mut config = test_config(&disk, None, None);
+        config.tuning.num_queues = 1;
+        config.device.stripe_sector_count_shift = Some(6);
+        let definitions = std::collections::HashMap::from([(
+            "key".to_string(),
+            SecretDef {
+                source: SecretSource::Inline(
+                    base64::engine::general_purpose::STANDARD.encode([0x42; 64]),
+                ),
+                encrypted_by: None,
+                encoding: SecretEncoding::Base64,
+            },
+        )]);
+        config.secrets = resolve_secrets(&definitions, &config.danger_zone).unwrap();
+        config.encryption = Some(v2::EncryptionSection {
+            xts_key: SecretRef::Ref("key".into()),
+        });
+        config.spill = Some(v2::spill::SpillSection {
+            size_mb: 1,
+            store: v2::stripe_source::ArchiveStorageConfig::Filesystem {
+                path: dir.join("cold"),
+                archive_kek: None,
+                autofetch: false,
+            },
+        });
+        config
+    }
+
+    fn spill_read(channel: &mut dyn block_device::IoChannel, sector: u64) -> Vec<u8> {
+        let buffer = block_device::shared_buffer(512);
+        channel.add_read(sector, 1, buffer.clone(), 100);
+        channel.submit().unwrap();
+        block_device::wait_for_completion(channel, 100, std::time::Duration::from_secs(5)).unwrap();
+        let result = buffer.borrow().as_slice().to_vec();
+        result
+    }
+
+    #[test]
+    fn encrypted_single_queue_spill_moves_data_and_starts_fresh_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = single_queue_spill_config(dir.path());
+        let env = BackendEnv::build(&config).unwrap();
+        assert!(env.bgworker_config.is_none());
+        assert!(env.bgworker_thread.is_none());
+        let mut channel = env.bdev().create_channel().unwrap();
+        let untouched = spill_read(channel.as_mut(), 5);
+        for stripe in 0..8 {
+            let buffer = block_device::shared_buffer(512);
+            buffer.borrow_mut().as_mut_slice().fill(0xA0 + stripe as u8);
+            channel.add_write(stripe * 64 + 4, 1, buffer, 1);
+            channel.submit().unwrap();
+            block_device::wait_for_completion(
+                channel.as_mut(),
+                1,
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap();
+        }
+        for stripe in 0..8 {
+            assert_eq!(
+                spill_read(channel.as_mut(), stripe * 64 + 4),
+                vec![0xA0 + stripe as u8; 512]
+            );
+        }
+        assert_eq!(spill_read(channel.as_mut(), 5), untouched);
+        assert!(std::fs::read_dir(dir.path().join("cold"))
+            .unwrap()
+            .next()
+            .is_some());
+        assert!(env.bdev().create_channel().is_err());
+        drop(channel);
+        drop(env);
+        let reopened = BackendEnv::build(&config).unwrap();
+        let mut channel = reopened.bdev().create_channel().unwrap();
+        assert_ne!(spill_read(channel.as_mut(), 4), vec![0xA0; 512]);
+        assert_eq!(spill_read(channel.as_mut(), 5), untouched);
+    }
+
+    #[test]
+    fn spill_refuses_unsupported_owners_modes_and_geometry() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = single_queue_spill_config(dir.path());
+        let mut bad = config.clone();
+        bad.tuning.num_queues = 2;
+        assert!(BackendEnv::build(&bad).is_err());
+        let mut bad = config.clone();
+        bad.tuning.write_through = true;
+        assert!(BackendEnv::build(&bad).is_err());
+        let mut bad = config.clone();
+        bad.encryption = None;
+        assert!(BackendEnv::build(&bad).is_err());
+        let mut bad = config.clone();
+        bad.device.stripe_sector_count_shift = Some(1);
+        assert!(BackendEnv::build(&bad).is_err());
+        let mut bad = config.clone();
+        bad.spill.as_mut().unwrap().size_mb = u64::MAX;
+        assert!(BackendEnv::build(&bad).is_err());
+        assert!(build_block_device(&config.device.data_path, &config, false).is_err());
+        assert!(crate::backends::vhost::block_backend_loop(&config).is_err());
+        assert!(BackendEnv::check_stripe_geometry(&config, 128).is_err());
+        assert!(BackendEnv::check_stripe_geometry(&config, 64).is_ok());
     }
 }

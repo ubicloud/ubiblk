@@ -13,8 +13,10 @@ use ubiblk_macros::error_context;
 
 use crate::{
     block_device::{
-        self, BgWorker, BgWorkerRequest, BlockDevice, LazyTask, SharedMetadataState,
-        StatusReporter, SyncBlockDevice, UbiMetadata, UringBlockDevice,
+        self,
+        bdev_spill::{device::SpillBlockDevice, metadata::SpillSharedMetadata, task::SpillTask},
+        BgWorker, BgWorkerRequest, BlockDevice, LazyTask, SharedMetadataState, StatusReporter,
+        SyncBlockDevice, UbiMetadata, UringBlockDevice,
     },
     config::v2,
     stripe_source::StripeSourceBuilder,
@@ -37,9 +39,28 @@ struct BgWorkerConfig {
     receiver: Receiver<BgWorkerRequest>,
 }
 
+/// What the worker thread needs to build a spill task on itself: the store is
+/// not `Send`, so it has to be made there.
+struct SpillWorkerConfig {
+    disk: Box<dyn BlockDevice>,
+    metadata: SpillSharedMetadata,
+    store: v2::stripe_source::ArchiveStorageConfig,
+    secrets: std::collections::HashMap<String, v2::secrets::ResolvedSecret>,
+    stripe_sectors: u64,
+    slot_count: u32,
+    max_transfers: usize,
+    alignment: usize,
+    receiver: Receiver<BgWorkerRequest>,
+}
+
+enum WorkerConfig {
+    Lazy(BgWorkerConfig),
+    Spill(Box<SpillWorkerConfig>),
+}
+
 pub struct BackendEnv {
     bdev: Box<dyn BlockDevice>,
-    bgworker_config: Option<BgWorkerConfig>,
+    bgworker_config: Option<WorkerConfig>,
     bgworker_sender: Option<Sender<BgWorkerRequest>>,
     bgworker_thread: Option<std::thread::JoinHandle<()>>,
     alignment: usize,
@@ -52,6 +73,10 @@ impl BackendEnv {
     #[error_context("Failed to build backend environment")]
     pub fn build(config: &v2::Config) -> Result<Self> {
         let alignment = Self::determine_alignment(&config.device.data_path)?;
+
+        if let Some(spill) = &config.spill {
+            return Self::build_with_spill(config, spill, alignment);
+        }
 
         let disk_device = build_block_device(&config.device.data_path, config, false)
             .context("Failed to build disk device")?;
@@ -168,7 +193,7 @@ impl BackendEnv {
             metadata.has_fetched_all_stripes(),
         ));
 
-        let bgworker_config = BgWorkerConfig {
+        let bgworker_config = WorkerConfig::Lazy(BgWorkerConfig {
             target_dev: disk_device,
             stripe_source_builder,
             metadata_dev: metadata_device,
@@ -179,7 +204,7 @@ impl BackendEnv {
                 .is_some_and(|stripe_source| stripe_source.autofetch()),
             shared_state,
             receiver: bgworker_receiver,
-        };
+        });
 
         Ok(BackendEnv {
             bdev: bdev_lazy,
@@ -189,6 +214,86 @@ impl BackendEnv {
             alignment,
             config: config.clone(),
             status_reporter: Some(status_reporter),
+            io_trackers: Self::build_io_trackers(config),
+        })
+    }
+
+    /// A device of `spill.size_mb` over a pool of stripe-sized slots on the
+    /// data disk, with encryption above it so only ciphertext leaves the host.
+    #[error_context("Failed to build spill device")]
+    fn build_with_spill(
+        config: &v2::Config,
+        spill: &v2::spill::SpillSection,
+        alignment: usize,
+    ) -> Result<Self> {
+        let invalid = |description: String| {
+            crate::ubiblk_error!(InvalidParameter {
+                description: description
+            })
+        };
+        let stripe_sectors = 1u64 << config.device.stripe_sector_count_shift()?;
+        let sector_count = spill
+            .size_bytes()
+            .ok_or_else(|| invalid(format!("spill size_mb {} is too large", spill.size_mb)))?
+            / SECTOR_SIZE as u64;
+
+        let disk = create_io_engine_device(
+            config.tuning.io_engine.clone(),
+            config.device.data_path.clone(),
+            config.tuning.queue_size,
+            false,
+            true,
+            false,
+        )
+        .context("Failed to build the spill disk")?;
+        let slot_count = disk.sector_count() / stripe_sectors;
+        if slot_count == 0 {
+            return Err(invalid(format!(
+                "{} is smaller than one {stripe_sectors}-sector stripe",
+                config.device.data_path.display()
+            )));
+        }
+        if slot_count * stripe_sectors >= sector_count {
+            return Err(invalid(format!(
+                "{} holds all {sector_count} sectors of the spill device, so nothing would spill",
+                config.device.data_path.display()
+            )));
+        }
+        let slot_count = u32::try_from(slot_count).map_err(|_| {
+            invalid(format!(
+                "{slot_count} slots are more than a spill device can use"
+            ))
+        })?;
+
+        let metadata = SpillSharedMetadata::new(sector_count.div_ceil(stripe_sectors) as usize);
+        let (sender, receiver) = channel();
+        let spill_device = SpillBlockDevice::new(
+            disk.clone(),
+            metadata.clone(),
+            stripe_sectors,
+            sector_count,
+            sender.clone(),
+        );
+        let bdev = wrap_with_encryption(spill_device, config)?;
+
+        Ok(BackendEnv {
+            bdev,
+            bgworker_config: Some(WorkerConfig::Spill(Box::new(SpillWorkerConfig {
+                disk,
+                metadata,
+                store: spill.store.clone(),
+                secrets: config.secrets.clone(),
+                stripe_sectors,
+                slot_count,
+                max_transfers: spill.max_concurrent_transfers,
+                alignment,
+                receiver,
+            }))),
+            bgworker_sender: Some(sender),
+            bgworker_thread: None,
+            alignment,
+            config: config.clone(),
+            status_reporter: None,
             io_trackers: Self::build_io_trackers(config),
         })
     }
@@ -239,7 +344,7 @@ impl BackendEnv {
     }
 
     fn spawn_bgworker_thread(
-        config: BgWorkerConfig,
+        config: WorkerConfig,
         startup_sender: Sender<Result<()>>,
     ) -> Result<std::thread::JoinHandle<()>> {
         std::thread::Builder::new()
@@ -266,7 +371,11 @@ impl BackendEnv {
             })
     }
 
-    fn build_bgworker(config: BgWorkerConfig) -> Result<BgWorker> {
+    fn build_bgworker(config: WorkerConfig) -> Result<BgWorker> {
+        let config = match config {
+            WorkerConfig::Lazy(config) => config,
+            WorkerConfig::Spill(config) => return Self::build_spill_worker(*config),
+        };
         let BgWorkerConfig {
             target_dev,
             stripe_source_builder,
@@ -295,6 +404,23 @@ impl BackendEnv {
         )?;
         let mut worker = BgWorker::new(receiver);
         worker.set_lazy_task(lazy);
+        Ok(worker)
+    }
+
+    fn build_spill_worker(config: SpillWorkerConfig) -> Result<BgWorker> {
+        let store = StripeSourceBuilder::build_archive_store(&config.store, &config.secrets)
+            .context("Failed to build the spill store")?;
+        let task = SpillTask::new(
+            config.metadata,
+            store,
+            config.disk.create_channel()?,
+            config.stripe_sectors,
+            config.slot_count,
+            config.max_transfers,
+            config.alignment,
+        );
+        let mut worker = BgWorker::new(config.receiver);
+        worker.set_spill_task(task);
         Ok(worker)
     }
 }
@@ -501,7 +627,7 @@ pub fn build_block_device(
     config: &v2::Config,
     readonly: bool,
 ) -> Result<Box<dyn BlockDevice>> {
-    let mut block_device: Box<dyn BlockDevice> = create_io_engine_device(
+    let block_device: Box<dyn BlockDevice> = create_io_engine_device(
         config.tuning.io_engine.clone(),
         PathBuf::from(path),
         config.tuning.queue_size,
@@ -509,7 +635,13 @@ pub fn build_block_device(
         true,
         config.tuning.write_through,
     )?;
+    wrap_with_encryption(block_device, config)
+}
 
+fn wrap_with_encryption(
+    mut block_device: Box<dyn BlockDevice>,
+    config: &v2::Config,
+) -> Result<Box<dyn BlockDevice>> {
     if let Some(encryption) = &config.encryption {
         let xts_key = config
             .secrets
@@ -708,7 +840,7 @@ mod tests {
     fn run_bgworker_handles_shutdown_request() {
         let (config, sender) = build_test_bgworker_config();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
-        let mut worker = BackendEnv::build_bgworker(config).unwrap();
+        let mut worker = BackendEnv::build_bgworker(WorkerConfig::Lazy(config)).unwrap();
         worker.run();
     }
 
@@ -716,7 +848,8 @@ mod tests {
     fn spawn_bgworker_thread_runs_and_joins() {
         let (config, sender) = build_test_bgworker_config();
         let (startup_sender, startup_receiver) = channel();
-        let handle = BackendEnv::spawn_bgworker_thread(config, startup_sender).unwrap();
+        let handle =
+            BackendEnv::spawn_bgworker_thread(WorkerConfig::Lazy(config), startup_sender).unwrap();
         startup_receiver.recv().unwrap().unwrap();
         sender.send(BgWorkerRequest::Shutdown).unwrap();
         handle.join().unwrap();
@@ -900,6 +1033,134 @@ mod tests {
             "build_block_device failed: {:?}",
             result.err().map(|e| e.to_string())
         );
+    }
+
+    fn spill_config(dir: &Path, disk_stripes: u64, encrypted: bool) -> v2::Config {
+        use crate::config::v2::secrets::{
+            resolve_secrets, SecretDef, SecretEncoding, SecretRef, SecretSource,
+        };
+        use base64::Engine;
+
+        let disk = dir.join("hot.raw");
+        std::fs::File::create(&disk)
+            .unwrap()
+            .set_len(disk_stripes * 64 * SECTOR_SIZE as u64)
+            .unwrap();
+        let mut config = test_config(&disk, None, None);
+        config.device.stripe_sector_count_shift = Some(6);
+        config.spill = Some(v2::spill::SpillSection {
+            size_mb: 1,
+            store: v2::stripe_source::ArchiveStorageConfig::Filesystem {
+                path: dir.join("cold"),
+                archive_kek: None,
+                autofetch: false,
+            },
+            max_concurrent_transfers: 2,
+        });
+        if encrypted {
+            let key = base64::engine::general_purpose::STANDARD.encode([0x42u8; 64]);
+            let defs = std::collections::HashMap::from([(
+                "xts-key".to_string(),
+                SecretDef {
+                    source: SecretSource::Inline(key),
+                    encrypted_by: None,
+                    encoding: SecretEncoding::Base64,
+                },
+            )]);
+            config.secrets = resolve_secrets(&defs, &config.danger_zone).unwrap();
+            config.encryption = Some(v2::EncryptionSection {
+                xts_key: SecretRef::Ref("xts-key".to_string()),
+            });
+        }
+        config
+    }
+
+    fn run_io(channel: &mut dyn block_device::IoChannel, id: usize) {
+        channel.submit().unwrap();
+        block_device::wait_for_completion(channel, id, std::time::Duration::from_secs(10))
+            .unwrap_or_else(|e| panic!("request {id}: {e}"));
+    }
+
+    /// End to end over a real disk and a filesystem store: 32 stripes through
+    /// 4 slots, every one written and read back.
+    fn serves_more_than_its_disk_holds(encrypted: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = spill_config(dir.path(), 4, encrypted);
+        let mut env = BackendEnv::build(&config).expect("a spill device");
+        env.run_bgworker_thread().expect("the worker starts");
+        let bdev = env.bdev();
+        assert_eq!(bdev.sector_count(), 2048);
+        let mut channel = bdev.create_channel().unwrap();
+
+        for stripe in 0..32u64 {
+            let buf = block_device::shared_buffer(SECTOR_SIZE);
+            buf.borrow_mut().as_mut_slice().fill(0x40 + stripe as u8);
+            channel.add_write(stripe * 64 + 5, 1, buf, stripe as usize);
+            run_io(channel.as_mut(), stripe as usize);
+        }
+        for stripe in 0..32u64 {
+            let buf = block_device::shared_buffer(SECTOR_SIZE);
+            channel.add_read(stripe * 64 + 5, 1, buf.clone(), 100 + stripe as usize);
+            run_io(channel.as_mut(), 100 + stripe as usize);
+            assert!(
+                buf.borrow()
+                    .as_slice()
+                    .iter()
+                    .all(|b| *b == 0x40 + stripe as u8),
+                "stripe {stripe} came back as something else"
+            );
+        }
+        env.stop_bgworker_thread();
+
+        let objects: Vec<Vec<u8>> = walk(&dir.path().join("cold"));
+        assert!(
+            objects.len() >= 28,
+            "only {} stripes were uploaded",
+            objects.len()
+        );
+        let plaintext = objects.iter().any(|object| {
+            object
+                .windows(SECTOR_SIZE)
+                .any(|w| w.iter().all(|b| *b == w[0] && *b >= 0x40 && *b < 0x60))
+        });
+        assert_eq!(plaintext, !encrypted, "encrypted: {encrypted}");
+    }
+
+    fn walk(path: &Path) -> Vec<Vec<u8>> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(path).into_iter().flatten().flatten() {
+            if entry.path().is_dir() {
+                found.extend(walk(&entry.path()));
+            } else {
+                found.push(std::fs::read(entry.path()).unwrap());
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_spill_device_serves_more_than_its_disk_holds() {
+        serves_more_than_its_disk_holds(false);
+    }
+
+    #[test]
+    fn an_encrypted_spill_device_uploads_only_ciphertext() {
+        serves_more_than_its_disk_holds(true);
+    }
+
+    #[test]
+    fn a_spill_disk_must_hold_a_stripe_and_less_than_the_device() {
+        let dir = tempfile::tempdir().unwrap();
+        let too_small = spill_config(dir.path(), 0, false);
+        let err = BackendEnv::build(&too_small).err().expect("an empty disk");
+        assert!(err.to_string().contains("smaller than one"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let too_large = spill_config(dir.path(), 32, false);
+        let err = BackendEnv::build(&too_large)
+            .err()
+            .expect("a disk as large as the device");
+        assert!(err.to_string().contains("nothing would spill"), "{err}");
     }
 
     #[test]

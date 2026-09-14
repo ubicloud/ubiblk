@@ -185,10 +185,27 @@ fn key_with_prefix(prefix: &Option<String>, name: &str) -> String {
 mod tests {
     use std::time::Duration;
 
+    use aws_sdk_s3::config::{BehaviorVersion, Credentials, Region};
     use aws_sdk_s3::operation::{get_object::GetObjectOutput, put_object::PutObjectOutput};
-    use aws_smithy_mocks::{mock, mock_client, Rule};
+    use aws_smithy_mocks::{create_mock_http_client, mock, MockResponseInterceptor, Rule};
 
     use super::*;
+
+    /// Equivalent of `aws_smithy_mocks::mock_client!`, which needs aws-sdk-s3's
+    /// `test-util` feature. That feature pulls in the legacy hyper 0.14 stack.
+    pub(super) fn mock_s3_client(rules: &[Rule]) -> S3Client {
+        let interceptor = rules
+            .iter()
+            .fold(MockResponseInterceptor::new(), |i, rule| i.with_rule(rule));
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+            .http_client(create_mock_http_client())
+            .interceptor(interceptor)
+            .build();
+        S3Client::from_conf(config)
+    }
 
     fn test_store(request_tx: Option<Sender<S3Request>>) -> S3Store {
         let (_, result_rx) = unbounded();
@@ -204,7 +221,7 @@ mod tests {
 
     fn prepare_s3_store(bucket: &str, prefix: Option<&str>, rules: &[Rule]) -> S3Store {
         S3Store::new(
-            mock_client!(aws_sdk_s3, rules),
+            mock_s3_client(rules),
             bucket.to_string(),
             prefix.map(|p| p.to_string()),
             2,

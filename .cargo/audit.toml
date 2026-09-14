@@ -18,13 +18,4 @@ ignore = [
   # slices.
   # No patched release exists; see the note above.
   "RUSTSEC-2025-0167",
-  # h2 0.3.x unbounded empty DATA frames (low-severity DoS, fixed in >= 0.4.16).
-  # ubiblk's HTTPS client uses h2 0.4.19, which is patched. h2 0.3.x is an
-  # *optional* dependency of aws-smithy-http-client (`dep:h2-0-3`, gated behind
-  # its `hyper-014` feature) and reaches our lockfile only through
-  # dev-dependencies: `aws-smithy-mocks` and `aws-sdk-s3`'s `test-util` feature,
-  # which turn on aws-smithy-http-client's default features. It is not compiled
-  # into the shipped binary -- `cargo tree -e normal -i h2@0.3` finds no path.
-  # Revisit if the AWS SDK drops the legacy hyper-0.14 test client.
-  "RUSTSEC-2026-0258",
 ]

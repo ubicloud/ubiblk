@@ -1,5 +1,8 @@
 //! Nonpersistent spill storage owned by a single serving channel.
+mod cache;
 mod channel;
+
+const WORK_PER_POLL: usize = 64;
 
 use super::{BlockDevice, IoChannel};
 use crate::{
@@ -42,7 +45,7 @@ impl Geometry {
         }
         let stripes = device_sectors.div_ceil(stripe_sectors);
         // Bound all per-stripe state before allocating it, not just the slot array.
-        if stripes > (256 * 1024 * 1024 / std::mem::size_of::<channel::Stripe>()) as u64 {
+        if stripes > (256 * 1024 * 1024 / std::mem::size_of::<cache::Stripe>()) as u64 {
             return Err(invalid("spill stripe metadata would exceed 256 MiB"));
         }
         Ok(Self {

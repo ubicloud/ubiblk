@@ -1,4 +1,5 @@
 use super::*;
+use crate::block_device::shared_buffer;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
@@ -184,7 +185,7 @@ fn one_slot_serves_concurrent_requests_for_more_stripes_than_it_holds() {
     for stripe in 0..8 {
         read(&mut ch, stripe, stripe as u8 + 1);
     }
-    assert!(ch.stripes.iter().all(|s| s.active == 0));
+    assert!(ch.cache.all_requests_finished());
 }
 
 #[test]
@@ -233,7 +234,7 @@ fn invalid_requests_and_flush_do_not_change_active_counts() {
         run(&mut ch),
         vec![(1, false), (2, false), (3, false), (4, true)]
     );
-    assert!(ch.stripes.iter().all(|s| s.active == 0));
+    assert!(ch.cache.all_requests_finished());
 }
 
 #[test]
@@ -245,7 +246,7 @@ fn failed_fetch_fails_every_waiter_and_a_later_request_can_retry() {
     ch.add_read(0, 1, buffer(1, 0), 7);
     ch.add_read(1, 1, buffer(1, 0), 8);
     assert_eq!(run(&mut ch), vec![(7, false), (8, false)]);
-    assert_eq!(ch.stripes[0].active, 0);
+    assert_eq!(ch.cache.active_requests(0), 0);
     store.lock().unwrap().data = saved;
     read(&mut ch, 0, 0xAB);
 }
@@ -257,7 +258,7 @@ fn failed_upload_preserves_the_dirty_victim_and_fails_demand() {
     store.lock().unwrap().fail_put = true;
     ch.add_read(STRIPE, 1, buffer(1, 0), 2);
     assert_eq!(run(&mut ch), vec![(2, false)]);
-    assert!(ch.stripes[0].dirty);
+    assert!(ch.cache.dirty(0));
     read(&mut ch, 0, 0xAB);
     store.lock().unwrap().fail_put = false;
     read(&mut ch, 1, 0);
@@ -277,13 +278,13 @@ fn failed_write_keeps_the_slot_until_other_io_completes() {
     }
     ch.submit().unwrap();
     assert_eq!(ch.poll(), vec![(1, false)]);
-    assert_eq!(ch.stripes[0].state, State::Failed(Some(0)));
-    assert!(ch.free.is_empty());
+    assert_eq!(ch.cache.state(0), StripeState::Failed(Some(0)));
+    assert_eq!(ch.cache.free_slots(), 0);
     ch.add_read(STRIPE, 1, buffer(1, 0), 3);
     let results = run(&mut ch);
     assert!(results.contains(&(2, true)));
     assert!(results.contains(&(3, true)));
-    assert_eq!(ch.stripes[0].state, State::Failed(None));
+    assert_eq!(ch.cache.state(0), StripeState::Failed(None));
     ch.add_read(0, 1, buffer(1, 0), 4);
     assert_eq!(run(&mut ch), vec![(4, false)]);
 }
@@ -300,8 +301,8 @@ fn failed_submit_retains_an_accepted_fill_until_completion() {
     ch.submit().unwrap();
     ch.poll();
     assert_eq!(ch.local.len(), 1);
-    assert!(ch.free.is_empty());
-    assert!(ch.transfer.is_some());
+    assert_eq!(ch.cache.free_slots(), 0);
+    assert!(ch.cache.busy());
     {
         let mut d = disk.lock().unwrap();
         assert_eq!(d.pending.len(), 1);
@@ -310,7 +311,7 @@ fn failed_submit_retains_an_accepted_fill_until_completion() {
     }
     run(&mut ch);
     assert!(ch.local.is_empty());
-    assert_eq!(ch.free.len(), 1);
+    assert_eq!(ch.cache.free_slots(), 1);
 }
 
 #[test]
@@ -322,7 +323,7 @@ fn requests_arriving_during_eviction_wait_for_refetch() {
     for _ in 0..10 {
         ch.poll();
     }
-    assert_eq!(ch.stripes[0].state, State::Evicting(0));
+    assert_eq!(ch.cache.state(0), StripeState::Evicting(0));
     let b = buffer(1, 0);
     ch.add_read(0, 1, b.clone(), 4);
     store.lock().unwrap().hold = false;
@@ -337,7 +338,7 @@ fn timed_out_store_does_not_accumulate_abandoned_operations() {
     let (mut ch, _, store) = stack(1);
     write(&mut ch, 0, 0xAB);
     store.lock().unwrap().hold = true;
-    ch.timeout = Duration::ZERO;
+    ch.cache.set_timeout(Duration::ZERO);
     ch.add_read(STRIPE, 1, buffer(1, 0), 2);
     assert_eq!(run(&mut ch), vec![(2, false)]);
     read(&mut ch, 0, 0xAB);
@@ -358,8 +359,8 @@ fn failed_submit_does_not_strand_a_transfer_waiting_for_a_pinned_slot() {
     let result = run(&mut ch);
     assert!(result.contains(&(1, false)));
     assert!(result.contains(&(2, false)));
-    assert!(ch.transfer.is_none());
-    assert_eq!(ch.stripes[1].active, 0);
+    assert!(!ch.cache.busy());
+    assert_eq!(ch.cache.active_requests(1), 0);
 }
 
 #[test]
@@ -370,7 +371,7 @@ fn corrupted_object_fails_instead_of_becoming_a_slot() {
     store.lock().unwrap().data.values_mut().next().unwrap()[0] ^= 1;
     ch.add_read(0, 1, buffer(1, 0), 1);
     assert_eq!(run(&mut ch), vec![(1, false)]);
-    assert_eq!(ch.stripes[0].state, State::Absent);
+    assert_eq!(ch.cache.state(0), StripeState::Absent);
 }
 
 #[test]

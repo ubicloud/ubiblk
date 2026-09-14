@@ -42,6 +42,7 @@ impl Clone for Box<dyn BlockDevice> {
 mod bdev_crypt;
 mod bdev_lazy;
 mod bdev_null;
+pub mod bdev_spill;
 mod bdev_sync;
 mod bdev_uring;
 pub mod bgworker;

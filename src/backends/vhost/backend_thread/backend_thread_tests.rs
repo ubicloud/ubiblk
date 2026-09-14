@@ -150,6 +150,7 @@ mod tests {
                 rpc_socket: None,
                 device_id: "ubiblk".to_string(),
                 track_written: false,
+                stripe_sector_count_shift: None,
             },
             tuning: v2::tuning::TuningSection {
                 num_queues: 1,
@@ -170,6 +171,7 @@ mod tests {
                 allow_env_secrets: false,
             },
             stripe_source: None,
+            spill: None,
             secrets: std::collections::HashMap::new(),
         }
     }

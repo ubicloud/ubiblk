@@ -139,6 +139,17 @@ impl BackendEnv {
         alignment: usize,
     ) -> Result<Self> {
         let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
+        if let Some(configured) = config.device.stripe_sector_count_shift {
+            if configured != metadata.stripe_sector_count_shift {
+                return Err(crate::ubiblk_error!(InvalidParameter {
+                    description: format!(
+                        "device.stripe_sector_count_shift is {configured}, but the metadata \
+                         was initialized with {}",
+                        metadata.stripe_sector_count_shift
+                    ),
+                }));
+            }
+        }
         let shared_state = SharedMetadataState::new(&metadata);
         let status_reporter = StatusReporter::new(shared_state.clone(), disk_device.sector_count());
 
@@ -544,6 +555,7 @@ mod tests {
                 rpc_socket: None,
                 device_id: "ubiblk".to_string(),
                 track_written: false,
+                stripe_sector_count_shift: None,
             },
             tuning: v2::tuning::TuningSection {
                 queue_size: 128,
@@ -559,6 +571,7 @@ mod tests {
                 allow_env_secrets: false,
             },
             stripe_source,
+            spill: None,
             secrets: std::collections::HashMap::new(),
         }
     }
@@ -811,6 +824,26 @@ mod tests {
 
         let config = test_config(disk_file.path(), Some(metadata_file.path()), None);
         init_metadata(&config, 11).unwrap();
+    }
+
+    #[test]
+    fn a_configured_stripe_shift_must_match_the_metadata() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+        let metadata_file = tempfile::NamedTempFile::new().unwrap();
+        metadata_file.as_file().set_len(1024 * 1024).unwrap();
+
+        let mut config = test_config(disk_file.path(), Some(metadata_file.path()), None);
+        init_metadata(&config, 11).unwrap();
+
+        config.device.stripe_sector_count_shift = Some(11);
+        assert!(BackendEnv::build(&config).is_ok());
+
+        config.device.stripe_sector_count_shift = Some(12);
+        let err = BackendEnv::build(&config)
+            .err()
+            .expect("a conflicting shift");
+        assert!(err.to_string().contains("was initialized with 11"), "{err}");
     }
 
     #[test]

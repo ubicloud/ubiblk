@@ -28,6 +28,7 @@ impl Config {
 
         let mut device: DeviceSection = parse_required_section(&merged, "device")?;
         resolve_device_paths(&mut device, config_dir);
+        device.validate_stripe_geometry()?;
 
         let tuning: TuningSection = parse_optional_section(&merged, "tuning")?.unwrap_or_default();
         tuning.validate()?;
@@ -41,6 +42,13 @@ impl Config {
             stripe_source.validate(&common.danger_zone, &common.secrets)?;
         }
 
+        let mut spill: Option<super::spill::SpillSection> =
+            parse_optional_section(&merged, "spill")?;
+        if let Some(spill) = &mut spill {
+            spill.resolve_paths(config_dir);
+            spill.validate(&common.secrets)?;
+        }
+
         if let Some(encryption) = &encryption {
             encryption.validate_secrets(&common.secrets)?;
         } else if !(common.danger_zone.enabled && common.danger_zone.allow_unencrypted_disk) {
@@ -50,6 +58,7 @@ impl Config {
         }
 
         Ok(Config {
+            spill,
             device,
             tuning,
             encryption,
@@ -59,13 +68,14 @@ impl Config {
         })
     }
 
-    fn allowed_top_level_keys() -> [&'static str; 6] {
+    fn allowed_top_level_keys() -> [&'static str; 7] {
         [
             "device",
             "tuning",
             "encryption",
             "danger_zone",
             "stripe_source",
+            "spill",
             "secrets",
         ]
     }

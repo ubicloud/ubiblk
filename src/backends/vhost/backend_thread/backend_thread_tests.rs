@@ -143,7 +143,9 @@ mod tests {
 
     fn default_config(path: &str) -> v2::Config {
         v2::Config {
+            spill: None,
             device: v2::DeviceSection {
+                stripe_sector_count_shift: None,
                 data_path: path.into(),
                 metadata_path: None,
                 vhost_socket: Some("sock".into()),

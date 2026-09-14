@@ -322,7 +322,9 @@ mod tests {
     const DEFAULT_NUM_QUEUES: usize = 1;
     fn default_config(path: String) -> v2::Config {
         v2::Config {
+            spill: None,
             device: DeviceSection {
+                stripe_sector_count_shift: None,
                 data_path: path.into(),
                 vhost_socket: Some("/tmp/vhost.sock".into()),
                 rpc_socket: Some("/tmp/rpc.sock".into()),

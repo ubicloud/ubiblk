@@ -16,6 +16,11 @@ use crate::{
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<vhost_user_backend::bitmap::BitmapMmapRegion>;
 
 pub fn block_backend_loop(config: &v2::Config) -> Result<()> {
+    if config.spill.is_some() {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "spill supports ublk only, not virtio/vhost".to_string()
+        }));
+    }
     run_backend_loop(config, "vhost-user-blk", true, serve_vhost)
 }
 
@@ -104,7 +109,9 @@ mod tests {
         socket_path: Option<&std::path::Path>,
     ) -> v2::Config {
         v2::Config {
+            spill: None,
             device: v2::DeviceSection {
+                stripe_sector_count_shift: None,
                 data_path: disk_path.to_path_buf(),
                 vhost_socket: socket_path.map(|p| p.to_path_buf()),
                 metadata_path: None,

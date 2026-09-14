@@ -161,7 +161,7 @@ impl StripeSourceBuilder {
     pub fn build_archive_store(
         config: &ArchiveStorageConfig,
         secrets: &std::collections::HashMap<String, ResolvedSecret>,
-    ) -> Result<Box<dyn ArchiveStore>> {
+    ) -> Result<Box<dyn ArchiveStore + Send>> {
         match config {
             ArchiveStorageConfig::Filesystem { path, .. } => {
                 Ok(Box::new(FileSystemStore::new(path.into())?))
@@ -253,7 +253,9 @@ mod tests {
             });
 
         v2::Config {
+            spill: None,
             device: DeviceSection {
+                stripe_sector_count_shift: None,
                 data_path: "/tmp/non-existent-disk".into(),
                 metadata_path: None,
                 vhost_socket: None,

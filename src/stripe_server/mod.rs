@@ -42,6 +42,7 @@ pub struct StripeServerSession {
     stream: DynStream,
     metadata: Arc<UbiMetadata>,
     stripe_channel: Box<dyn IoChannel>,
+    device_sector_count: u64,
     source: Option<Box<dyn StripeSource>>,
 }
 
@@ -79,6 +80,7 @@ impl StripeServer {
             stream,
             metadata: self.metadata.clone(),
             stripe_channel,
+            device_sector_count: self.stripe_device.sector_count(),
             source,
         })
     }

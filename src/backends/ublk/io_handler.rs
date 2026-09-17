@@ -20,6 +20,22 @@ enum UblkIoError {
     Io,
 }
 
+impl UblkIoError {
+    /// The completion handed to libublk for a failed request. Only an error
+    /// that carries a negative errno reaches the kernel: libublk 0.4.x's
+    /// `complete_io_cmd` commits `Ok(Result(res))`, `OtherError(res)` and
+    /// `UringIOError(res)` and drops every other variant on a `_ => {}` arm,
+    /// so a request completed with `InvalidVal` never gets its
+    /// COMMIT_AND_FETCH, the guest's I/O never returns, and tearing the
+    /// device down later deadlocks under ublk_ctl_mutex.
+    fn completion(self) -> UblkError {
+        UblkError::OtherError(match self {
+            UblkIoError::Invalid => -libc::EINVAL,
+            UblkIoError::Io => -libc::EIO,
+        })
+    }
+}
+
 type UblkIoResult<T> = std::result::Result<T, UblkIoError>;
 
 pub struct UblkIoHandler {
@@ -78,7 +94,11 @@ impl UblkIoHandler {
                 self.max_io_bytes
             );
             let completion_slice = BufDesc::Slice(self.bufs[tag as usize].as_slice());
-            let _ = q.complete_io_cmd_unified(tag, completion_slice, Err(UblkError::InvalidVal));
+            let _ = q.complete_io_cmd_unified(
+                tag,
+                completion_slice,
+                Err(UblkIoError::Invalid.completion()),
+            );
             return;
         }
 
@@ -184,7 +204,7 @@ impl UblkIoHandler {
                     let _ = q.complete_io_cmd_unified(
                         tag as u16,
                         completion_slice,
-                        Err(UblkError::InvalidVal),
+                        Err(err.completion()),
                     );
                     continue;
                 }
@@ -201,7 +221,7 @@ impl UblkIoHandler {
                             let _ = q.complete_io_cmd_unified(
                                 tag as u16,
                                 completion_slice,
-                                Err(UblkError::InvalidVal),
+                                Err(UblkIoError::Io.completion()),
                             );
                         }
                     }
@@ -229,7 +249,7 @@ impl UblkIoHandler {
                             "UBLK IO error (op={:?}, sector_offset={}, sector_count={}): {:?}",
                             request.op, request.sector_offset, request.sector_count, err
                         );
-                        Err(UblkError::InvalidVal)
+                        Err(err.completion())
                     }
                 };
 
@@ -454,5 +474,20 @@ mod tests {
             bytes: 0,
         };
         handler.enqueue_request(&request).unwrap();
+    }
+
+    /// A failed request must complete with a variant libublk commits to the
+    /// kernel, carrying the negative errno the guest is to see. `InvalidVal`
+    /// is dropped by `complete_io_cmd` and would leave the request hanging.
+    #[test]
+    fn failed_io_completes_with_a_negative_errno_the_kernel_receives() {
+        assert!(matches!(
+            UblkIoError::Io.completion(),
+            UblkError::OtherError(errno) if errno == -libc::EIO
+        ));
+        assert!(matches!(
+            UblkIoError::Invalid.completion(),
+            UblkError::OtherError(errno) if errno == -libc::EINVAL
+        ));
     }
 }

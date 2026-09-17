@@ -212,6 +212,10 @@ ubiblk_error_variants! {
         source: libublk::UblkError,
         meta: ErrorMeta,
     } => "{meta}Ublk error: {source} {meta:#}",
+    Timeout {
+        description: String,
+        meta: ErrorMeta,
+    } => "{meta}Timed out: {description} {meta:#}",
 }
 
 /// Internal helper to conditionally convert a field value.

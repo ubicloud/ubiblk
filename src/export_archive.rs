@@ -120,6 +120,55 @@ mod tests {
         Box::new(MemStore::new_with_objects(Rc::clone(&store.objects)))
     }
 
+    // An archive records stripes, not the size of the device they came from, so
+    // a device that ends mid-stripe comes back rounded up to a whole one, with
+    // the tail the archiver zeroed. Nothing here writes past the file it
+    // pre-allocated, because that size is rounded up the same way.
+    #[test]
+    fn an_archive_of_a_device_ending_mid_stripe_rounds_up() {
+        let kek = KeyEncryptionCipher::default();
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let bdev = Box::new(TestBlockDevice::new(
+            2 * stripe_len as u64 - SECTOR_SIZE as u64,
+        ));
+        bdev.write(0, &vec![0xAAu8; stripe_len], stripe_len);
+        let tail = vec![0xBBu8; stripe_len - SECTOR_SIZE];
+        bdev.write(stripe_len, &tail, tail.len());
+
+        let mut metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, 2, 0);
+        metadata.stripe_headers[0] |= metadata_flags::WRITTEN;
+        metadata.stripe_headers[1] |= metadata_flags::WRITTEN;
+
+        let store = Box::new(MemStore::new());
+        let mut archiver = StripeArchiver::new(
+            Box::new(BlockDeviceStripeSource::new(bdev.clone(), STRIPE_SECTOR_COUNT).unwrap()),
+            bdev.as_ref(),
+            metadata,
+            clone_memstore(store.as_ref()),
+            false,
+            ArchiveCompressionAlgorithm::None,
+            kek.clone(),
+            1,
+        )
+        .unwrap();
+        archiver.archive_all().unwrap();
+
+        let mut source = ArchiveStripeSource::new(clone_memstore(store.as_ref()), kek).unwrap();
+        assert_eq!(source.sector_count(), 2 * STRIPE_SECTOR_COUNT);
+
+        let buffer = shared_buffer(stripe_len);
+        source.request(1, buffer.clone()).unwrap();
+        let mut completions = Vec::new();
+        while completions.is_empty() {
+            completions = source.poll();
+        }
+        assert_eq!(completions, vec![(1, true)]);
+
+        let mut expected = tail.clone();
+        expected.extend(vec![0u8; SECTOR_SIZE]);
+        assert_eq!(buffer.borrow().as_slice(), expected.as_slice());
+    }
+
     #[test]
     fn test_export_archive_roundtrip() {
         let kek = KeyEncryptionCipher::default();

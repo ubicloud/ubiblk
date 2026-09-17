@@ -1,12 +1,9 @@
 use crate::{
-    block_device::{BlockDevice, IoChannel, SharedBuffer, SharedMetadataState},
+    block_device::{BgWorkerRequest, BlockDevice, IoChannel, SharedBuffer, SharedMetadataState},
     Result, ResultExt,
 };
 
-use super::{
-    bgworker::BgWorkerRequest,
-    metadata::{Failed, Fetched, NoSource, NotFetched},
-};
+use super::metadata::{Failed, Fetched, NoSource, NotFetched};
 
 use std::{
     collections::{HashSet, VecDeque},

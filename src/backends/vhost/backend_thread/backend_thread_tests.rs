@@ -771,4 +771,98 @@ mod tests {
         let status = mem.read_obj::<u8>(status_addr).unwrap();
         assert_eq!(status, VIRTIO_BLK_S_IOERR as u8);
     }
+
+    fn seed_read_request(
+        mem: &GuestMemory,
+        queue: &MockSplitQueue<'_, GuestMemory>,
+        device: &TestBlockDevice,
+    ) -> QueueRequestAddrs {
+        let addrs = setup_queue_request(
+            mem,
+            queue,
+            0x1000,
+            VIRTIO_BLK_T_IN,
+            0,
+            SECTOR_SIZE as u32,
+            VRING_DESC_F_WRITE as u16,
+        );
+        let pattern = vec![0x5a; SECTOR_SIZE];
+        device.write(0, &pattern, pattern.len());
+        addrs
+    }
+
+    // The crate latches next_used at SET_VRING_ADDR by reading guest memory, which can
+    // be stale after a re-activation. Seed a stale next_used together with the
+    // authoritative guest used index and check the reactivation resync corrects it.
+    #[test]
+    fn reactivation_corrects_stale_next_used() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let addrs = seed_read_request(&mem, &queue, &device);
+
+        // Authoritative guest used index is 3; the crate latched a stale next_used of 5.
+        mem.write_obj::<u16>(3, queue.used_addr().unchecked_add(2))
+            .unwrap();
+        vring.set_queue_next_used(5);
+
+        thread.on_reactivation();
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        // Completion lands at the authoritative slot 3, so used.idx advances 3 -> 4,
+        // not the stale 5 -> 6.
+        assert_eq!(read_used_idx(&mem, queue.used_addr()), 4);
+        assert_eq!(
+            mem.read_obj::<u8>(addrs.status).unwrap(),
+            VIRTIO_BLK_S_OK as u8
+        );
+        assert!(!thread.needs_used_resync);
+    }
+
+    // Control: without a reactivation the stale next_used is used unchanged.
+    #[test]
+    fn stale_next_used_survives_without_reactivation() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        seed_read_request(&mem, &queue, &device);
+
+        mem.write_obj::<u16>(3, queue.used_addr().unchecked_add(2))
+            .unwrap();
+        vring.set_queue_next_used(5);
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+        assert_eq!(read_used_idx(&mem, queue.used_addr()), 6);
+    }
+
+    // Empty ring: the resync cannot run yet, so no request is dequeued and the flag is
+    // retained until work appears, at which point the completion uses the corrected slot.
+    #[test]
+    fn reactivation_retries_until_work_available() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+
+        mem.write_obj::<u16>(3, queue.used_addr().unchecked_add(2))
+            .unwrap();
+        vring.set_queue_next_used(5);
+        thread.on_reactivation();
+
+        {
+            let mut vring_guard = vring.get_mut();
+            assert!(!thread.process_queue(&mut vring_guard));
+        }
+        assert!(thread.needs_used_resync);
+        assert_eq!(read_used_idx(&mem, queue.used_addr()), 3);
+
+        seed_read_request(&mem, &queue, &device);
+        {
+            let mut vring_guard = vring.get_mut();
+            assert!(thread.process_queue(&mut vring_guard));
+        }
+        assert!(!thread.needs_used_resync);
+        assert_eq!(read_used_idx(&mem, queue.used_addr()), 4);
+    }
 }

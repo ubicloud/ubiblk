@@ -171,6 +171,7 @@ impl VhostUserBackend for UbiBlkBackend {
         for thread in self.threads.iter() {
             if let Ok(mut t) = thread.lock() {
                 t.event_idx = enabled;
+                t.on_reactivation();
             } else {
                 error!("Failed to lock worker thread for set_event_idx");
             }

@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::{ops::Deref, sync::RwLockWriteGuard};
 
@@ -56,6 +57,7 @@ pub struct UbiBlkBackendThread {
     pin_attempted: bool,
     ios_pending_signal: bool,
     io_tracker: IoTracker,
+    needs_used_resync: bool,
 }
 
 impl UbiBlkBackendThread {
@@ -112,6 +114,7 @@ impl UbiBlkBackendThread {
             pin_attempted: false,
             ios_pending_signal: false,
             io_tracker,
+            needs_used_resync: false,
         })
     }
 
@@ -154,6 +157,34 @@ impl UbiBlkBackendThread {
     pub(crate) fn put_request_slot(&mut self, idx: usize) {
         self.request_slots[idx].used = false;
         self.io_tracker.clear(idx);
+    }
+
+    pub(crate) fn on_reactivation(&mut self) {
+        self.needs_used_resync = true;
+    }
+
+    // Reading avail.idx first makes the guest's used index visible (x86-TSO), so it is
+    // authoritative even if the crate latched a stale value at SET_VRING_ADDR.
+    fn resync_used_index(&mut self, vring: &mut Vring<'_>) {
+        let mem = self.mem.memory();
+        let queue = vring.get_queue_mut();
+        let avail = match queue.avail_idx(mem.deref(), Ordering::Acquire) {
+            Ok(a) => a.0,
+            Err(e) => {
+                error!("resync: failed to read avail index: {e:?}");
+                return;
+            }
+        };
+        if avail == queue.next_avail() {
+            return;
+        }
+        match queue.used_idx(mem.deref(), Ordering::Acquire) {
+            Ok(idx) => {
+                queue.set_next_used(idx.0);
+                self.needs_used_resync = false;
+            }
+            Err(e) => error!("resync: failed to read used index: {e:?}"),
+        }
     }
 
     pub(crate) fn pin_to_cpu(&mut self, cpu: usize) -> Result<bool> {
@@ -385,6 +416,15 @@ impl UbiBlkBackendThread {
 
     /// Handle available requests and complete I/O, returning whether the queue is busy.
     pub fn process_queue(&mut self, vring: &mut Vring<'_>) -> bool {
+        if self.needs_used_resync {
+            self.resync_used_index(vring);
+            // Don't dequeue requests until the used index is re-derived, or a
+            // completion could land at a stale slot. Work stays for the next call.
+            if self.needs_used_resync {
+                return false;
+            }
+        }
+
         let mut busy = false;
 
         while let Some(mut desc_chain) = vring

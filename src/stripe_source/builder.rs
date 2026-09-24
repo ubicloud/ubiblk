@@ -74,8 +74,33 @@ impl StripeSourceBuilder {
                     });
                     let mut clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
                         Vec::with_capacity(connections);
-                    for _ in 0..connections {
+                    if connections == 1 {
                         clients.push(connect()?);
+                    } else {
+                        let results = std::thread::scope(|scope| -> Result<Vec<_>> {
+                            let mut handles = Vec::with_capacity(connections);
+                            for i in 0..connections {
+                                handles.push(
+                                    std::thread::Builder::new()
+                                        .name(format!("remote-dial-{i}"))
+                                        .spawn_scoped(scope, || connect())?,
+                                );
+                            }
+                            let mut results = Vec::with_capacity(connections);
+                            for handle in handles {
+                                results.push(handle.join().unwrap_or_else(|_| {
+                                    Err(crate::ubiblk_error!(IoError {
+                                        source: std::io::Error::other(
+                                            "remote stripe dial thread panicked"
+                                        ),
+                                    }))
+                                }));
+                            }
+                            Ok(results)
+                        })?;
+                        for result in results {
+                            clients.push(result?);
+                        }
                     }
                     let stripe_source =
                         RemoteStripeSource::new(clients, connect, self.stripe_sector_count)?;

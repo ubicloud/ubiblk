@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
         Arc,
     },
     thread::JoinHandle,
@@ -23,7 +24,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use ubiblk_macros::error_context;
 
-use crate::block_device::StatusReporter;
+use crate::block_device::{BgWorkerRequest, StatusReporter};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -31,6 +32,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 struct RpcState {
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
+    bgworker_sender: Option<Sender<BgWorkerRequest>>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +76,7 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     path: P,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<IoTracker>,
+    bgworker_sender: Option<Sender<BgWorkerRequest>>,
 ) -> Result<RpcServerHandle> {
     let path = path.as_ref().to_path_buf();
     if let Err(e) = fs::remove_file(&path) {
@@ -99,6 +102,7 @@ pub fn start_rpc_server<P: AsRef<Path>>(
     let state = Arc::new(RpcState {
         status_reporter,
         io_trackers,
+        bgworker_sender,
     });
 
     info!("RPC server listening on {:?}", path);
@@ -221,6 +225,13 @@ fn process_request(request: RpcRequest, state: &RpcState) -> Value {
             let queue_snapshots = queue_snapshots(state);
             json!({ "queues": queue_snapshots })
         }
+        "start_autofetch" => match &state.bgworker_sender {
+            Some(sender) => match sender.send(BgWorkerRequest::StartAutofetch) {
+                Ok(()) => json!({ "autofetch": "requested" }),
+                Err(_) => json!({ "error": "background worker is not running" }),
+            },
+            None => json!({ "error": "no background worker (no stripe source)" }),
+        },
         "stats" => {
             let queue_stats: Vec<Value> = state
                 .io_trackers
@@ -262,6 +273,7 @@ mod tests {
     use serde_json::Value;
     use std::io::Write;
     use std::os::unix::net::UnixStream;
+    use std::sync::mpsc::channel;
     use std::time::Duration;
 
     fn test_socket_path(test_name: &str) -> PathBuf {
@@ -307,9 +319,54 @@ mod tests {
     }
 
     #[test]
+    fn test_start_autofetch_sends_the_request_to_the_bgworker() {
+        let path = test_socket_path("start_autofetch");
+        let (sender, receiver) = channel();
+        let handle = start_rpc_server(&path, None, vec![], Some(sender))
+            .expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "start_autofetch");
+        handle.stop().unwrap();
+
+        assert_eq!(response["autofetch"], "requested");
+        let request = receiver.try_recv();
+        assert!(matches!(request, Ok(BgWorkerRequest::StartAutofetch)));
+    }
+
+    #[test]
+    fn test_start_autofetch_without_a_bgworker_reports_an_error() {
+        let path = test_socket_path("start_autofetch_absent");
+        let handle =
+            start_rpc_server(&path, None, vec![], None).expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "start_autofetch");
+        handle.stop().unwrap();
+
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("no background worker")));
+    }
+
+    #[test]
+    fn test_start_autofetch_after_the_bgworker_is_gone_reports_an_error() {
+        let path = test_socket_path("start_autofetch_gone");
+        let (sender, receiver) = channel::<BgWorkerRequest>();
+        drop(receiver);
+        let handle = start_rpc_server(&path, None, vec![], Some(sender))
+            .expect("Failed to start RPC server");
+
+        let response = rpc_call(&path, "start_autofetch");
+        handle.stop().unwrap();
+
+        assert!(response["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("not running")));
+    }
+
+    #[test]
     fn test_nonexistent_directory_socket_path() {
         let bad_path = PathBuf::from("/nonexistent_directory/ubiblk_rpc.sock");
-        let result = start_rpc_server(&bad_path, None, vec![]);
+        let result = start_rpc_server(&bad_path, None, vec![], None);
         assert!(result.is_err());
     }
 
@@ -319,7 +376,7 @@ mod tests {
         // This is reliably not removable via `remove_file()`.
         let bad_path = std::env::current_dir().unwrap();
 
-        let result = start_rpc_server(&bad_path, None, vec![]);
+        let result = start_rpc_server(&bad_path, None, vec![], None);
         assert!(result.is_err());
         assert!(result
             .err()
@@ -333,7 +390,8 @@ mod tests {
         let path = test_socket_path("version");
 
         // Start server with no trackers and no reporter
-        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+        let handle =
+            start_rpc_server(&path, None, vec![], None).expect("Failed to start RPC server");
 
         let response = rpc_call(&path, "version");
 
@@ -354,8 +412,8 @@ mod tests {
         let shared_state = SharedMetadataState::new(&metadata);
         let reporter = StatusReporter::new(shared_state, 64 * 2048);
 
-        let handle =
-            start_rpc_server(&path, Some(reporter), vec![]).expect("Failed to start RPC server");
+        let handle = start_rpc_server(&path, Some(reporter), vec![], None)
+            .expect("Failed to start RPC server");
 
         let response = rpc_call(&path, "status");
         handle.stop().expect("Failed to stop RPC server");
@@ -374,7 +432,8 @@ mod tests {
         let path = test_socket_path("status_empty");
 
         // Start server with None for status_reporter
-        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+        let handle =
+            start_rpc_server(&path, None, vec![], None).expect("Failed to start RPC server");
 
         let response = rpc_call(&path, "status");
 
@@ -405,7 +464,7 @@ mod tests {
 
         // Start server with multiple trackers and no reporter
         let handle =
-            start_rpc_server(&path, None, io_trackers).expect("Failed to start RPC server");
+            start_rpc_server(&path, None, io_trackers, None).expect("Failed to start RPC server");
 
         let response = rpc_call(&path, "queues");
 
@@ -428,7 +487,8 @@ mod tests {
         let path = test_socket_path("queues_empty");
 
         // Start server with empty trackers vector
-        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+        let handle =
+            start_rpc_server(&path, None, vec![], None).expect("Failed to start RPC server");
 
         let response = rpc_call(&path, "queues");
 
@@ -442,7 +502,8 @@ mod tests {
     #[test]
     fn test_rpc_unknown_command() {
         let path = test_socket_path("unknown");
-        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+        let handle =
+            start_rpc_server(&path, None, vec![], None).expect("Failed to start RPC server");
 
         let response = rpc_call(&path, "destroy_world");
 
@@ -457,7 +518,8 @@ mod tests {
     #[test]
     fn test_ignore_empty_lines() {
         let path = test_socket_path("empty_lines");
-        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+        let handle =
+            start_rpc_server(&path, None, vec![], None).expect("Failed to start RPC server");
 
         let mut stream = connect(&path);
 
@@ -477,7 +539,8 @@ mod tests {
     #[test]
     fn test_rpc_malformed_json() {
         let path = test_socket_path("malformed");
-        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+        let handle =
+            start_rpc_server(&path, None, vec![], None).expect("Failed to start RPC server");
 
         let mut stream = connect(&path);
 
@@ -519,7 +582,7 @@ mod tests {
         let io_trackers = vec![io_tracker_1, io_tracker_2, io_tracker_3];
 
         let handle =
-            start_rpc_server(&path, None, io_trackers).expect("Failed to start RPC server");
+            start_rpc_server(&path, None, io_trackers, None).expect("Failed to start RPC server");
 
         let response = rpc_call(&path, "stats");
 
@@ -559,7 +622,8 @@ mod tests {
         let path = test_socket_path("stats_empty");
 
         // Start server with empty trackers vector
-        let handle = start_rpc_server(&path, None, vec![]).expect("Failed to start RPC server");
+        let handle =
+            start_rpc_server(&path, None, vec![], None).expect("Failed to start RPC server");
 
         let response = rpc_call(&path, "stats");
 

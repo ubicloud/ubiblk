@@ -26,7 +26,6 @@ enum FetchState {
 pub struct StripeFetcher {
     stripe_source: Box<dyn StripeSource>,
     fetch_target_channel: Box<dyn IoChannel>,
-    #[cfg_attr(not(test), allow(dead_code))]
     source_sector_count: u64,
     target_sector_count: u64,
     stripe_sector_count: u64,
@@ -153,13 +152,24 @@ impl StripeFetcher {
         }
     }
 
-    #[cfg(test)]
     pub fn source_stripe_count(&self) -> u64 {
         self.source_sector_count.div_ceil(self.stripe_sector_count)
     }
 
     pub fn take_finished_fetches(&mut self) -> Vec<(usize, bool)> {
         std::mem::take(&mut self.finished_fetches)
+    }
+
+    pub fn enable_autofetch(&mut self) {
+        if self.autofetch {
+            return;
+        }
+        self.autofetch = true;
+        self.autofetch_queue = (0..self.source_stripe_count() as usize).collect();
+        info!(
+            "autofetch enabled at runtime; queued {} stripes",
+            self.autofetch_queue.len()
+        );
     }
 
     pub fn update_autofetch(&mut self) {
@@ -464,6 +474,63 @@ mod tests {
             assert!(*stripe_id == idx);
             assert!(success);
         }
+    }
+
+    #[test]
+    fn test_autofetch_can_be_enabled_at_runtime() {
+        let mut state = prep(false);
+        for _ in 0..100 {
+            state.fetcher.update();
+        }
+        assert_eq!(state.fetcher.take_finished_fetches().len(), 0);
+
+        state.fetcher.enable_autofetch();
+        for _ in 0..1000 {
+            state.fetcher.update();
+        }
+        let mut finished = state.fetcher.take_finished_fetches();
+        let source_stripe_count = state.fetcher.source_stripe_count() as usize;
+        assert_eq!(finished.len(), source_stripe_count);
+        finished.sort_by_key(|(stripe_id, _)| *stripe_id);
+        for (idx, (stripe_id, success)) in finished.iter().enumerate() {
+            assert_eq!(*stripe_id, idx);
+            assert!(success);
+        }
+    }
+
+    #[test]
+    fn test_runtime_autofetch_skips_already_fetched_stripes() {
+        let mut state = prep(false);
+        state.fetcher.handle_fetch_request(1);
+        for _ in 0..100 {
+            state.fetcher.update();
+        }
+        let first = state.fetcher.take_finished_fetches();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, 1);
+
+        state.fetcher.enable_autofetch();
+        for _ in 0..1000 {
+            state.fetcher.update();
+        }
+        let rest = state.fetcher.take_finished_fetches();
+        let source_stripe_count = state.fetcher.source_stripe_count() as usize;
+        assert_eq!(rest.len(), source_stripe_count - 1);
+        assert!(rest.iter().all(|(stripe_id, _)| *stripe_id != 1));
+    }
+
+    #[test]
+    fn test_enabling_autofetch_twice_does_not_requeue() {
+        let mut state = prep(false);
+        state.fetcher.enable_autofetch();
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        let queued = state.fetcher.autofetch_queue.len();
+        assert!(queued < state.fetcher.source_stripe_count() as usize);
+
+        state.fetcher.enable_autofetch();
+        assert_eq!(state.fetcher.autofetch_queue.len(), queued);
     }
 
     #[test]

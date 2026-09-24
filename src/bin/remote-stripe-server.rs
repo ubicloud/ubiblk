@@ -104,6 +104,7 @@ fn run(args: Args) -> Result<()> {
         let psk = psk.clone();
         thread::spawn(move || {
             let result = (|| -> Result<()> {
+                stream.set_nodelay(true)?;
                 stream.set_read_timeout(Some(operation_timeout))?;
                 stream.set_write_timeout(Some(operation_timeout))?;
                 let stream: DynStream = Box::new(stream);

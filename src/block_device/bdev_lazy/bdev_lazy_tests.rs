@@ -4,7 +4,7 @@ mod tests {
     use crate::block_device::{
         bdev_lazy::{LazyBlockDevice, LazyTask, SharedMetadataState, UbiMetadata},
         bdev_test::{TestBlockDevice, TestDeviceMetrics},
-        metadata_flags, BgWorker, BlockDevice, IoChannel,
+        metadata_flags, AutofetchControl, BgWorker, BlockDevice, IoChannel,
     };
     use crate::block_device::{shared_buffer, SharedBuffer};
     use std::cell::RefCell;
@@ -65,6 +65,7 @@ mod tests {
                 &metadata_dev,
                 SECTOR_SIZE,
                 false,
+                AutofetchControl::new(),
                 metadata_state.clone(),
             )
             .unwrap();
@@ -107,6 +108,7 @@ mod tests {
                 &metadata_dev,
                 SECTOR_SIZE,
                 false,
+                AutofetchControl::new(),
                 metadata_state.clone(),
             )
             .unwrap();

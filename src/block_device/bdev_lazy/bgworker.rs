@@ -1,6 +1,7 @@
 use super::{
-    metadata::shared_state::SharedMetadataState, metadata_flusher::MetadataFlusher,
-    stripe_fetcher::StripeFetcher,
+    metadata::shared_state::SharedMetadataState,
+    metadata_flusher::MetadataFlusher,
+    stripe_fetcher::{AutofetchControl, StripeFetcher},
 };
 
 use crate::{block_device::BlockDevice, stripe_source::StripeSource, Result};
@@ -19,6 +20,7 @@ impl LazyTask {
         metadata_dev: &dyn BlockDevice,
         alignment: usize,
         autofetch: bool,
+        autofetch_control: AutofetchControl,
         metadata_state: SharedMetadataState,
     ) -> Result<Self> {
         let source_sector_count = stripe_source.sector_count();
@@ -31,6 +33,7 @@ impl LazyTask {
             metadata_state.clone(),
             alignment,
             autofetch,
+            autofetch_control,
         )?;
         Ok(LazyTask {
             stripe_fetcher,
@@ -105,6 +108,7 @@ mod tests {
             &metadata_dev,
             4096,
             false,
+            AutofetchControl::new(),
             metadata_state.clone(),
         )
         .unwrap();
@@ -140,6 +144,7 @@ mod tests {
             &metadata_dev,
             4096,
             false,
+            AutofetchControl::new(),
             metadata_state,
         )
         .expect("a lazy task should support a null source device");

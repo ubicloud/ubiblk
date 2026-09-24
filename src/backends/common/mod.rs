@@ -13,8 +13,8 @@ use ubiblk_macros::error_context;
 
 use crate::{
     block_device::{
-        self, BgWorker, BgWorkerRequest, BlockDevice, LazyTask, SharedMetadataState,
-        StatusReporter, SyncBlockDevice, UbiMetadata, UringBlockDevice,
+        self, AutofetchControl, BgWorker, BgWorkerRequest, BlockDevice, LazyTask,
+        SharedMetadataState, StatusReporter, SyncBlockDevice, UbiMetadata, UringBlockDevice,
     },
     config::v2,
     stripe_source::StripeSourceBuilder,
@@ -33,6 +33,7 @@ struct BgWorkerConfig {
     metadata_dev: Box<dyn BlockDevice>,
     alignment: usize,
     autofetch: bool,
+    autofetch_control: AutofetchControl,
     shared_state: SharedMetadataState,
     receiver: Receiver<BgWorkerRequest>,
 }
@@ -46,6 +47,7 @@ pub struct BackendEnv {
     config: v2::Config,
     status_reporter: Option<StatusReporter>,
     io_trackers: Vec<io_tracking::IoTracker>,
+    autofetch_control: AutofetchControl,
 }
 
 impl BackendEnv {
@@ -67,6 +69,7 @@ impl BackendEnv {
         match metadata_device {
             None => Ok(BackendEnv {
                 bdev: disk_device,
+                autofetch_control: AutofetchControl::new(),
                 bgworker_config: None,
                 bgworker_sender: None,
                 bgworker_thread: None,
@@ -116,6 +119,10 @@ impl BackendEnv {
         self.status_reporter.clone()
     }
 
+    pub fn autofetch_control(&self) -> AutofetchControl {
+        self.autofetch_control.clone()
+    }
+
     pub fn io_trackers(&self) -> &Vec<io_tracking::IoTracker> {
         &self.io_trackers
     }
@@ -157,6 +164,7 @@ impl BackendEnv {
             metadata.has_fetched_all_stripes(),
         ));
 
+        let autofetch_control = AutofetchControl::new();
         let bgworker_config = BgWorkerConfig {
             target_dev: disk_device,
             stripe_source_builder,
@@ -166,12 +174,14 @@ impl BackendEnv {
                 .stripe_source
                 .as_ref()
                 .is_some_and(|stripe_source| stripe_source.autofetch()),
+            autofetch_control: autofetch_control.clone(),
             shared_state,
             receiver: bgworker_receiver,
         };
 
         Ok(BackendEnv {
             bdev: bdev_lazy,
+            autofetch_control,
             bgworker_config: Some(bgworker_config),
             bgworker_sender: Some(bgworker_sender),
             bgworker_thread: None,
@@ -262,6 +272,7 @@ impl BackendEnv {
             metadata_dev,
             alignment,
             autofetch,
+            autofetch_control,
             shared_state,
             receiver,
         } = config;
@@ -280,6 +291,7 @@ impl BackendEnv {
             &*metadata_dev,
             alignment,
             autofetch,
+            autofetch_control,
             shared_state,
         )?;
         let mut worker = BgWorker::new(receiver);
@@ -314,7 +326,13 @@ where
     let _rpc_handle = if let Some(path) = config.device.rpc_socket.as_ref() {
         let status_reporter = backend_env.status_reporter();
         let io_trackers = backend_env.io_trackers().clone();
-        Some(rpc::start_rpc_server(path, status_reporter, io_trackers)?)
+        let autofetch_control = backend_env.autofetch_control();
+        Some(rpc::start_rpc_server(
+            path,
+            status_reporter,
+            io_trackers,
+            Some(autofetch_control),
+        )?)
     } else {
         None
     };
@@ -684,6 +702,7 @@ mod tests {
                 metadata_dev: Box::new(metadata_dev),
                 alignment: 4096,
                 autofetch: false,
+                autofetch_control: AutofetchControl::new(),
                 shared_state,
                 receiver,
             },

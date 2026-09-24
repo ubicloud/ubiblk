@@ -1,4 +1,6 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use log::{debug, error, info, warn};
 
@@ -23,6 +25,31 @@ enum FetchState {
     Fetched,
 }
 
+/// A latch the RPC server can flip to turn autofetch on after the backend is
+/// already running.
+///
+/// Resuming a paused volume on a new host wants both things that fight each
+/// other: the tenant's first query served as soon as possible, and the volume
+/// caught up so it stops depending on the source. Starting with autofetch off
+/// and switching it on once the workload is up gets both, but only if the
+/// running backend can be told to start.
+#[derive(Clone, Default)]
+pub struct AutofetchControl(Arc<AtomicBool>);
+
+impl AutofetchControl {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn requested(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 pub struct StripeFetcher {
     stripe_source: Box<dyn StripeSource>,
     fetch_target_channel: Box<dyn IoChannel>,
@@ -39,6 +66,8 @@ pub struct StripeFetcher {
     allocated_buffers: HashMap<usize, SharedBuffer>,
     finished_fetches: Vec<(usize, bool)>,
     autofetch: bool,
+    autofetch_control: AutofetchControl,
+    source_stripe_count: usize,
     disconnected: bool,
 }
 
@@ -50,6 +79,7 @@ impl StripeFetcher {
         shared_metadata_state: SharedMetadataState,
         alignment: usize,
         autofetch: bool,
+        autofetch_control: AutofetchControl,
     ) -> Result<Self> {
         let fetch_target_channel = target_dev.create_channel()?;
 
@@ -74,9 +104,9 @@ impl StripeFetcher {
             }));
         }
 
-        let source_stripe_count = source_sector_count.div_ceil(stripe_sector_count);
+        let source_stripe_count = source_sector_count.div_ceil(stripe_sector_count) as usize;
         let autofetch_queue = if autofetch {
-            (0..source_stripe_count as usize).collect()
+            (0..source_stripe_count).collect()
         } else {
             VecDeque::new()
         };
@@ -95,6 +125,8 @@ impl StripeFetcher {
             allocated_buffers: HashMap::new(),
             finished_fetches: Vec::new(),
             autofetch,
+            autofetch_control,
+            source_stripe_count,
             autofetch_queue,
             disconnected: false,
         })
@@ -162,7 +194,22 @@ impl StripeFetcher {
         std::mem::take(&mut self.finished_fetches)
     }
 
+    /// Queue every stripe for background fetch. `handle_fetch_request` drops
+    /// stripes that are already fetched or have no source, so this is safe to
+    /// call after the volume has been serving reads lazily for a while.
+    fn enable_autofetch(&mut self) {
+        self.autofetch = true;
+        self.autofetch_queue = (0..self.source_stripe_count).collect();
+        info!(
+            "autofetch enabled at runtime; queued {} stripes",
+            self.autofetch_queue.len()
+        );
+    }
+
     pub fn update_autofetch(&mut self) {
+        if !self.autofetch && self.autofetch_control.requested() {
+            self.enable_autofetch();
+        }
         if self.autofetch && self.fetch_queue.is_empty() {
             if let Some(stripe_id) = self.autofetch_queue.pop_front() {
                 self.handle_fetch_request(stripe_id);
@@ -311,6 +358,7 @@ mod tests {
         source_dev: Box<TestBlockDevice>,
         target_dev: Box<TestBlockDevice>,
         fetcher: StripeFetcher,
+        autofetch_control: AutofetchControl,
     }
 
     fn prep(autofetch: bool) -> TestState {
@@ -333,6 +381,7 @@ mod tests {
         );
 
         let shared_metadata_state = SharedMetadataState::new(&metadata);
+        let autofetch_control = AutofetchControl::new();
 
         let fetcher = StripeFetcher::new(
             stripe_source,
@@ -341,6 +390,7 @@ mod tests {
             shared_metadata_state.clone(),
             SECTOR_SIZE,
             autofetch,
+            autofetch_control.clone(),
         )
         .unwrap();
 
@@ -348,6 +398,7 @@ mod tests {
             source_dev,
             target_dev,
             fetcher,
+            autofetch_control,
         }
     }
 
@@ -403,6 +454,7 @@ mod tests {
             SharedMetadataState::new(&metadata),
             SECTOR_SIZE,
             false,
+            AutofetchControl::new(),
         )
         .unwrap();
 
@@ -464,6 +516,58 @@ mod tests {
             assert!(*stripe_id == idx);
             assert!(success);
         }
+    }
+
+    #[test]
+    fn test_autofetch_can_be_enabled_at_runtime() {
+        // Starts with autofetch off: nothing is fetched no matter how long the
+        // worker runs.
+        let mut state = prep(false);
+        for _ in 0..100 {
+            state.fetcher.update();
+        }
+        assert_eq!(state.fetcher.take_finished_fetches().len(), 0);
+
+        // Flipping the latch queues the whole device.
+        state.autofetch_control.request();
+        for _ in 0..1000 {
+            state.fetcher.update();
+        }
+        let mut finished = state.fetcher.take_finished_fetches();
+        let source_stripe_count = state.fetcher.source_stripe_count() as usize;
+        assert_eq!(finished.len(), source_stripe_count);
+        finished.sort_by_key(|(stripe_id, _)| *stripe_id);
+        for (idx, (stripe_id, success)) in finished.iter().enumerate() {
+            assert_eq!(*stripe_id, idx);
+            assert!(success);
+        }
+    }
+
+    #[test]
+    fn test_runtime_autofetch_skips_already_fetched_stripes() {
+        // Fetch one stripe on demand first, as a lazily-resumed volume would,
+        // then turn autofetch on. The already-fetched stripe must not be
+        // fetched a second time.
+        let mut state = prep(false);
+        state.fetcher.handle_fetch_request(1);
+        for _ in 0..100 {
+            state.fetcher.update();
+        }
+        let first = state.fetcher.take_finished_fetches();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].0, 1);
+
+        state.autofetch_control.request();
+        for _ in 0..1000 {
+            state.fetcher.update();
+        }
+        let rest = state.fetcher.take_finished_fetches();
+        let source_stripe_count = state.fetcher.source_stripe_count() as usize;
+        assert_eq!(rest.len(), source_stripe_count - 1);
+        assert!(
+            rest.iter().all(|(stripe_id, _)| *stripe_id != 1),
+            "stripe 1 was already fetched and must not be fetched again"
+        );
     }
 
     #[test]

@@ -59,6 +59,7 @@ pub use bdev_lazy::{
         types::{metadata_flags, UbiMetadata},
     },
     status_report::{StatusReport, StatusReporter},
+    stripe_fetcher::AutofetchControl,
 };
 
 pub use bdev_crypt::CryptBlockDevice;

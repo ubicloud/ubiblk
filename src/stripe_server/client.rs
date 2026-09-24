@@ -214,6 +214,7 @@ pub fn connect_to_stripe_server(
 
     let tcp =
         TcpStream::connect_timeout(&server_addr, Duration::from_millis(conf.connect_timeout_ms))?;
+    tcp.set_nodelay(true)?;
     tcp.set_read_timeout(Some(Duration::from_millis(
         conf.operation_attempt_timeout_ms,
     )))?;

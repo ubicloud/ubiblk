@@ -72,10 +72,36 @@ impl StripeSourceBuilder {
                         connect_to_stripe_server(&config, &secrets)
                             .map(|client| Box::new(client) as Box<dyn RemoteStripeProvider + Send>)
                     });
+                    // Dial the pool concurrently. Each dial is a TCP connect, a
+                    // TLS handshake and a metadata fetch, all of which are
+                    // latency-bound; doing them one at a time makes startup
+                    // scale linearly with the connection count for no reason.
                     let mut clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
                         Vec::with_capacity(connections);
-                    for _ in 0..connections {
+                    if connections == 1 {
                         clients.push(connect()?);
+                    } else {
+                        let mut handles = Vec::with_capacity(connections);
+                        for i in 0..connections {
+                            let connect = Arc::clone(&connect);
+                            handles.push(
+                                std::thread::Builder::new()
+                                    .name(format!("remote-dial-{i}"))
+                                    .spawn(move || connect())?,
+                            );
+                        }
+                        for handle in handles {
+                            match handle.join() {
+                                Ok(result) => clients.push(result?),
+                                Err(_) => {
+                                    return Err(crate::ubiblk_error!(IoError {
+                                        source: std::io::Error::other(
+                                            "remote stripe dial thread panicked"
+                                        ),
+                                    }))
+                                }
+                            }
+                        }
                     }
                     let stripe_source =
                         RemoteStripeSource::new(clients, connect, self.stripe_sector_count)?;

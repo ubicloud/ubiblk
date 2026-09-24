@@ -214,6 +214,11 @@ pub fn connect_to_stripe_server(
 
     let tcp =
         TcpStream::connect_timeout(&server_addr, Duration::from_millis(conf.connect_timeout_ms))?;
+    // The stripe protocol is a sequence of small request/response exchanges, and
+    // both the handshake and each fetch write a small record and then wait for
+    // the peer. With Nagle enabled that write-write-read pattern deadlocks
+    // against the peer's delayed ACK, costing ~40ms per exchange.
+    tcp.set_nodelay(true)?;
     tcp.set_read_timeout(Some(Duration::from_millis(
         conf.operation_attempt_timeout_ms,
     )))?;

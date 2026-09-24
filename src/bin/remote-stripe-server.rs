@@ -104,6 +104,10 @@ fn run(args: Args) -> Result<()> {
         let psk = psk.clone();
         thread::spawn(move || {
             let result = (|| -> Result<()> {
+                // See the matching comment in connect_to_stripe_server: without
+                // this the server's small replies wait on the client's
+                // delayed ACK.
+                stream.set_nodelay(true)?;
                 stream.set_read_timeout(Some(operation_timeout))?;
                 stream.set_write_timeout(Some(operation_timeout))?;
                 let stream: DynStream = Box::new(stream);

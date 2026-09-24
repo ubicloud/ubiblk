@@ -116,6 +116,10 @@ impl BackendEnv {
         self.status_reporter.clone()
     }
 
+    pub fn bgworker_sender(&self) -> Option<Sender<BgWorkerRequest>> {
+        self.bgworker_sender.clone()
+    }
+
     pub fn io_trackers(&self) -> &Vec<io_tracking::IoTracker> {
         &self.io_trackers
     }
@@ -314,7 +318,13 @@ where
     let _rpc_handle = if let Some(path) = config.device.rpc_socket.as_ref() {
         let status_reporter = backend_env.status_reporter();
         let io_trackers = backend_env.io_trackers().clone();
-        Some(rpc::start_rpc_server(path, status_reporter, io_trackers)?)
+        let bgworker_sender = backend_env.bgworker_sender();
+        Some(rpc::start_rpc_server(
+            path,
+            status_reporter,
+            io_trackers,
+            bgworker_sender,
+        )?)
     } else {
         None
     };

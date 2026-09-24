@@ -7,6 +7,7 @@ use super::bdev_lazy::bgworker::LazyTask;
 pub enum BgWorkerRequest {
     Fetch { stripe_id: usize },
     SetWritten { stripe_id: usize },
+    StartAutofetch,
     Shutdown,
 }
 
@@ -46,6 +47,11 @@ impl BgWorker {
             BgWorkerRequest::SetWritten { stripe_id } => {
                 if let Some(lazy) = self.lazy() {
                     lazy.set_stripe_written(stripe_id);
+                }
+            }
+            BgWorkerRequest::StartAutofetch => {
+                if let Some(lazy) = self.lazy() {
+                    lazy.start_autofetch();
                 }
             }
             BgWorkerRequest::Shutdown => {
@@ -121,6 +127,18 @@ mod tests {
         let (sender, requests) = channel::<BgWorkerRequest>();
         let mut worker = BgWorker::new(requests);
         drop(sender);
+
+        worker.run();
+
+        assert!(worker.done);
+    }
+
+    #[test]
+    fn a_start_autofetch_request_without_a_lazy_task_is_ignored() {
+        let (sender, requests) = channel();
+        let mut worker = BgWorker::new(requests);
+        sender.send(BgWorkerRequest::StartAutofetch).unwrap();
+        sender.send(BgWorkerRequest::Shutdown).unwrap();
 
         worker.run();
 

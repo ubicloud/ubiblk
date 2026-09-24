@@ -51,6 +51,10 @@ impl LazyTask {
         self.metadata_flusher.set_stripe_written(stripe_id);
     }
 
+    pub fn start_autofetch(&mut self) {
+        self.stripe_fetcher.enable_autofetch();
+    }
+
     pub fn update(&mut self) {
         self.stripe_fetcher.update();
         for (stripe_id, success) in self.stripe_fetcher.take_finished_fetches() {
@@ -168,5 +172,28 @@ mod tests {
         }
 
         assert!(metadata_state.is_stripe_failed(0));
+    }
+
+    #[test]
+    fn a_start_autofetch_request_fetches_without_a_fetch_request() {
+        let stripe_sector_count = 1u64 << 11;
+        let source_dev = TestBlockDevice::new(1024 * 1024);
+        let stripe_source = Box::new(
+            stripe_source::BlockDeviceStripeSource::new(source_dev.clone(), stripe_sector_count)
+                .unwrap(),
+        );
+
+        let (mut bg_worker, sender, metadata_state) = build_bg_worker_with_source(stripe_source);
+        assert_eq!(metadata_state.fetched_stripes(), 0);
+
+        sender.send(BgWorkerRequest::StartAutofetch).unwrap();
+        bg_worker.receive_requests(true);
+
+        for _ in 0..100 {
+            bg_worker.update();
+        }
+
+        assert!(metadata_state.stripe_fetched(0));
+        assert_eq!(metadata_state.fetched_stripes(), 1);
     }
 }

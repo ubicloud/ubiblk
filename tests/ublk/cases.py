@@ -8,6 +8,7 @@ quietly break the next.
 Binaries default to target/debug; override with UBLK_BACKEND_BIN.
 """
 
+import base64
 import contextlib
 import hashlib
 import os
@@ -36,6 +37,10 @@ REFUSED_QUEUE_DEPTH = 8192
 # Our own wording, not libublk's, so the check does not ride on a dependency.
 REPORTED_FAILURE = "Failed to serve ublk backend"
 
+SPILL_DEVICE_MB = 512
+SPILL_DISK_MB = 64
+SPILL_STRIPE_SECTORS = 2048
+
 
 def prepare(work, *extra):
     """Lay out a device's files; `extra` goes to ubiblk-init."""
@@ -55,10 +60,49 @@ def prepare(work, *extra):
     )
 
 
+def prepare_spill(work):
+    """Lay out a spill device: 512 MiB over a 64 MiB disk, encrypted."""
+    work.mkdir(parents=True, exist_ok=True)
+    with open(work / "hot.raw", "wb") as disk:
+        disk.truncate(SPILL_DISK_MB * 1024 * 1024)
+    key = base64.b64encode(os.urandom(64)).decode()
+    (work / "config.toml").write_text(f"""
+[device]
+data_path = "hot.raw"
+device_id = "spill-test"
+stripe_sector_count_shift = 11
+
+[encryption]
+xts_key.ref = "xts_key"
+
+[secrets.xts_key]
+source.inline = "{key}"
+encoding = "base64"
+
+[danger_zone]
+enabled = true
+allow_inline_plaintext_secrets = true
+
+[spill]
+size_mb = {SPILL_DEVICE_MB}
+max_concurrent_transfers = 4
+
+[spill.store]
+storage = "filesystem"
+path = "cold"
+
+[tuning]
+num_queues = 2
+queue_size = 64
+seg_size_max = 1048576
+""")
+
+
 class Device:
     """A ubiblk-backed ublk device, for the lifetime of a `with` block."""
 
-    def __init__(self, work):
+    def __init__(self, work, prepare=prepare):
+        self.prepare = prepare
         self.work = work
         self.log = work / "backend.log"
         self.symlink = work / "dev"
@@ -66,7 +110,7 @@ class Device:
         self.backend = None
 
     def __enter__(self):
-        prepare(self.work)
+        self.prepare(self.work)
         self.backend = subprocess.Popen(
             ["sudo", BACKEND, "--config", str(self.work / "config.toml"),
              "--device-symlink", str(self.symlink)],
@@ -228,6 +272,60 @@ def case_a_device_the_kernel_refuses_is_reported(suite):
         suite.notok(name, f"{reason}\n--- backend log ---\n{tail}")
 
 
+def case_a_spill_device_is_larger_than_its_disk(suite):
+    name = "a_spill_device_is_larger_than_its_disk"
+    with suite.spill_device(name) as device:
+        size = device.size()
+        limit = r("cat", f"/sys/block/{device.node.name}/queue/chunk_sectors").strip()
+    if size != SPILL_DEVICE_MB * 1024 * 1024:
+        suite.notok(name, f"device is {size} bytes, expected {SPILL_DEVICE_MB} MiB")
+    elif limit != str(SPILL_STRIPE_SECTORS):
+        suite.notok(name, f"chunk_sectors is {limit}, expected {SPILL_STRIPE_SECTORS}")
+    else:
+        suite.ok(name)
+
+
+def case_a_spill_device_keeps_more_than_its_disk_holds(suite):
+    name = "a_spill_device_keeps_more_than_its_disk_holds"
+    megabytes = 3 * SPILL_DISK_MB
+    with suite.spill_device(name) as device:
+        pattern = device.work / "pattern"
+        pattern.write_bytes(os.urandom(megabytes * 1024 * 1024))
+        device.write(pattern, megabytes)
+        want = hashlib.md5(pattern.read_bytes()).hexdigest()
+        got = device.read_digest(megabytes)
+        uploaded = sum(1 for path in (device.work / "cold").rglob("*") if path.is_file())
+    if want != got:
+        suite.notok(name, "what came back is not what went in")
+    elif uploaded < megabytes - SPILL_DISK_MB:
+        suite.notok(name, f"only {uploaded} stripes reached the store")
+    else:
+        suite.ok(name)
+
+
+def case_a_request_across_stripes_is_split_by_the_kernel(suite):
+    name = "a_request_across_stripes_is_split_by_the_kernel"
+    with suite.spill_device(name) as device:
+        # Four sectors straddling the end of the first stripe.
+        data = os.urandom(4 * 512)
+        chunk = device.work / "chunk"
+        chunk.write_bytes(data)
+        seek = SPILL_STRIPE_SECTORS - 2
+        r("sudo", "dd", f"if={chunk}", f"of={device.node}", "bs=512", f"seek={seek}",
+          "count=4", "oflag=direct", "status=none")
+        out = subprocess.run(
+            ["sudo", "dd", f"if={device.node}", "bs=512", f"skip={seek}", "count=4",
+             "iflag=direct", "status=none"],
+            capture_output=True,
+        )
+    if out.returncode != 0:
+        suite.notok(name, f"read failed: {out.stderr.decode(errors='replace')}")
+    elif out.stdout != data:
+        suite.notok(name, "what came back is not what went in")
+    else:
+        suite.ok(name)
+
+
 class Cases(Suite):
     def __init__(self):
         super().__init__()
@@ -236,11 +334,17 @@ class Cases(Suite):
     def device(self, name):
         return Device(self.work / name)
 
+    def spill_device(self, name):
+        return Device(self.work / name, prepare=prepare_spill)
+
     CASES = [
         case_device_appears_with_the_right_size,
         case_data_reads_back_as_written,
         case_shutdown_removes_the_device,
         case_a_device_the_kernel_refuses_is_reported,
+        case_a_spill_device_is_larger_than_its_disk,
+        case_a_spill_device_keeps_more_than_its_disk_holds,
+        case_a_request_across_stripes_is_split_by_the_kernel,
     ]
 
 

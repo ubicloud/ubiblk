@@ -15,6 +15,7 @@ A config file has these top-level sections:
 | `[encryption]` | yes* | Encryption key reference |
 | `[danger_zone]` | no | Safety overrides for development |
 | `[stripe_source]` | no | Where to fetch stripes from |
+| `[spill]` | no | Serve a device larger than `data_path`, evicting stripes to an object store |
 | `[secrets.*]` | no | Named secret definitions |
 
 \* Encryption is required unless `danger_zone.allow_unencrypted_disk = true`.
@@ -48,6 +49,7 @@ vhost_socket = "/var/run/ubiblk.sock"    # optional
 rpc_socket = "/var/run/ubiblk-rpc.sock"  # optional
 device_id = "vm123"                      # optional, default: "ubiblk"
 track_written = false                    # optional, default: false
+stripe_sector_count_shift = 11           # optional, default: 11
 ```
 
 | Field | Type | Required | Default | Description |
@@ -58,6 +60,7 @@ track_written = false                    # optional, default: false
 | `rpc_socket` | path | no | — | RPC Unix socket path |
 | `device_id` | string | no | `"ubiblk"` | Identifier returned to the guest |
 | `track_written` | boolean | no | `false` | Track which stripes have been written |
+| `stripe_sector_count_shift` | integer | no | `11` | Stripe size as a power of two sectors (6–16). Must match the metadata when `metadata_path` is set |
 
 ## `[tuning]`
 
@@ -315,6 +318,32 @@ secret.ref = "psk-secret"
 
 PSK is required unless `danger_zone.allow_unencrypted_connection` is enabled.
 The PSK secret must be at least 16 bytes.
+
+## `[spill]`
+
+Serves a device of `size_mb` over a smaller `data_path`. The local disk is a
+pool of stripe-sized slots (`2^stripe_sector_count_shift` sectors each); stripes
+that do not fit are evicted to `store`. ublk only.
+
+```toml
+[spill]
+size_mb = 4096
+max_concurrent_transfers = 16   # optional, default: 16
+
+[spill.store]
+storage = "filesystem"
+path = "cold"
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `size_mb` | integer | yes | — | Logical capacity in MiB; must exceed the local slot pool |
+| `store` | table | yes | — | Filesystem or S3 storage, as for an archive, without `archive_kek` or `autofetch` |
+| `max_concurrent_transfers` | integer | no | `16` | Fetches and evictions in flight at once |
+
+Spill cannot be combined with `metadata_path` or `[stripe_source]`, the sync
+I/O engine, or `write_through`. It keeps nothing across restarts: every run
+starts from an empty device and writes objects under a fresh run name.
 
 ## Example Configs
 

@@ -72,6 +72,10 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
     let num_queues = config.tuning.num_queues as u16;
     let queue_size = config.tuning.queue_size as u16;
     let io_buf_bytes = config.tuning.seg_size_max;
+    let stripe_sectors = match &config.spill {
+        Some(_) => Some(1u64 << config.device.stripe_sector_count_shift()?),
+        None => None,
+    };
 
     let (created_sender, created_receiver) = std::sync::mpsc::channel();
     let device = Device {
@@ -80,6 +84,7 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
         num_queues,
         queue_size,
         io_buf_bytes,
+        stripe_sectors,
         alignment: backend_alignment,
         symlink: device_symlink.clone(),
     };
@@ -142,6 +147,8 @@ struct Device {
     num_queues: u16,
     queue_size: u16,
     io_buf_bytes: u32,
+    /// When set, no request may cross a multiple of this many sectors.
+    stripe_sectors: Option<u64>,
     alignment: usize,
     symlink: Option<PathBuf>,
 }
@@ -185,16 +192,35 @@ fn run_ublk_device(
     }
 
     let device_size = device.size;
+    let stripe_sectors = device.stripe_sectors;
     let alignment = device.alignment;
     let announce_symlink = device.symlink.clone();
+    let refused = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let announce_refused = refused.clone();
     ctrl.run_target(
-        move |dev| configure_ublk_device(dev, device_size),
+        move |dev| configure_ublk_device(dev, device_size, stripe_sectors),
         move |qid, dev| {
             let io_tracker = io_trackers[qid as usize].clone();
             serve_ublk_queue(qid, dev, bdev.clone(), alignment, io_tracker)
         },
-        move |ctrl| announce_ublk_device(ctrl, announce_symlink.as_deref()),
+        move |ctrl| {
+            if let Err(e) = announce_ublk_device(ctrl, stripe_sectors, announce_symlink.as_deref())
+            {
+                error!("{e}");
+                *announce_refused.lock().expect("refusal") = Some(e);
+                if let Err(e) = ctrl.kill_dev() {
+                    error!("Failed to stop the ublk device: {e}");
+                }
+            }
+        },
     )?;
+
+    if let Some(e) = refused.lock().expect("refusal").take() {
+        if let Err(e) = ctrl.del_dev() {
+            error!("Failed to delete the ublk device: {e}");
+        }
+        return Err(e);
+    }
 
     if let Some(symlink_path) = device.symlink.as_deref() {
         if let Err(err) = remove_device_symlink(symlink_path) {
@@ -225,12 +251,54 @@ fn handle_ctrlc_shutdown(dev_id: u32, device_symlink: Option<&Path>) {
 fn configure_ublk_device(
     dev: &mut UblkDev,
     device_size: u64,
+    stripe_sectors: Option<u64>,
 ) -> std::result::Result<(), UblkError> {
     dev.set_default_params(device_size);
+    if let Some(stripe_sectors) = stripe_sectors {
+        limit_to_stripes(&mut dev.tgt.params.basic, stripe_sectors);
+    }
     Ok(())
 }
 
-fn announce_ublk_device(ctrl: &UblkCtrl, device_symlink: Option<&Path>) {
+/// Keep every request inside one stripe: the kernel splits at multiples of
+/// `chunk_sectors`, and no request is longer than a stripe.
+fn limit_to_stripes(basic: &mut libublk::sys::ublk_param_basic, stripe_sectors: u64) {
+    basic.chunk_sectors = stripe_sectors as u32;
+    basic.max_sectors = basic.max_sectors.min(stripe_sectors as u32);
+}
+
+/// The kernel's effective limit, from sysfs, must be the stripe boundary the
+/// device was configured with. A kernel that dropped it would send requests
+/// crossing stripes, and every one of them would fail.
+fn check_chunk_sectors(sysfs_value: &str, stripe_sectors: u64) -> Result<()> {
+    match sysfs_value.trim().parse::<u64>() {
+        Ok(found) if found == stripe_sectors => Ok(()),
+        _ => Err(crate::ubiblk_error!(InvalidParameter {
+            description: format!(
+                "the kernel reports chunk_sectors {:?}, not the stripe size {stripe_sectors}; \
+                 refusing to serve a device whose requests may cross stripes",
+                sysfs_value.trim()
+            ),
+        })),
+    }
+}
+
+fn announce_ublk_device(
+    ctrl: &UblkCtrl,
+    stripe_sectors: Option<u64>,
+    device_symlink: Option<&Path>,
+) -> Result<()> {
+    // Before anything else: the queue limits are in sysfs as soon as the
+    // device is started, whether or not udev has made its node yet.
+    if let Some(stripe_sectors) = stripe_sectors {
+        let limit = format!(
+            "/sys/block/ublkb{}/queue/chunk_sectors",
+            ctrl.dev_info().dev_id
+        );
+        let found = std::fs::read_to_string(&limit).context(format!("Failed to read {limit}"))?;
+        check_chunk_sectors(&found, stripe_sectors)?;
+    }
+
     let bdev_path = ctrl.get_bdev_path();
 
     // Only create the symlink once the device node exists, so a kernel-side
@@ -240,7 +308,7 @@ fn announce_ublk_device(ctrl: &UblkCtrl, device_symlink: Option<&Path>) {
             "ublk block device node {bdev_path} did not appear: {err}. \
              Not creating device symlink; check `dmesg | grep -i ublk`."
         );
-        return;
+        return Ok(());
     }
 
     info!("ublk device is available at {}", bdev_path);
@@ -253,6 +321,7 @@ fn announce_ublk_device(ctrl: &UblkCtrl, device_symlink: Option<&Path>) {
             );
         }
     }
+    Ok(())
 }
 
 /// Wait for a path to exist, polling until the timeout elapses.
@@ -409,6 +478,32 @@ fn serve_ublk_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_kernel_limit_must_be_the_stripe_size() {
+        assert!(check_chunk_sectors("2048\n", 2048).is_ok());
+        assert!(check_chunk_sectors("0\n", 2048).is_err());
+        assert!(check_chunk_sectors("4096\n", 2048).is_err());
+        assert!(check_chunk_sectors("", 2048).is_err());
+    }
+
+    #[test]
+    fn a_spill_device_limits_requests_to_one_stripe() {
+        let mut basic = libublk::sys::ublk_param_basic {
+            max_sectors: 2048,
+            ..Default::default()
+        };
+        limit_to_stripes(&mut basic, 256);
+        assert_eq!((basic.chunk_sectors, basic.max_sectors), (256, 256));
+
+        // A buffer smaller than a stripe still bounds the request.
+        let mut basic = libublk::sys::ublk_param_basic {
+            max_sectors: 128,
+            ..Default::default()
+        };
+        limit_to_stripes(&mut basic, 256);
+        assert_eq!((basic.chunk_sectors, basic.max_sectors), (256, 128));
+    }
 
     #[test]
     fn test_create_device_symlink() {

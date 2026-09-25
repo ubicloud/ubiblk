@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use super::{tuning::TuningSection, Config, DeviceSection, EncryptionSection};
+use super::{spill::SpillSection, tuning::TuningSection, Config, DeviceSection, EncryptionSection};
 use crate::{
     config::v2::{
         includes::resolve_includes,
@@ -41,6 +41,14 @@ impl Config {
             stripe_source.validate(&common.danger_zone, &common.secrets)?;
         }
 
+        device.stripe_sector_count_shift()?;
+
+        let mut spill: Option<SpillSection> = parse_optional_section(&merged, "spill")?;
+        if let Some(spill) = &mut spill {
+            spill.resolve_paths(config_dir);
+            spill.validate(&device, &tuning, stripe_source.is_some(), &common.secrets)?;
+        }
+
         if let Some(encryption) = &encryption {
             encryption.validate_secrets(&common.secrets)?;
         } else if !(common.danger_zone.enabled && common.danger_zone.allow_unencrypted_disk) {
@@ -55,17 +63,19 @@ impl Config {
             encryption,
             danger_zone: common.danger_zone,
             stripe_source,
+            spill,
             secrets: common.secrets,
         })
     }
 
-    fn allowed_top_level_keys() -> [&'static str; 6] {
+    fn allowed_top_level_keys() -> [&'static str; 7] {
         [
             "device",
             "tuning",
             "encryption",
             "danger_zone",
             "stripe_source",
+            "spill",
             "secrets",
         ]
     }
@@ -311,6 +321,8 @@ fn validate_top_level_keys(root: &toml::Value, allowed_keys: &[&str]) -> Result<
 mod tests {
     use super::*;
 
+    use crate::config::v2::stripe_source::ArchiveStorageConfig;
+
     fn parse_config(toml: &str) -> Result<Config> {
         let value: toml::Value = toml::from_str(toml).unwrap();
         Config::load_from_value(value, Path::new("."))
@@ -345,6 +357,140 @@ mod tests {
         assert!(config.encryption.is_some());
         assert_eq!(config.secrets.len(), 1);
         assert!(config.secrets.contains_key("my_xts_key"));
+    }
+
+    fn spill_config(device_extra: &str, spill_extra: &str, tuning: &str) -> String {
+        format!(
+            r#"
+            [device]
+            data_path = "hot.raw"
+            {device_extra}
+            [spill]
+            size_mb = 4096
+            {spill_extra}
+            [spill.store]
+            storage = "filesystem"
+            path = "cold"
+            [tuning]
+            {tuning}
+            [danger_zone]
+            enabled = true
+            allow_unencrypted_disk = true
+        "#
+        )
+    }
+
+    #[test]
+    fn loads_a_spill_section() {
+        let value: toml::Value = toml::from_str(&spill_config(
+            "stripe_sector_count_shift = 12",
+            "max_concurrent_transfers = 4",
+            "",
+        ))
+        .unwrap();
+        let config =
+            Config::load_from_value(value, Path::new("/etc/ubiblk")).expect("spill config");
+        let spill = config.spill.expect("a spill section");
+        assert_eq!(spill.size_mb, 4096);
+        assert_eq!(spill.max_concurrent_transfers, 4);
+        assert_eq!(config.device.stripe_sector_count_shift().unwrap(), 12);
+        assert_eq!(
+            spill.store,
+            ArchiveStorageConfig::Filesystem {
+                path: PathBuf::from("/etc/ubiblk/cold"),
+                archive_kek: None,
+                autofetch: false,
+            }
+        );
+    }
+
+    #[test]
+    fn spill_defaults_the_stripe_and_transfer_settings() {
+        let config = parse_config(&spill_config("", "", "")).expect("spill config");
+        assert_eq!(config.device.stripe_sector_count_shift().unwrap(), 11);
+        assert_eq!(config.spill.unwrap().max_concurrent_transfers, 16);
+    }
+
+    #[test]
+    fn rejects_spill_settings_it_cannot_honour() {
+        let base = spill_config("", "", "");
+        let cases = [
+            (
+                "zero size",
+                base.replace("size_mb = 4096", "size_mb = 0"),
+                "not a usable size",
+            ),
+            (
+                "size overflow",
+                base.replace("size_mb = 4096", "size_mb = 9223372036854775807"),
+                "not a usable size",
+            ),
+            (
+                "zero transfers",
+                spill_config("", "max_concurrent_transfers = 0", ""),
+                "max_concurrent_transfers",
+            ),
+            (
+                "stripe shift too small",
+                spill_config("stripe_sector_count_shift = 5", "", ""),
+                "out of range",
+            ),
+            (
+                "stripe shift too large",
+                spill_config("stripe_sector_count_shift = 17", "", ""),
+                "out of range",
+            ),
+            (
+                "too many stripes",
+                spill_config("stripe_sector_count_shift = 6", "", "")
+                    .replace("size_mb = 4096", "size_mb = 1048576"),
+                "more than the",
+            ),
+            (
+                "transfer buffers too large",
+                spill_config(
+                    "stripe_sector_count_shift = 16",
+                    "max_concurrent_transfers = 64",
+                    "",
+                ),
+                "bytes of buffers",
+            ),
+            (
+                "sync engine",
+                spill_config("", "", "io_engine = \"sync\""),
+                "sync engine",
+            ),
+            (
+                "write_through",
+                spill_config("", "", "write_through = true"),
+                "write_through",
+            ),
+            (
+                "lazy metadata",
+                spill_config("metadata_path = \"meta\"", "", ""),
+                "lazy metadata",
+            ),
+            (
+                "autofetch",
+                base.replace(
+                    "path = \"cold\"",
+                    "path = \"cold\"\n            autofetch = true",
+                ),
+                "autofetch",
+            ),
+            (
+                "unknown field",
+                spill_config("", "chunk_kb = 128", ""),
+                "unknown field",
+            ),
+        ];
+        for (what, toml, reason) in cases {
+            let err = parse_config(&toml).expect_err(what).to_string();
+            assert!(
+                err.contains(reason),
+                "{what} was refused for another reason: {err}"
+            );
+        }
     }
 
     #[test]

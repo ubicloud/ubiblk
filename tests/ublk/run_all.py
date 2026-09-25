@@ -14,7 +14,6 @@ ublk_drv. Override the backend with UBLK_BACKEND_BIN.
 
 import os
 import pathlib
-import shutil
 import subprocess
 import sys
 
@@ -47,12 +46,18 @@ def check_driver():
         sys.exit("/dev/ublk-control is missing after loading ublk_drv")
 
 
+def remove_work():
+    # The backend runs as root, so what it writes (a spill device's store) is
+    # root's to remove.
+    subprocess.run(["sudo", "rm", "-rf", str(WORK)], capture_output=True)
+
+
 def main():
     check_binaries()
     check_driver()
 
-    shutil.rmtree(WORK, ignore_errors=True)
-    install_exit_handler(lambda: shutil.rmtree(WORK, ignore_errors=True))
+    remove_work()
+    install_exit_handler(remove_work)
 
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
     from cases import Cases

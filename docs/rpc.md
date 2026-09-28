@@ -100,6 +100,49 @@ Returns a per-queue snapshot of recently observed I/O activity.
 }
 ```
 
+## `start_autofetch`
+
+Turns on background stripe fetching for a lazily fetched device that was
+started with `autofetch = false`. The background worker queues every stripe
+the source has. Stripes already fetched are skipped, so the request is safe
+on a device that has been serving reads on demand, and repeating it is a
+no-op. This lets a device start without catch-up competing with the guest for
+the disk, and turn catch-up on once the workload is up.
+
+The response only confirms that the request reached the background worker.
+Track progress with `status`.
+
+**Request**
+
+```json
+{"command": "start_autofetch"}
+```
+
+**Output spec**
+
+- Top-level object with:
+  - `autofetch` (string): `"requested"` once the request has been handed to
+    the background worker.
+- On failure, an error object with:
+  - `error` (string): the device has no background worker (no stripe source
+    is configured), or the worker has already stopped.
+
+**Example response**
+
+```json
+{"autofetch":"requested"}
+```
+
+**Example error responses**
+
+```json
+{"error":"no background worker (no stripe source)"}
+```
+
+```json
+{"error":"background worker is not running"}
+```
+
 ## `stats`
 
 Returns cumulative counters for each queue.

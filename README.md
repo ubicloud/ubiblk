@@ -9,14 +9,18 @@ A block device utilities collection for virtualized environments.
 2. Install `isa-l_crypto`:
 
 ```bash
-sudo apt-get install autoconf libtool nasm clang
+sudo apt-get install autoconf libtool nasm clang     # dnf on Fedora/RHEL/Amazon Linux
 git clone https://github.com/intel/isa-l_crypto
 cd isa-l_crypto/
 ./autogen.sh
-./configure --prefix=/usr --libdir=/usr/lib
+./configure --prefix=/usr
 make -j32
 sudo make install
 ```
+
+The build looks for `libisal_crypto.a` and `isa-l_crypto.h` under `/usr` and
+`/usr/local`, taking `lib64` before `lib`. Point it elsewhere with
+`ISA_L_CRYPTO_LIB_DIR` and `ISA_L_CRYPTO_INCLUDE_DIR`.
 
 3. Build the project:
 

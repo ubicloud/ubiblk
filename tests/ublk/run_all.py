@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Run the ublk tests (cases.py) against a real ublk device.
 
-Checks the ubiblk binaries are built and the ublk driver is loadable, then runs
+Checks the ubiblk binaries are built and that ublk is available, taking the
+control device if it is already there and loading ublk_drv otherwise, then runs
 the cases and removes the scratch directory afterwards, whether they pass, fail,
 or the run is cancelled.
 
     cargo build --bin ublk-backend --bin init-metadata
     python3 tests/ublk/run_all.py
 
-Needs root for the ublk control device (it uses sudo), and a kernel with
-ublk_drv. Override the backend with UBLK_BACKEND_BIN.
+Needs root for the ublk control device (it uses sudo), and a kernel with ublk.
+Override the backend with UBLK_BACKEND_BIN.
 """
 
 import os
@@ -24,6 +25,7 @@ from harness import install_exit_handler
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORK = ROOT / "target" / "tests" / "ublk"
+CONTROL_DEVICE = "/dev/ublk-control"
 
 
 def check_binaries():
@@ -41,10 +43,12 @@ def check_binaries():
 
 
 def check_driver():
+    if os.path.exists(CONTROL_DEVICE):
+        return
     if subprocess.run(["sudo", "modprobe", "ublk_drv"], capture_output=True).returncode != 0:
         sys.exit("ublk_drv could not be loaded; these tests need a kernel with ublk")
-    if not os.path.exists("/dev/ublk-control"):
-        sys.exit("/dev/ublk-control is missing after loading ublk_drv")
+    if not os.path.exists(CONTROL_DEVICE):
+        sys.exit(f"{CONTROL_DEVICE} is missing after loading ublk_drv")
 
 
 def main():

@@ -26,7 +26,8 @@ stops ublk devices being created at all is otherwise green everywhere.
 ## Running locally
 
 Needs root for the ublk control device (the tests use `sudo`) and a kernel with
-`ublk_drv`.
+ublk. The launcher accepts ublk built in, loaded as a module already, or
+loadable with `modprobe ublk_drv`; not every distribution enables it.
 
 ```sh
 cargo build --bin ublk-backend --bin init-metadata

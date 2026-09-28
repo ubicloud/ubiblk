@@ -159,7 +159,9 @@ fetched, written, and whether it exists in the source.
 Setting `autofetch` to `true` instructs the backend to keep fetching stripes in
 the background whenever no manual fetch requests are pending. This can be used
 to progressively catch up with the stripe source even if the guest only accesses
-a small portion of the device.
+a small portion of the device. Autofetch can also be switched on later for a
+running backend with the `start_autofetch` RPC command; see
+[docs/rpc.md](docs/rpc.md).
 
 ## init-metadata
 

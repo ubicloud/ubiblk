@@ -240,9 +240,11 @@ impl StripeArchiver {
         let buffer = self
             .stripe_fetch_buffers
             .remove(&stripe_id)
-            .ok_or(crate::ubiblk_error!(ArchiveError {
-                description: format!("Stripe buffer for stripe {} not found", stripe_id),
-            }))?;
+            .ok_or_else(|| {
+                crate::ubiblk_error!(ArchiveError {
+                    description: format!("Stripe buffer for stripe {} not found", stripe_id),
+                })
+            })?;
 
         let buffer_ref = buffer.borrow();
         if self.is_zero_stripe(buffer_ref.as_slice()) {
@@ -284,7 +286,7 @@ impl StripeArchiver {
     fn poll_uploads(&mut self) -> Result<()> {
         let results = self.archive_store.poll_puts();
         for (obj_name, result) in results {
-            result.context(format!("Upload failed for object {}", obj_name))?;
+            result.with_context(|| format!("Upload failed for object {}", obj_name))?;
             debug!("Completed uploading object {}", obj_name);
             self.inflight_puts = self.inflight_puts.checked_sub(1).ok_or_else(|| {
                 crate::ubiblk_error!(ArchiveError {

@@ -297,6 +297,12 @@ impl UbiblkError {
 /// Extension trait to add context to Results.
 pub trait ResultExt<T> {
     fn context(self, message: impl Into<String>) -> Result<T>;
+
+    /// Add context that is constructed only when the result is an error.
+    fn with_context<F, S>(self, message: F) -> Result<T>
+    where
+        F: FnOnce() -> S,
+        S: Into<String>;
 }
 
 impl<T, E> ResultExt<T> for std::result::Result<T, E>
@@ -308,6 +314,16 @@ where
         let location = std::panic::Location::caller();
         self.map_err(|e| e.into().context_at(message, location))
     }
+
+    #[track_caller]
+    fn with_context<F, S>(self, message: F) -> Result<T>
+    where
+        F: FnOnce() -> S,
+        S: Into<String>,
+    {
+        let location = std::panic::Location::caller();
+        self.map_err(|e| e.into().context_at(message(), location))
+    }
 }
 
 #[cfg(test)]
@@ -318,6 +334,32 @@ mod tests {
     use crate::block_device::BlockDevice;
 
     use super::*;
+
+    #[test]
+    fn lazy_context_is_not_constructed_on_success() {
+        let result: std::io::Result<u32> = Ok(42);
+        assert_eq!(
+            result
+                .with_context(|| -> String { panic!("unexpected context evaluation") })
+                .unwrap(),
+            42
+        );
+    }
+
+    #[test]
+    fn lazy_context_preserves_the_error_and_caller_location() {
+        let result: std::io::Result<()> = Err(std::io::Error::other("original failure"));
+        let line = line!() + 1;
+        let error = result.with_context(|| "operation failed").unwrap_err();
+        let UbiblkError::IoError { source, meta } = error else {
+            panic!("expected the original I/O error");
+        };
+        assert_eq!(source.to_string(), "original failure");
+        assert_eq!(meta.contexts.len(), 1);
+        assert_eq!(meta.contexts[0].0, "operation failed");
+        assert_eq!(meta.contexts[0].1.file, file!());
+        assert_eq!(meta.contexts[0].1.line, line);
+    }
 
     fn assert_starts_with(haystack: &str, needle: &str) {
         assert!(

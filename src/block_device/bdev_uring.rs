@@ -44,7 +44,7 @@ impl UringIoChannel {
         }
         let file = opts
             .open(path)
-            .context(format!("Failed to open file {path}"))?;
+            .with_context(|| format!("Failed to open file {path}"))?;
         let io_uring_entries: u32 = queue_size.try_into().map_err(|_| {
             error!("Invalid queue size: {queue_size}");
             crate::ubiblk_error!(InvalidParameter {

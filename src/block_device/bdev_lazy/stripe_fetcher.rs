@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 
 use log::{debug, error, info, warn};
 
@@ -116,14 +116,16 @@ impl StripeFetcher {
             return;
         }
 
-        if self.stripe_states.contains_key(&stripe_id) {
-            debug!("Stripe {stripe_id} has already been requested");
-            return;
+        match self.stripe_states.entry(stripe_id) {
+            Entry::Occupied(_) => {
+                debug!("Stripe {stripe_id} has already been requested");
+            }
+            Entry::Vacant(entry) => {
+                debug!("Enqueueing stripe {stripe_id} for fetch");
+                self.fetch_queue.push_back(stripe_id);
+                entry.insert(FetchState::Queued);
+            }
         }
-
-        debug!("Enqueueing stripe {stripe_id} for fetch");
-        self.fetch_queue.push_back(stripe_id);
-        self.stripe_states.insert(stripe_id, FetchState::Queued);
     }
 
     pub fn update(&mut self) {

@@ -201,7 +201,7 @@ struct CommonResolvedConfig {
 }
 
 fn load_root_toml(path: &Path, error_context: &str) -> Result<toml::Value> {
-    let content = std::fs::read_to_string(path).context(error_context.to_string())?;
+    let content = std::fs::read_to_string(path).with_context(|| error_context)?;
     warn_if_loose_permissions(path);
     toml::from_str(&content).map_err(|e| {
         ubiblk_error!(InvalidParameter {

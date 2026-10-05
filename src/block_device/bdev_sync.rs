@@ -273,7 +273,6 @@ mod tests {
 
     #[test]
     // Use a pipe to provoke seek failures during read/write operations.
-    // std::mem::forget prevents the pipe file descriptor from being closed twice.
     fn seek_error_paths() -> Result<()> {
         let (read_fd, write_fd) = pipe().map_err(std::io::Error::from)?;
         let file = File::from(write_fd);
@@ -289,7 +288,6 @@ mod tests {
         chan.add_write(0, 1, buf.clone(), 2);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(2, false)]);
-        std::mem::forget(chan);
         Ok(())
     }
 

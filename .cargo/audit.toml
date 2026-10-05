@@ -6,16 +6,23 @@
 
 [advisories]
 ignore = [
+  # Rechecked on 2026-10-05 against bitmaps 3.2.1 and libublk 0.4.8.
+  # Dependency path: ubiblk -> libublk -> bitmaps (cargo tree -i bitmaps).
   # bitmaps is unmaintained. Maintenance-status warning, not an exploitable
   # vulnerability; the only user is libublk, a direct upstream dependency.
-  # There is no patched release (patched = []), and bitmaps is a mandatory,
-  # non-optional dependency of libublk 0.4.8 (the latest), so no upgrade or
-  # feature change removes it.
+  # No patched release exists. libublk 0.4.8 requires bitmaps ^3.2.0 as a
+  # mandatory dependency, so neither a feature change nor a compatible
+  # dependency update removes it. Recheck when libublk changes this dependency.
+  # https://rustsec.org/advisories/RUSTSEC-2026-0247.html
   "RUSTSEC-2026-0247",
-  # Unsound `Bitmap::try_from(&[u8])` can create invalid values. Not reachable
-  # from ubiblk: libublk only constructs bitmaps via `Bitmap::new()` for CPU
-  # affinity (libublk-0.4.8/src/ctrl.rs:241,295), never from untrusted byte
-  # slices.
-  # No patched release exists; see the note above.
+  # Unsound TryFrom<&[u8]> and AsMut<[u8]> can create invalid bool values in
+  # Bitmap<1>. libublk uses Bitmap<1024> for CPU affinity, whose backing
+  # store is [u128; 8], and calls neither affected trait implementation.
+  # Checked libublk-0.4.8/src/ctrl.rs: UblkQueueAffinity constructs bitmaps
+  # with Bitmap::new() (lines 241,295) and exposes bytes through as_bytes()
+  # (lines 250,254). ubiblk does not use bitmaps directly.
+  # No patched release exists; downgrading below the affected versions
+  # (<3.2.0) is incompatible with libublk's requirement above.
+  # https://rustsec.org/advisories/RUSTSEC-2025-0167.html
   "RUSTSEC-2025-0167",
 ]

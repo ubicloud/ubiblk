@@ -131,7 +131,7 @@ impl ArchiveStripeSource {
     fn finish_pending_request(&mut self, request: &PendingRequest, data: &[u8]) {
         for (stripe_id, buffer) in &request.pending_stripes {
             if let Err(e) =
-                self.finish_stripe_fetch(*stripe_id, buffer.clone(), data, &request.expected_sha256)
+                self.finish_stripe_fetch(*stripe_id, buffer, data, &request.expected_sha256)
             {
                 log::error!("Failed to finish stripe {} fetch: {}", stripe_id, e);
                 self.finished_requests.push((*stripe_id, false));
@@ -163,7 +163,7 @@ impl ArchiveStripeSource {
     fn finish_stripe_fetch(
         &mut self,
         stripe_id: usize,
-        destination_buffer: SharedBuffer,
+        destination_buffer: &SharedBuffer,
         fetched_data: &[u8],
         expected_sha256: &[u8; 32],
     ) -> Result<()> {

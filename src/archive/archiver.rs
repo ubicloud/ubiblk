@@ -202,7 +202,7 @@ impl StripeArchiver {
             self.io_channel.submit()?;
         } else {
             debug!("Fetching stripe {} from image", stripe_id,);
-            self.stripe_source.request(stripe_id, buffer.clone())?;
+            self.stripe_source.request(stripe_id, buffer)?;
         }
         Ok(())
     }

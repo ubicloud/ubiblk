@@ -278,31 +278,30 @@ fn wait_for_path(path: &Path, timeout: Duration) -> Result<()> {
 #[error_context("Failed to create device symlink")]
 fn create_device_symlink(target: &Path, link: &Path) -> Result<()> {
     if let Some(parent) = link.parent() {
-        std::fs::create_dir_all(parent).context(format!(
-            "Failed to create parent directory: {}",
-            parent.display()
-        ))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
     }
 
     match std::fs::symlink_metadata(link) {
         Ok(_) => {
             warn!("{} already exists; removing it", link.display());
-            std::fs::remove_file(link).context(format!(
-                "Failed to remove existing path: {}",
-                link.display()
-            ))?;
+            std::fs::remove_file(link)
+                .with_context(|| format!("Failed to remove existing path: {}", link.display()))?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
-            return Err(e).context(format!("Failed to read metadata for: {}", link.display()));
+            return Err(e)
+                .with_context(|| format!("Failed to read metadata for: {}", link.display()));
         }
     }
 
-    std::os::unix::fs::symlink(target, link).context(format!(
-        "Failed to create symlink: {} -> {}",
-        link.display(),
-        target.display()
-    ))?;
+    std::os::unix::fs::symlink(target, link).with_context(|| {
+        format!(
+            "Failed to create symlink: {} -> {}",
+            link.display(),
+            target.display()
+        )
+    })?;
 
     info!(
         "Created device symlink {} -> {}",
@@ -324,14 +323,13 @@ fn remove_device_symlink(link: &Path) -> Result<()> {
                 );
                 return Ok(());
             }
-            std::fs::remove_file(link).context(format!(
-                "Failed to remove device symlink: {}",
-                link.display()
-            ))?;
+            std::fs::remove_file(link)
+                .with_context(|| format!("Failed to remove device symlink: {}", link.display()))?;
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => {
-            return Err(e).context(format!("Failed to read metadata for: {}", link.display()));
+            return Err(e)
+                .with_context(|| format!("Failed to read metadata for: {}", link.display()));
         }
     }
 

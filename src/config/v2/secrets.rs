@@ -174,7 +174,7 @@ pub fn maybe_resolve_secret(
         // No KEK; just load the source directly.
         let bytes_encoded = load_source(name, &def.source, false, danger_zone)?;
         let bytes = decode(&bytes_encoded, &def.encoding)
-            .context(format!("secrets.{name}: failed to decode"))?;
+            .with_context(|| format!("secrets.{name}: failed to decode"))?;
         validate_secret_length(name, &bytes)?;
         Ok(Some(ResolvedSecret { bytes }))
     }
@@ -242,7 +242,7 @@ fn load_file_source(name: &str, path: &Path, danger_zone: &DangerZone) -> Result
     let mut buf = Vec::new();
     file.take((max_bytes + 1) as u64)
         .read_to_end(&mut buf)
-        .context(format!("secrets.{name}: failed to read '{path:?}'"))?;
+        .with_context(|| format!("secrets.{name}: failed to read '{path:?}'"))?;
 
     Ok(buf)
 }

@@ -33,7 +33,7 @@ impl SyncIoChannel {
 
         let file = opts
             .open(path)
-            .context(format!("Failed to open file {}", path.display()))?;
+            .with_context(|| format!("Failed to open file {}", path.display()))?;
         Ok(SyncIoChannel {
             file,
             finished_requests: Vec::new(),

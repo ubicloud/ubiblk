@@ -23,16 +23,16 @@ impl FileSystemStore {
         path.push(name);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
-                .context(format!("Failed to create dir {}", parent.display()))?;
+                .with_context(|| format!("Failed to create dir {}", parent.display()))?;
         }
-        fs::write(&path, data).context(format!("Failed to write {}", path.display()))?;
+        fs::write(&path, data).with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(())
     }
 
     fn try_get_object(&self, name: &str) -> Result<Vec<u8>> {
         let mut path = self.base_path.clone();
         path.push(name);
-        let data = fs::read(&path).context(format!("Failed to read {}", path.display()))?;
+        let data = fs::read(&path).with_context(|| format!("Failed to read {}", path.display()))?;
         Ok(data)
     }
 }

@@ -393,13 +393,13 @@ fn ensure_metadata_file(path: &Path, minimum_size: usize) -> Result<()> {
             .write(true)
             .custom_flags(OFlag::O_NOFOLLOW.bits())
             .open(path)
-            .context(format!("Failed to open metadata file {}", path.display()))?,
+            .with_context(|| format!("Failed to open metadata file {}", path.display()))?,
         Err(e) => return Err(crate::ubiblk_error!(IoError { source: e })),
     };
 
     let stat_result = file
         .metadata()
-        .context(format!("Failed to stat metadata file {}", path.display()))?;
+        .with_context(|| format!("Failed to stat metadata file {}", path.display()))?;
     if !stat_result.file_type().is_file() {
         return Err(crate::ubiblk_error!(InvalidParameter {
             description: format!("Metadata path {} is not a regular file", path.display()),
@@ -409,23 +409,27 @@ fn ensure_metadata_file(path: &Path, minimum_size: usize) -> Result<()> {
     let mut permissions = stat_result.permissions();
     if permissions.mode() & 0o7777 != 0o600 {
         permissions.set_mode(0o600);
-        file.set_permissions(permissions).context(format!(
-            "Failed to set metadata file permissions on {}",
-            path.display()
-        ))?;
+        file.set_permissions(permissions).with_context(|| {
+            format!(
+                "Failed to set metadata file permissions on {}",
+                path.display()
+            )
+        })?;
     }
 
     let minimum_size_u64 = minimum_size as u64;
     if stat_result.len() < minimum_size_u64 {
-        file.set_len(minimum_size_u64).context(format!(
-            "Failed to resize metadata file {} to {} bytes",
-            path.display(),
-            minimum_size
-        ))?;
+        file.set_len(minimum_size_u64).with_context(|| {
+            format!(
+                "Failed to resize metadata file {} to {} bytes",
+                path.display(),
+                minimum_size
+            )
+        })?;
     }
 
     file.sync_all()
-        .context(format!("Failed to sync metadata file {}", path.display()))?;
+        .with_context(|| format!("Failed to sync metadata file {}", path.display()))?;
 
     if created {
         let parent = path.parent().ok_or_else(|| {
@@ -435,15 +439,9 @@ fn ensure_metadata_file(path: &Path, minimum_size: usize) -> Result<()> {
         })?;
 
         File::open(parent)
-            .context(format!(
-                "Failed to open metadata parent dir {}",
-                parent.display()
-            ))?
+            .with_context(|| format!("Failed to open metadata parent dir {}", parent.display()))?
             .sync_all()
-            .context(format!(
-                "Failed to sync metadata parent dir {}",
-                parent.display()
-            ))?;
+            .with_context(|| format!("Failed to sync metadata parent dir {}", parent.display()))?;
     }
 
     Ok(())

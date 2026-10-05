@@ -166,9 +166,8 @@ pub fn maybe_resolve_secret(
 
         let kek_bytes = kek_secret.as_bytes();
         // Secret name is used as AAD to bind ciphertext to its config slot.
-        let decrypted = aes256gcm_decrypt(kek_bytes, name.as_bytes(), &ciphertext).context(
-            format!("secrets.{name}: failed to decrypt using KEK '{kek_ref}'"),
-        )?;
+        let decrypted = aes256gcm_decrypt(kek_bytes, name.as_bytes(), &ciphertext)
+            .with_context(|| format!("secrets.{name}: failed to decrypt using KEK '{kek_ref}'"))?;
         Ok(Some(ResolvedSecret { bytes: decrypted }))
     } else {
         // No KEK; just load the source directly.

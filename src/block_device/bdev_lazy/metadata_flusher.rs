@@ -8,7 +8,7 @@ use crate::{
     Result,
 };
 use log::{debug, error};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{hash_map::Entry, HashMap, VecDeque};
 
 const MAX_CONCURRENT_CHANGES: usize = 16;
 
@@ -30,22 +30,34 @@ enum RequestStage {
     Flushing,
 }
 
-struct HeaderUpdateStatus {
-    buffer: SharedBuffer,
-    stage: RequestStage,
+/// One stripe's part of a sector write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeaderUpdate {
     stripe_id: usize,
     header: u8,
     /// The specific flag bit(s) added by this request, used to revert on failure.
     requested_bitmask: u8,
-    sector: u64,
+}
+
+/// A metadata sector write in flight, carrying every header update that was
+/// queued for the sector when it started.
+///
+/// A sector holds the headers of 508 consecutive stripes, so stripes fetched
+/// close together nearly always share one. Writing them one header at a time
+/// would cost a write and an fsync each; one sector write covers them all for
+/// the price of one.
+struct SectorUpdateStatus {
+    buffer: SharedBuffer,
+    stage: RequestStage,
+    group: usize,
+    updates: Vec<HeaderUpdate>,
 }
 
 pub struct MetadataFlusher {
     channel: Box<dyn IoChannel>,
     metadata: Box<UbiMetadata>,
     shared_state: SharedMetadataState,
-    sectors_being_updated: HashSet<u64>,
-    header_updates: HashMap<usize, HeaderUpdateStatus>,
+    sector_updates: HashMap<u64, SectorUpdateStatus>,
     queued_requests: VecDeque<MetadataFlusherRequest>,
     buffer_pool: AlignedBufferPool,
 }
@@ -75,15 +87,14 @@ impl MetadataFlusher {
             channel,
             shared_state,
             metadata,
-            sectors_being_updated: HashSet::new(),
+            sector_updates: HashMap::new(),
             queued_requests: VecDeque::new(),
             buffer_pool: AlignedBufferPool::new(4096, MAX_CONCURRENT_CHANGES, SECTOR_SIZE),
-            header_updates: HashMap::new(),
         })
     }
 
     pub fn busy(&self) -> bool {
-        !self.sectors_being_updated.is_empty() || !self.queued_requests.is_empty()
+        !self.sector_updates.is_empty() || !self.queued_requests.is_empty()
     }
 
     pub fn set_stripe_fetched(&mut self, stripe_id: usize) {
@@ -105,63 +116,73 @@ impl MetadataFlusher {
         self.poll_channel();
     }
 
-    fn cleanup_failed_submission(&mut self, stripe_ids: &[usize], return_buffer: bool) {
-        for stripe_id in stripe_ids {
-            if let Some(status) = self.header_updates.remove(stripe_id) {
-                self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
+    fn cleanup_failed_submission(&mut self, sectors: &[u64], return_buffer: bool) {
+        for sector in sectors {
+            if let Some(status) = self.sector_updates.remove(sector) {
+                for update in &status.updates {
+                    self.metadata.stripe_headers[update.stripe_id] &= !update.requested_bitmask;
+                }
                 if return_buffer {
                     self.buffer_pool.return_buffer(&status.buffer);
                 }
-                self.sectors_being_updated.remove(&status.sector);
             }
         }
     }
 
     fn poll_channel(&mut self) {
-        let mut finished_stripes = Vec::new();
+        let mut finished_sectors = Vec::new();
         let mut newly_flushing = Vec::new();
 
-        for (stripe_id, success) in self.channel.poll() {
-            let maybe_status = self.header_updates.get_mut(&stripe_id);
-            match (maybe_status, success) {
-                (None, _) => {
-                    error!("Received unexpected response for stripe {stripe_id}");
+        for (id, success) in self.channel.poll() {
+            let sector = id as u64;
+            let Some(status) = self.sector_updates.get_mut(&sector) else {
+                error!("Received unexpected response for metadata sector {sector}");
+                continue;
+            };
+
+            if !success {
+                error!("Failed to write metadata sector {sector}");
+                // Revert only the specific flag bits we added, so a future
+                // retry for the same operations won't be skipped by the
+                // dedup check in start_writes.
+                for update in &status.updates {
+                    self.metadata.stripe_headers[update.stripe_id] &= !update.requested_bitmask;
                 }
-                (Some(status), false) => {
-                    error!("Failed to write metadata for stripe {stripe_id}");
-                    // Revert only the specific flag bit we added, so a future
-                    // retry for the same operation won't be skipped by the
-                    // dedup check in start_writes.
-                    self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
-                    // Only return the buffer if it hasn't already been returned.
-                    // On write success the buffer is returned before transitioning
-                    // to Flushing, so a subsequent flush failure must not return
-                    // it a second time.
-                    if status.stage == RequestStage::Writing {
-                        self.buffer_pool.return_buffer(&status.buffer);
-                    }
-                    self.sectors_being_updated.remove(&status.sector);
-                    self.header_updates.remove(&stripe_id);
+                // Only return the buffer if it hasn't already been returned.
+                // On write success the buffer is returned before transitioning
+                // to Flushing, so a subsequent flush failure must not return
+                // it a second time.
+                if status.stage == RequestStage::Writing {
+                    self.buffer_pool.return_buffer(&status.buffer);
                 }
-                (Some(status), true) => match status.stage {
-                    RequestStage::Writing => {
-                        self.buffer_pool.return_buffer(&status.buffer);
-                        self.channel.add_flush(stripe_id);
-                        status.stage = RequestStage::Flushing;
-                        newly_flushing.push(stripe_id);
-                    }
-                    RequestStage::Flushing => {
-                        self.sectors_being_updated.remove(&(status.sector));
-                        finished_stripes.push((status.stripe_id, status.header));
-                    }
-                },
+                self.sector_updates.remove(&sector);
+                continue;
+            }
+
+            match status.stage {
+                RequestStage::Writing => {
+                    self.buffer_pool.return_buffer(&status.buffer);
+                    self.channel.add_flush(id);
+                    status.stage = RequestStage::Flushing;
+                    newly_flushing.push(sector);
+                }
+                RequestStage::Flushing => {
+                    finished_sectors.push(sector);
+                }
             }
         }
 
-        for (stripe, header) in finished_stripes {
-            debug!("Stripe {stripe} metadata updated with header {header}");
-            self.header_updates.remove(&stripe);
-            self.shared_state.set_stripe_header(stripe, header);
+        for sector in finished_sectors {
+            if let Some(status) = self.sector_updates.remove(&sector) {
+                for update in status.updates {
+                    debug!(
+                        "Stripe {} metadata updated with header {}",
+                        update.stripe_id, update.header
+                    );
+                    self.shared_state
+                        .set_stripe_header(update.stripe_id, update.header);
+                }
+            }
         }
 
         if newly_flushing.is_empty() {
@@ -179,17 +200,21 @@ impl MetadataFlusher {
     }
 
     fn start_writes(&mut self) {
-        let mut newly_added = Vec::new();
+        let mut newly_added: Vec<u64> = Vec::new();
+        let mut deferred = VecDeque::new();
 
-        while !self.queued_requests.is_empty() && self.buffer_pool.has_available() {
-            let req = *self.queued_requests.front().unwrap();
-            let group = UbiMetadata::stripe_id_to_group(req.stripe_id);
+        while let Some(req) = self.queued_requests.pop_front() {
             let sector = UbiMetadata::stripe_id_to_sector(req.stripe_id);
-            if self.sectors_being_updated.contains(&sector) {
-                // Updates to each sector should be serialized
-                break;
+
+            // Updates to each sector are serialized: a request for a sector
+            // whose write is already in flight waits for the next round.
+            // It is looked at again once that write has completed, so it is
+            // dropped if the write made it redundant and retried if the
+            // write failed. Requests for other sectors are not held up.
+            if self.sector_updates.contains_key(&sector) && !newly_added.contains(&sector) {
+                deferred.push_back(req);
+                continue;
             }
-            self.queued_requests.pop_front();
 
             let requested_bitmask = match req.kind {
                 MetadataFlusherRequestKind::SetFetched => metadata_flags::FETCHED,
@@ -201,34 +226,50 @@ impl MetadataFlusher {
                 continue;
             }
 
-            let buf = self.buffer_pool.get_buffer().unwrap();
+            let status = match self.sector_updates.entry(sector) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let Some(buffer) = self.buffer_pool.get_buffer() else {
+                        deferred.push_back(req);
+                        continue;
+                    };
+                    newly_added.push(sector);
+                    entry.insert(SectorUpdateStatus {
+                        buffer,
+                        stage: RequestStage::Writing,
+                        group: UbiMetadata::stripe_id_to_group(req.stripe_id),
+                        updates: Vec::new(),
+                    })
+                }
+            };
+
             self.metadata.stripe_headers[req.stripe_id] |= requested_bitmask;
-
-            let headers_start = group * STRIPE_HEADERS_PER_SECTOR;
-            let headers_end =
-                (headers_start + STRIPE_HEADERS_PER_SECTOR).min(self.metadata.stripe_headers.len());
-            let headers = &self.metadata.stripe_headers[headers_start..headers_end];
-            write_sector_with_crc32(buf.borrow_mut().as_mut_slice(), headers);
-
-            self.channel
-                .add_write(sector, 1, buf.clone(), req.stripe_id);
-            self.sectors_being_updated.insert(sector);
-            self.header_updates.insert(
-                req.stripe_id,
-                HeaderUpdateStatus {
-                    buffer: buf,
-                    stage: RequestStage::Writing,
-                    stripe_id: req.stripe_id,
-                    header: self.metadata.stripe_headers[req.stripe_id],
-                    requested_bitmask,
-                    sector,
-                },
-            );
-            newly_added.push(req.stripe_id);
+            status.updates.push(HeaderUpdate {
+                stripe_id: req.stripe_id,
+                header: self.metadata.stripe_headers[req.stripe_id],
+                requested_bitmask,
+            });
         }
+        self.queued_requests = deferred;
 
         if newly_added.is_empty() {
             return;
+        }
+
+        // Every request for a sector has been applied to the in-memory
+        // headers, so one write of the sector carries all of them.
+        for sector in &newly_added {
+            let Some(status) = self.sector_updates.get(sector) else {
+                continue;
+            };
+            let headers_start = status.group * STRIPE_HEADERS_PER_SECTOR;
+            let headers_end =
+                (headers_start + STRIPE_HEADERS_PER_SECTOR).min(self.metadata.stripe_headers.len());
+            let headers = &self.metadata.stripe_headers[headers_start..headers_end];
+            write_sector_with_crc32(status.buffer.borrow_mut().as_mut_slice(), headers);
+
+            self.channel
+                .add_write(*sector, 1, status.buffer.clone(), *sector as usize);
         }
 
         // submit writes, if any
@@ -249,8 +290,12 @@ mod tests {
     use super::*;
 
     fn init_metadata_device() -> TestBlockDevice {
-        let metadata = UbiMetadata::new(11, 16, 16);
-        let block_device = TestBlockDevice::new(8 * 1024);
+        init_metadata_device_with_stripes(16)
+    }
+
+    fn init_metadata_device_with_stripes(stripe_count: usize) -> TestBlockDevice {
+        let metadata = UbiMetadata::new(11, stripe_count, stripe_count);
+        let block_device = TestBlockDevice::new(64 * 1024);
         metadata.save_to_bdev(&block_device).unwrap();
         block_device
     }
@@ -438,9 +483,11 @@ mod tests {
         assert!(shared_state.stripe_written(3));
         assert!(shared_state.stripe_fetched(3));
 
+        // Every request was for one stripe in one sector, so one write and
+        // one flush carried all of them.
         let metrics = metadata_dev.metrics.read().unwrap();
-        assert_eq!(metrics.writes - start_writes, 2);
-        assert_eq!(metrics.flushes - start_flushes, 2);
+        assert_eq!(metrics.writes - start_writes, 1);
+        assert_eq!(metrics.flushes - start_flushes, 1);
     }
 
     #[test]
@@ -576,5 +623,155 @@ mod tests {
 
         // Now it should succeed
         assert!(shared_state.stripe_fetched(5));
+    }
+
+    #[test]
+    fn test_same_sector_updates_share_one_write_and_flush() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+        let (start_writes, start_flushes) = {
+            let metrics = metadata_dev.metrics.read().unwrap();
+            (metrics.writes, metrics.flushes)
+        };
+
+        // Stripes 0-7 are in sector 1. Queued together, they go out as one
+        // sector write and one flush rather than one of each per stripe.
+        for stripe_id in 0..8 {
+            metadata_flusher.set_stripe_fetched(stripe_id);
+        }
+        metadata_flusher.set_stripe_written(3);
+
+        wait_for_completion(&mut metadata_flusher);
+
+        for stripe_id in 0..8 {
+            assert!(shared_state.stripe_fetched(stripe_id));
+        }
+        assert!(shared_state.stripe_written(3));
+        assert!(!shared_state.stripe_written(4));
+
+        let metrics = metadata_dev.metrics.read().unwrap();
+        assert_eq!(metrics.writes - start_writes, 1);
+        assert_eq!(metrics.flushes - start_flushes, 1);
+    }
+
+    #[test]
+    fn test_requests_behind_a_busy_sector_share_its_next_write() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+        let (start_writes, start_flushes) = {
+            let metrics = metadata_dev.metrics.read().unwrap();
+            (metrics.writes, metrics.flushes)
+        };
+
+        // Start a write for sector 1 and leave it in flight.
+        metadata_flusher.set_stripe_fetched(0);
+        metadata_flusher.start_writes();
+        assert_eq!(
+            metadata_dev.metrics.read().unwrap().writes - start_writes,
+            1
+        );
+
+        // Requests for the same sector that arrive meanwhile wait for it...
+        for stripe_id in 1..4 {
+            metadata_flusher.set_stripe_fetched(stripe_id);
+        }
+        metadata_flusher.start_writes();
+        assert_eq!(
+            metadata_dev.metrics.read().unwrap().writes - start_writes,
+            1
+        );
+        assert_eq!(metadata_flusher.queued_requests.len(), 3);
+
+        // ...and then all share the next write.
+        wait_for_completion(&mut metadata_flusher);
+        for stripe_id in 0..4 {
+            assert!(shared_state.stripe_fetched(stripe_id));
+        }
+        let metrics = metadata_dev.metrics.read().unwrap();
+        assert_eq!(metrics.writes - start_writes, 2);
+        assert_eq!(metrics.flushes - start_flushes, 2);
+    }
+
+    #[test]
+    fn test_busy_sector_does_not_hold_up_other_sectors() {
+        // 1024 stripes span three header sectors: stripe 0 is in sector 1,
+        // stripe 600 in sector 2.
+        let metadata_dev = init_metadata_device_with_stripes(1024);
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+        let start_writes = metadata_dev.metrics.read().unwrap().writes;
+
+        metadata_flusher.set_stripe_fetched(0);
+        metadata_flusher.start_writes();
+        assert_eq!(
+            metadata_dev.metrics.read().unwrap().writes - start_writes,
+            1
+        );
+
+        // Stripe 1 shares the in-flight sector and has to wait; stripe 600
+        // does not and must not be held up behind it.
+        metadata_flusher.set_stripe_fetched(1);
+        metadata_flusher.set_stripe_fetched(600);
+        metadata_flusher.start_writes();
+        assert_eq!(
+            metadata_dev.metrics.read().unwrap().writes - start_writes,
+            2
+        );
+        assert_eq!(metadata_flusher.queued_requests.len(), 1);
+        assert_eq!(metadata_flusher.queued_requests[0].stripe_id, 1);
+
+        wait_for_completion(&mut metadata_flusher);
+        for stripe_id in [0, 1, 600] {
+            assert!(shared_state.stripe_fetched(stripe_id));
+        }
+        assert_eq!(
+            metadata_dev.metrics.read().unwrap().writes - start_writes,
+            3
+        );
+    }
+
+    #[test]
+    fn test_write_failure_reverts_every_stripe_in_the_sector() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone()).unwrap();
+
+        // Two stripes share one failing sector write.
+        metadata_flusher.set_stripe_fetched(1);
+        metadata_flusher.set_stripe_written(2);
+        metadata_dev
+            .fail_next
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        metadata_flusher.update();
+
+        assert!(!shared_state.stripe_fetched(1));
+        assert!(!shared_state.stripe_written(2));
+        assert!(!metadata_flusher.busy());
+
+        // Neither bit was left set in memory, so both retries go through.
+        metadata_flusher.set_stripe_fetched(1);
+        metadata_flusher.set_stripe_written(2);
+        wait_for_completion(&mut metadata_flusher);
+
+        assert!(shared_state.stripe_fetched(1));
+        assert!(shared_state.stripe_written(2));
     }
 }

@@ -6,7 +6,7 @@
 
 [advisories]
 ignore = [
-  # Rechecked on 2026-10-05 against bitmaps 3.2.1 and libublk 0.4.8.
+  # Rechecked on 2026-10-14 against bitmaps 3.2.1 and libublk 0.4.8.
   # Dependency path: ubiblk -> libublk -> bitmaps (cargo tree -i bitmaps).
   # bitmaps is unmaintained. Maintenance-status warning, not an exploitable
   # vulnerability; the only user is libublk, a direct upstream dependency.

@@ -265,7 +265,7 @@ pub fn load_legacy_config(config_path: &Path, kek_path: Option<&Path>) -> Result
 
 fn read_yaml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let file = File::open(path).map_err(|e| crate::ubiblk_error!(IoError { source: e }))?;
-    serde_yaml_ng::from_reader(file).map_err(|e| {
+    serde_saphyr::from_reader(file).map_err(|e| {
         crate::ubiblk_error!(InvalidParameter {
             description: format!("Failed to parse legacy YAML {}: {e}", path.display()),
         })

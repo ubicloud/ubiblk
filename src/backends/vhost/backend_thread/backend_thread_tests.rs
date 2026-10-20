@@ -25,7 +25,10 @@ mod tests {
             vhost::request::{Request, RequestType},
             SECTOR_SIZE,
         },
-        block_device::{bdev_test::TestBlockDevice, BlockDevice},
+        block_device::{
+            bdev_test::TestBlockDevice, BlockDevice, LazyBlockDevice, SharedMetadataState,
+            UbiMetadata,
+        },
         config::v2,
         utils::aligned_buffer::BUFFER_ALIGNMENT,
     };
@@ -193,6 +196,29 @@ mod tests {
         )
         .unwrap();
         (thread, mem, device)
+    }
+
+    /// Creates a thread over a lazy device with no stripe source, as used for
+    /// image-backed and track_written volumes in production.
+    fn create_lazy_thread() -> (UbiBlkBackendThread, GuestMemory) {
+        let (gm, mem) = setup_mem();
+        let config = default_config("img");
+        let base = TestBlockDevice::new(SECTOR_SIZE as u64 * 8);
+        let metadata = UbiMetadata::new(3, 1, 0);
+        let metadata_state = SharedMetadataState::new(&metadata);
+        let (bgworker_ch, _bgworker_rx) = std::sync::mpsc::channel();
+        let lazy =
+            LazyBlockDevice::new(Box::new(base), None, bgworker_ch, metadata_state, false).unwrap();
+        let io_channel = lazy.create_channel().unwrap();
+        let thread = UbiBlkBackendThread::new(
+            gm,
+            io_channel,
+            &config,
+            BUFFER_ALIGNMENT,
+            IoTracker::new(64),
+        )
+        .unwrap();
+        (thread, mem)
     }
 
     #[test]
@@ -770,5 +796,49 @@ mod tests {
 
         let status = mem.read_obj::<u8>(status_addr).unwrap();
         assert_eq!(status, VIRTIO_BLK_S_IOERR as u8);
+    }
+
+    #[test]
+    fn process_queue_lazy_writes_last_sector() {
+        let (mut thread, mem) = create_lazy_thread();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        // The device has 8 sectors, so sector 7 is the last one.
+        let addrs = setup_queue_request(
+            &mem,
+            &queue,
+            0x1000,
+            VIRTIO_BLK_T_OUT,
+            7,
+            SECTOR_SIZE as u32,
+            0,
+        );
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_OK as u8);
+    }
+
+    #[test]
+    #[should_panic(expected = "index out of bounds")]
+    fn process_queue_lazy_write_beyond_capacity_panics() {
+        let (mut thread, mem) = create_lazy_thread();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        // The device has 8 sectors, so sector 8 is the first one past the end.
+        setup_queue_request(
+            &mem,
+            &queue,
+            0x1000,
+            VIRTIO_BLK_T_OUT,
+            8,
+            SECTOR_SIZE as u32,
+            0,
+        );
+
+        let mut vring_guard = vring.get_mut();
+        thread.process_queue(&mut vring_guard);
     }
 }

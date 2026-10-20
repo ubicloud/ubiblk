@@ -71,8 +71,15 @@ impl UbiBlkBackend {
                     .get(idx)
                     .cloned()
                     .unwrap_or_else(|| IoTracker::new(config.tuning.queue_size));
-                UbiBlkBackendThread::new(mem.clone(), io_channel, config, alignment, io_tracker)
-                    .map(Mutex::new)
+                UbiBlkBackendThread::new(
+                    mem.clone(),
+                    io_channel,
+                    nsectors,
+                    config,
+                    alignment,
+                    io_tracker,
+                )
+                .map(Mutex::new)
             })
             .collect::<Result<Vec<_>>>()?;
 

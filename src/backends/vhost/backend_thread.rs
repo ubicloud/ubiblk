@@ -52,6 +52,7 @@ pub struct UbiBlkBackendThread {
     io_channel: Box<dyn IoChannel>,
     request_slots: Vec<RequestSlot>,
     device_id: String,
+    sector_count: u64,
     alignment: usize,
     pin_attempted: bool,
     ios_pending_signal: bool,
@@ -72,6 +73,7 @@ impl UbiBlkBackendThread {
     pub fn new(
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         io_channel: Box<dyn IoChannel>,
+        sector_count: u64,
         config: &v2::Config,
         alignment: usize,
         io_tracker: IoTracker,
@@ -108,6 +110,7 @@ impl UbiBlkBackendThread {
             io_channel,
             request_slots,
             device_id: config.device.device_id.clone(),
+            sector_count,
             alignment,
             pin_attempted: false,
             ios_pending_signal: false,
@@ -249,18 +252,32 @@ impl UbiBlkBackendThread {
         }
     }
 
-    pub(crate) fn request_len(&self, request: &Request) -> usize {
-        let mut len = 0;
-        for (_, data_len) in request.data() {
-            len += *data_len;
+    /// Returns the data length of a read or write request, or None if the
+    /// request is malformed or reaches beyond the end of the device.
+    pub(crate) fn validate_rw_request(&self, request: &Request) -> Option<usize> {
+        let len = request.total_data_len();
+        if len == 0 || !len.is_multiple_of(SECTOR_SIZE as u64) {
+            error!("request length is zero or not a multiple of sector size: {len}");
+            return None;
         }
-        len as usize
+
+        let sector = request.sector();
+        let in_range = sector
+            .checked_add(len / SECTOR_SIZE as u64)
+            .is_some_and(|end| end <= self.sector_count);
+        if !in_range {
+            error!(
+                "request of {len} bytes at sector {sector} is beyond the device end at sector {}",
+                self.sector_count
+            );
+            return None;
+        }
+
+        Some(len as usize)
     }
 
     fn process_read(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
-        let len = self.request_len(request);
-        if !len.is_multiple_of(SECTOR_SIZE) {
-            error!("read request length is not a multiple of sector size: {len}");
+        let Some(len) = self.validate_rw_request(request) else {
             self.complete_io(
                 vring,
                 desc_chain,
@@ -268,7 +285,7 @@ impl UbiBlkBackendThread {
                 VIRTIO_BLK_S_IOERR as u8,
             );
             return;
-        }
+        };
 
         let id = self.get_request_slot(len, request, desc_chain);
 
@@ -284,9 +301,7 @@ impl UbiBlkBackendThread {
     }
 
     fn process_write(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
-        let len = self.request_len(request);
-        if !len.is_multiple_of(SECTOR_SIZE) {
-            error!("write request length is not a multiple of sector size: {len}");
+        let Some(len) = self.validate_rw_request(request) else {
             self.complete_io(
                 vring,
                 desc_chain,
@@ -294,7 +309,7 @@ impl UbiBlkBackendThread {
                 VIRTIO_BLK_S_IOERR as u8,
             );
             return;
-        }
+        };
 
         let id = self.get_request_slot(len, request, desc_chain);
         let mem = desc_chain.memory();

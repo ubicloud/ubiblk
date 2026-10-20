@@ -190,6 +190,7 @@ mod tests {
         let thread = UbiBlkBackendThread::new(
             gm,
             io_channel,
+            device.sector_count(),
             &config,
             BUFFER_ALIGNMENT,
             IoTracker::new(64),
@@ -213,6 +214,7 @@ mod tests {
         let thread = UbiBlkBackendThread::new(
             gm,
             io_channel,
+            lazy.sector_count(),
             &config,
             BUFFER_ALIGNMENT,
             IoTracker::new(64),
@@ -222,18 +224,41 @@ mod tests {
     }
 
     #[test]
-    fn request_len_sums_descriptors() {
-        let (thread, _mem) = create_thread();
+    fn validate_rw_request_sums_descriptors_without_wrapping() {
+        let (mut thread, _mem) = create_thread();
+        thread.sector_count = u64::MAX;
         let req = Request::new(
             RequestType::Out,
             vec![
-                (GuestAddress(0), 100u32),
-                (GuestAddress(SECTOR_SIZE as u64), 200u32),
+                (GuestAddress(0), 0x8000_0000u32),
+                (GuestAddress(0), 0x8000_0000u32),
             ],
             0,
             GuestAddress(0),
         );
-        assert_eq!(thread.request_len(&req), 300);
+        assert_eq!(thread.validate_rw_request(&req), Some(1 << 32));
+    }
+
+    #[test]
+    fn validate_rw_request_checks_device_end() {
+        let (thread, _mem) = create_thread();
+        let request = |sector, len| {
+            Request::new(
+                RequestType::In,
+                vec![(GuestAddress(0), len)],
+                sector,
+                GuestAddress(0),
+            )
+        };
+        let sector = SECTOR_SIZE as u32;
+        assert_eq!(
+            thread.validate_rw_request(&request(7, sector)),
+            Some(SECTOR_SIZE)
+        );
+        assert_eq!(thread.validate_rw_request(&request(8, sector)), None);
+        assert_eq!(thread.validate_rw_request(&request(7, 2 * sector)), None);
+        assert_eq!(thread.validate_rw_request(&request(u64::MAX, sector)), None);
+        assert_eq!(thread.validate_rw_request(&request(0, 0)), None);
     }
 
     #[test]
@@ -822,13 +847,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "index out of bounds")]
-    fn process_queue_lazy_write_beyond_capacity_panics() {
+    fn process_queue_lazy_rejects_write_beyond_capacity() {
         let (mut thread, mem) = create_lazy_thread();
         let queue = MockSplitQueue::new(&mem, 16);
         let vring = setup_vring_with_queue(&mem, 16, &queue);
         // The device has 8 sectors, so sector 8 is the first one past the end.
-        setup_queue_request(
+        let addrs = setup_queue_request(
             &mem,
             &queue,
             0x1000,
@@ -839,6 +863,95 @@ mod tests {
         );
 
         let mut vring_guard = vring.get_mut();
-        thread.process_queue(&mut vring_guard);
+        assert!(thread.process_queue(&mut vring_guard));
+
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_IOERR as u8);
+    }
+
+    #[test]
+    fn process_queue_lazy_rejects_zero_length_write() {
+        let (mut thread, mem) = create_lazy_thread();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let addrs = setup_queue_request(&mem, &queue, 0x1000, VIRTIO_BLK_T_OUT, 0, 0, 0);
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_IOERR as u8);
+    }
+
+    #[test]
+    fn process_queue_writes_last_sector() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let addrs = setup_queue_request(
+            &mem,
+            &queue,
+            0x1000,
+            VIRTIO_BLK_T_OUT,
+            7,
+            SECTOR_SIZE as u32,
+            0,
+        );
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_OK as u8);
+        let metrics = device.metrics.read().unwrap();
+        assert_eq!(metrics.writes, 1);
+    }
+
+    #[test]
+    fn process_queue_rejects_write_beyond_capacity() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let addrs = setup_queue_request(
+            &mem,
+            &queue,
+            0x1000,
+            VIRTIO_BLK_T_OUT,
+            8,
+            SECTOR_SIZE as u32,
+            0,
+        );
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_IOERR as u8);
+        let metrics = device.metrics.read().unwrap();
+        assert_eq!(metrics.writes, 0);
+    }
+
+    #[test]
+    fn process_queue_rejects_read_overflowing_sector() {
+        let (mut thread, mem, device) = create_thread_with_device();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let addrs = setup_queue_request(
+            &mem,
+            &queue,
+            0x1000,
+            VIRTIO_BLK_T_IN,
+            u64::MAX,
+            SECTOR_SIZE as u32,
+            VRING_DESC_F_WRITE as u16,
+        );
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        let status_val = mem.read_obj::<u8>(addrs.status).unwrap();
+        assert_eq!(status_val, VIRTIO_BLK_S_IOERR as u8);
+        let metrics = device.metrics.read().unwrap();
+        assert_eq!(metrics.reads, 0);
     }
 }

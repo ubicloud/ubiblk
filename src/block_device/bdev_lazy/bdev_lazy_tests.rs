@@ -34,13 +34,23 @@ mod tests {
     }
 
     fn setup_env(with_image: bool, track_written: bool, data: &[u8]) -> TestEnv {
-        let target_dev = TestBlockDevice::new(DEV_SIZE);
+        setup_env_with_size(with_image, track_written, data, DEV_SIZE)
+    }
+
+    fn setup_env_with_size(
+        with_image: bool,
+        track_written: bool,
+        data: &[u8],
+        size: u64,
+    ) -> TestEnv {
+        let target_dev = TestBlockDevice::new(size);
         let target_mem = target_dev.mem.clone();
         let target_metrics = target_dev.metrics.clone();
 
         let metadata_dev = TestBlockDevice::new(METADATA_SIZE);
         let metadata_fail_next = metadata_dev.fail_next.clone();
-        let metadata = UbiMetadata::new(STRIPE_SHIFT, STRIPE_COUNT, STRIPE_COUNT);
+        let stripes = target_dev.stripe_count(STRIPE_SECTORS);
+        let metadata = UbiMetadata::new(STRIPE_SHIFT, stripes, stripes);
         metadata.save_to_bdev(&metadata_dev).unwrap();
 
         let metadata_state = {
@@ -51,7 +61,7 @@ mod tests {
         let (bgworker_ch, bgworker_rx) = channel();
 
         if with_image {
-            let image_dev = TestBlockDevice::new(DEV_SIZE);
+            let image_dev = TestBlockDevice::new(size);
             let stripe_source = Box::new(
                 crate::stripe_source::BlockDeviceStripeSource::new(
                     image_dev.clone(),
@@ -95,7 +105,7 @@ mod tests {
                 image_metrics: Some(image_metrics),
             }
         } else {
-            let source_dev = TestBlockDevice::new(DEV_SIZE);
+            let source_dev = TestBlockDevice::new(size);
             let stripe_source = Box::new(
                 crate::stripe_source::BlockDeviceStripeSource::new(
                     source_dev.clone(),
@@ -165,10 +175,173 @@ mod tests {
         results
     }
 
+    #[test]
+    fn full_stripe_writes_skip_source_reads() {
+        for (stripes, track_written) in [(1, false), (1, true), (2, false), (2, true)] {
+            let env = setup_env(true, track_written, b"old data");
+            let mut chan = env.lazy.create_channel().unwrap();
+            let len = stripes * STRIPE_SECTORS as usize * SECTOR_SIZE;
+            let buf = shared_buffer(len);
+            buf.borrow_mut().as_mut_slice().fill(0x5a);
+            chan.add_write(0, (stripes as u64 * STRIPE_SECTORS) as u32, buf, 1);
+            chan.submit().unwrap();
+            assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+            assert_eq!(env.image_metrics.as_ref().unwrap().read().unwrap().reads, 0);
+            assert!(env.target_mem.read().unwrap()[..len]
+                .iter()
+                .all(|&b| b == 0x5a));
+            assert!(env.metadata_state.stripe_fetched(0));
+            assert_eq!(env.metadata_state.stripe_written(0), track_written);
+            assert_eq!(env.target_metrics.read().unwrap().writes, stripes);
+        }
+    }
+
+    #[test]
+    fn partial_edge_writes_use_the_normal_fetch_path() {
+        let env = setup_env(true, false, b"preserved");
+        let mut chan = env.lazy.create_channel().unwrap();
+        let sectors = 3 * STRIPE_SECTORS - 2;
+        let buf = shared_buffer(sectors as usize * SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice().fill(0x6b);
+        chan.add_write(1, sectors as u32, buf, 1);
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert_eq!(env.image_metrics.as_ref().unwrap().read().unwrap().reads, 3);
+        let mem = env.target_mem.read().unwrap();
+        assert_eq!(&mem[..9], b"preserved");
+        assert!(mem[SECTOR_SIZE..(sectors as usize + 1) * SECTOR_SIZE]
+            .iter()
+            .all(|&b| b == 0x6b));
+        assert_eq!(mem[(sectors as usize + 1) * SECTOR_SIZE], 0);
+    }
+
+    #[test]
+    fn full_write_to_short_final_stripe_skips_fetch() {
+        let env = setup_env_with_size(
+            true,
+            false,
+            b"old",
+            (STRIPE_SECTORS + 7) * SECTOR_SIZE as u64,
+        );
+        let mut chan = env.lazy.create_channel().unwrap();
+        let buf = shared_buffer(7 * SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice().fill(0x5a);
+        chan.add_write(STRIPE_SECTORS, 7, buf, 1);
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert_eq!(env.image_metrics.as_ref().unwrap().read().unwrap().reads, 0);
+        assert!(
+            env.target_mem.read().unwrap()[STRIPE_SECTORS as usize * SECTOR_SIZE..]
+                .iter()
+                .all(|&b| b == 0x5a)
+        );
+    }
+
     fn tick(env: &TestEnv) {
         let mut worker = env.bgworker.borrow_mut();
         worker.receive_requests(false);
         worker.update();
+    }
+
+    #[test]
+    fn a_completed_partial_write_is_not_overwritten_when_the_first_writer_polls() {
+        let env = setup_env(false, false, b"old");
+        let mut first = env.lazy.create_channel().unwrap();
+        let mut second = env.lazy.create_channel().unwrap();
+        let full = shared_buffer(STRIPE_SECTORS as usize * SECTOR_SIZE);
+        full.borrow_mut().as_mut_slice().fill(0x11);
+        first.add_write(0, STRIPE_SECTORS as u32, full, 1);
+        first.submit().unwrap();
+        // Initialize the stripe without polling the first channel.
+        for _ in 0..16 {
+            tick(&env);
+        }
+        assert!(env.metadata_state.stripe_fetched(0));
+        let read = shared_buffer(SECTOR_SIZE);
+        second.add_read(0, 1, read.clone(), 2);
+        second.submit().unwrap();
+        assert_eq!(second.poll(), vec![(2, true)]);
+        assert_eq!(read.borrow().as_slice(), &[0x11; SECTOR_SIZE]);
+        let patch = shared_buffer(SECTOR_SIZE);
+        patch.borrow_mut().as_mut_slice().fill(0x22);
+        second.add_write(0, 1, patch, 3);
+        second.submit().unwrap();
+        assert_eq!(second.poll(), vec![(3, true)]);
+        assert_eq!(first.poll(), vec![(1, true)]);
+        assert_eq!(
+            &env.target_mem.read().unwrap()[..SECTOR_SIZE],
+            &[0x22; SECTOR_SIZE]
+        );
+        assert_eq!(env.target_metrics.read().unwrap().writes, 2);
+    }
+
+    #[test]
+    fn a_write_spanning_fetched_and_unfetched_stripes_uses_the_normal_path() {
+        let env = setup_env(true, false, b"old");
+        env.metadata_state
+            .set_stripe_header(0, metadata_flags::FETCHED);
+        let mut chan = env.lazy.create_channel().unwrap();
+        let len = 2 * STRIPE_SECTORS as usize * SECTOR_SIZE;
+        let buf = shared_buffer(len);
+        buf.borrow_mut().as_mut_slice().fill(0x5a);
+        chan.add_write(0, (2 * STRIPE_SECTORS) as u32, buf, 1);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert_eq!(env.image_metrics.as_ref().unwrap().read().unwrap().reads, 1);
+        assert!(env.target_mem.read().unwrap()[..len]
+            .iter()
+            .all(|&b| b == 0x5a));
+    }
+
+    #[test]
+    fn metadata_failures_report_failure_instead_of_waiting_forever() {
+        for track_written in [false, true] {
+            let env = setup_env(false, track_written, b"old");
+            let mut chan = env.lazy.create_channel().unwrap();
+            let buf = shared_buffer(STRIPE_SECTORS as usize * SECTOR_SIZE);
+            chan.add_write(0, STRIPE_SECTORS as u32, buf, 1);
+            if !track_written {
+                tick(&env); // data write and flush submitted
+            }
+            env.metadata_fail_next.store(true, Ordering::SeqCst);
+            assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, false)]);
+        }
+    }
+
+    #[test]
+    fn dropping_the_worker_reports_pending_writes_as_failed() {
+        let TestEnv { lazy, bgworker, .. } = setup_env(false, false, b"");
+        let mut chan = lazy.create_channel().unwrap();
+        chan.add_write(
+            0,
+            STRIPE_SECTORS as u32,
+            shared_buffer(STRIPE_SECTORS as usize * SECTOR_SIZE),
+            1,
+        );
+        drop(bgworker);
+        assert_eq!(chan.poll(), vec![(1, false)]);
+        assert!(!chan.busy());
+    }
+
+    #[test]
+    fn full_stripe_publication_waits_for_write_tracking_and_data_flush() {
+        let env = setup_env(false, true, b"old");
+        let mut chan = env.lazy.create_channel().unwrap();
+        let buf = shared_buffer(STRIPE_SECTORS as usize * SECTOR_SIZE);
+        chan.add_write(0, STRIPE_SECTORS as u32, buf, 1);
+        tick(&env);
+        assert_eq!(env.target_metrics.read().unwrap().writes, 0);
+        assert!(!env.metadata_state.stripe_fetched(0));
+        for _ in 0..16 {
+            if env.target_metrics.read().unwrap().writes != 0 {
+                assert!(env.metadata_state.stripe_written(0));
+            }
+            if env.metadata_state.stripe_fetched(0) {
+                assert_eq!(env.target_metrics.read().unwrap().flushes, 1);
+                break;
+            }
+            tick(&env);
+        }
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
     }
 
     #[test]
@@ -183,6 +356,64 @@ mod tests {
         results.sort_unstable();
         assert_eq!(results, vec![(1, false), (2, false)]);
         assert!(env.metadata_state.is_stripe_failed(0));
+    }
+
+    #[test]
+    fn writes_from_concurrent_channels_preserve_uncovered_sectors() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (sender, receiver) = channel();
+        let worker = std::thread::spawn(move || {
+            let TestEnv {
+                lazy,
+                bgworker,
+                target_mem,
+                ..
+            } = setup_env(false, true, b"old");
+            sender.send((lazy, target_mem)).unwrap();
+            let mut worker = bgworker.into_inner();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !worker_stop.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+                worker.receive_requests(false);
+                worker.update();
+                std::thread::yield_now();
+            }
+        });
+        let (lazy, target_mem) = receiver.recv().unwrap();
+        let mut first = lazy.create_channel().unwrap();
+        let mut second = lazy.create_channel().unwrap();
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let first_start = start.clone();
+        let full = std::thread::spawn(move || {
+            let buf = shared_buffer(STRIPE_SECTORS as usize * SECTOR_SIZE);
+            buf.borrow_mut().as_mut_slice().fill(0x11);
+            first_start.wait();
+            first.add_write(0, STRIPE_SECTORS as u32, buf, 1);
+            first.submit().unwrap();
+            crate::block_device::wait_for_completion(first.as_mut(), 1, Duration::from_secs(5))
+        });
+        let partial = std::thread::spawn(move || {
+            let buf = shared_buffer(SECTOR_SIZE);
+            buf.borrow_mut().as_mut_slice().fill(0x22);
+            start.wait();
+            second.add_write(0, 1, buf, 2);
+            second.submit().unwrap();
+            crate::block_device::wait_for_completion(second.as_mut(), 2, Duration::from_secs(5))
+        });
+        let full_result = full.join().unwrap();
+        let partial_result = partial.join().unwrap();
+        stop.store(true, Ordering::Release);
+        worker.join().unwrap();
+        full_result.unwrap();
+        partial_result.unwrap();
+        let mem = target_mem.read().unwrap();
+        assert!(mem[SECTOR_SIZE..STRIPE_SECTORS as usize * SECTOR_SIZE]
+            .iter()
+            .all(|&b| b == 0x11));
+        assert!(
+            mem[..SECTOR_SIZE].iter().all(|&b| b == 0x11)
+                || mem[..SECTOR_SIZE].iter().all(|&b| b == 0x22)
+        );
     }
 
     /// Ensure that reads trigger stripe fetches when copy-on-read is enabled

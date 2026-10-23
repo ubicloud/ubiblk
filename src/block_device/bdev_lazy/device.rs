@@ -1,5 +1,9 @@
 use crate::{
-    block_device::{BgWorkerRequest, BlockDevice, IoChannel, SharedBuffer, SharedMetadataState},
+    backends::SECTOR_SIZE,
+    block_device::{
+        bgworker::WriteInitialization, BgWorkerRequest, BlockDevice, IoChannel, SharedBuffer,
+        SharedMetadataState,
+    },
     Result, ResultExt,
 };
 
@@ -7,7 +11,7 @@ use super::metadata::{Failed, Fetched, NoSource, NotFetched};
 
 use std::{
     collections::{HashSet, VecDeque},
-    sync::mpsc::Sender,
+    sync::mpsc::{channel, Receiver, Sender, TryRecvError},
 };
 
 use log::{debug, error};
@@ -33,6 +37,8 @@ struct RWRequest {
     buf: SharedBuffer,
     stripe_id_first: usize,
     stripe_id_last: usize,
+    initialization: Option<Receiver<bool>>,
+    initialized: bool,
 }
 
 struct LazyIoChannel {
@@ -44,6 +50,7 @@ struct LazyIoChannel {
     metadata_state: SharedMetadataState,
     stripe_fetches_requested: HashSet<usize>,
     track_written: bool,
+    target_sector_count: u64,
 }
 
 impl LazyIoChannel {
@@ -53,6 +60,7 @@ impl LazyIoChannel {
         bgworker_ch: Sender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
         track_written: bool,
+        target_sector_count: u64,
     ) -> Self {
         LazyIoChannel {
             base,
@@ -63,6 +71,7 @@ impl LazyIoChannel {
             metadata_state,
             stripe_fetches_requested: HashSet::new(),
             track_written,
+            target_sector_count,
         }
     }
 }
@@ -128,7 +137,22 @@ impl LazyIoChannel {
     fn process_queued_rw_requests(&mut self) {
         let mut added_requests = Vec::new();
 
-        while let Some(front) = self.queued_rw_requests.front() {
+        while let Some(front) = self.queued_rw_requests.front_mut() {
+            if let Some(receiver) = &front.initialization {
+                match receiver.try_recv() {
+                    Ok(initialized) => {
+                        front.initialized = initialized;
+                        front.initialization = None;
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        let request = self.queued_rw_requests.pop_front().expect("front exists");
+                        self.finished_requests.push((request.id, false));
+                        continue;
+                    }
+                }
+            }
+            let front = self.queued_rw_requests.front().expect("front exists");
             match self.request_stripes_fetch_status(front) {
                 StripesFetchStatus::Complete => {}
                 StripesFetchStatus::Pending => break,
@@ -152,6 +176,12 @@ impl LazyIoChannel {
             }
 
             let request = self.queued_rw_requests.pop_front().expect("front exists");
+            if request.initialized {
+                // Initialization already performed this write. Replaying it
+                // could overwrite a newer write from another channel.
+                self.finished_requests.push((request.id, true));
+                continue;
+            }
             let sector = request.sector_offset;
             match request.kind {
                 RequestType::In => {
@@ -202,6 +232,8 @@ impl IoChannel for LazyIoChannel {
             stripe_id_last: self
                 .metadata_state
                 .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
+            initialization: None,
+            initialized: false,
         };
 
         match self.request_stripes_fetch_status(&request) {
@@ -241,7 +273,7 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
-        let request = RWRequest {
+        let mut request = RWRequest {
             id,
             kind: RequestType::Out,
             sector_offset,
@@ -251,6 +283,8 @@ impl IoChannel for LazyIoChannel {
             stripe_id_last: self
                 .metadata_state
                 .sector_to_stripe_id(sector_offset + sector_count as u64 - 1),
+            initialization: None,
+            initialized: false,
         };
 
         match self.request_stripes_fetch_status(&request) {
@@ -268,6 +302,36 @@ impl IoChannel for LazyIoChannel {
                 self.finished_requests.push((id, false));
                 return;
             }
+        }
+
+        let stripe_sectors = self.metadata_state.stripe_sector_count();
+        let end = sector_offset + sector_count as u64;
+        // Keep the optimization all-or-nothing: partial edges and already
+        // initialized stripes use the ordinary write path.
+        let whole_stripes = sector_offset.is_multiple_of(stripe_sectors)
+            && (end.is_multiple_of(stripe_sectors) || end == self.target_sector_count);
+        if whole_stripes {
+            let (accepted, receiver) = channel();
+            let initialization = WriteInitialization {
+                first_stripe: request.stripe_id_first,
+                last_stripe: request.stripe_id_last,
+                // A request may fail while other stripes are still initializing.
+                // Own the bytes so the caller can safely reuse its buffer.
+                data: buf.borrow().as_slice()[..sector_count as usize * SECTOR_SIZE].to_vec(),
+                track_written: self.track_written,
+                accepted,
+            };
+            if self
+                .bgworker_ch
+                .send(BgWorkerRequest::InitializeWrite(initialization))
+                .is_err()
+            {
+                self.finished_requests.push((id, false));
+            } else {
+                request.initialization = Some(receiver);
+                self.queued_rw_requests.push_back(request);
+            }
+            return;
         }
 
         if let Err(e) = self.start_stripe_fetches(&request) {
@@ -364,6 +428,7 @@ impl BlockDevice for LazyBlockDevice {
             self.bgworker_ch.clone(),
             self.metadata_state.clone(),
             self.track_written,
+            self.base.sector_count(),
         )))
     }
 

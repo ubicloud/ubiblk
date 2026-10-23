@@ -8,7 +8,11 @@ mod tests {
     };
     use crate::block_device::{shared_buffer, SharedBuffer};
     use std::cell::RefCell;
-    use std::sync::{mpsc::channel, Arc, RwLock};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::channel,
+        Arc, RwLock,
+    };
     use std::thread::sleep;
     use std::time::Duration;
 
@@ -25,6 +29,7 @@ mod tests {
         stripe_sectors: u64,
         target_mem: Arc<RwLock<Vec<u8>>>,
         target_metrics: Arc<RwLock<TestDeviceMetrics>>,
+        metadata_fail_next: Arc<AtomicBool>,
         image_metrics: Option<Arc<RwLock<TestDeviceMetrics>>>,
     }
 
@@ -34,6 +39,7 @@ mod tests {
         let target_metrics = target_dev.metrics.clone();
 
         let metadata_dev = TestBlockDevice::new(METADATA_SIZE);
+        let metadata_fail_next = metadata_dev.fail_next.clone();
         let metadata = UbiMetadata::new(STRIPE_SHIFT, STRIPE_COUNT, STRIPE_COUNT);
         metadata.save_to_bdev(&metadata_dev).unwrap();
 
@@ -85,6 +91,7 @@ mod tests {
                 stripe_sectors: STRIPE_SECTORS,
                 target_mem,
                 target_metrics,
+                metadata_fail_next,
                 image_metrics: Some(image_metrics),
             }
         } else {
@@ -127,6 +134,7 @@ mod tests {
                 stripe_sectors: STRIPE_SECTORS,
                 target_mem,
                 target_metrics,
+                metadata_fail_next,
                 image_metrics: None,
             }
         }
@@ -135,7 +143,7 @@ mod tests {
     /// Poll the channel and the bgworker until all operations complete.
     fn drive(bgworker: &RefCell<BgWorker>, chan: &mut Box<dyn IoChannel>) -> Vec<(usize, bool)> {
         let mut results = Vec::new();
-        loop {
+        for _ in 0..1000 {
             {
                 let mut f = bgworker.borrow_mut();
                 f.receive_requests(false);
@@ -147,6 +155,7 @@ mod tests {
             }
             sleep(Duration::from_millis(1));
         }
+        assert!(!chan.busy(), "I/O did not complete");
         {
             let mut f = bgworker.borrow_mut();
             f.receive_requests(false);
@@ -154,6 +163,26 @@ mod tests {
         }
         results.extend(chan.poll());
         results
+    }
+
+    fn tick(env: &TestEnv) {
+        let mut worker = env.bgworker.borrow_mut();
+        worker.receive_requests(false);
+        worker.update();
+    }
+
+    #[test]
+    fn a_source_metadata_failure_fails_waiting_reads_and_writes() {
+        let env = setup_env(false, false, b"old");
+        let mut chan = env.lazy.create_channel().unwrap();
+        chan.add_read(0, 1, shared_buffer(SECTOR_SIZE), 1);
+        chan.add_write(0, 1, shared_buffer(SECTOR_SIZE), 2);
+        tick(&env); // source data is written and a flush is queued
+        env.metadata_fail_next.store(true, Ordering::SeqCst);
+        let mut results = drive(&env.bgworker, &mut chan);
+        results.sort_unstable();
+        assert_eq!(results, vec![(1, false), (2, false)]);
+        assert!(env.metadata_state.is_stripe_failed(0));
     }
 
     /// Ensure that reads trigger stripe fetches when copy-on-read is enabled

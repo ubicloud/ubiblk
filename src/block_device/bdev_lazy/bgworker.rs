@@ -65,6 +65,9 @@ impl LazyTask {
             }
         }
         self.metadata_flusher.update();
+        for stripe in self.metadata_flusher.take_failed_stripes() {
+            self.metadata_state.set_stripe_failed(stripe);
+        }
         self.stripe_fetcher.disconnect_from_source_if_all_fetched();
     }
 

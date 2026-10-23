@@ -48,6 +48,7 @@ pub struct MetadataFlusher {
     header_updates: HashMap<usize, HeaderUpdateStatus>,
     queued_requests: VecDeque<MetadataFlusherRequest>,
     buffer_pool: AlignedBufferPool,
+    failed_stripes: Vec<usize>,
 }
 
 impl MetadataFlusher {
@@ -78,12 +79,17 @@ impl MetadataFlusher {
             sectors_being_updated: HashSet::new(),
             queued_requests: VecDeque::new(),
             buffer_pool: AlignedBufferPool::new(4096, MAX_CONCURRENT_CHANGES, SECTOR_SIZE),
+            failed_stripes: Vec::new(),
             header_updates: HashMap::new(),
         })
     }
 
     pub fn busy(&self) -> bool {
         !self.sectors_being_updated.is_empty() || !self.queued_requests.is_empty()
+    }
+
+    pub fn take_failed_stripes(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.failed_stripes)
     }
 
     pub fn set_stripe_fetched(&mut self, stripe_id: usize) {
@@ -108,6 +114,7 @@ impl MetadataFlusher {
     fn cleanup_failed_submission(&mut self, stripe_ids: &[usize], return_buffer: bool) {
         for stripe_id in stripe_ids {
             if let Some(status) = self.header_updates.remove(stripe_id) {
+                self.failed_stripes.push(status.stripe_id);
                 self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
                 if return_buffer {
                     self.buffer_pool.return_buffer(&status.buffer);
@@ -128,6 +135,7 @@ impl MetadataFlusher {
                     error!("Received unexpected response for stripe {stripe_id}");
                 }
                 (Some(status), false) => {
+                    self.failed_stripes.push(status.stripe_id);
                     error!("Failed to write metadata for stripe {stripe_id}");
                     // Revert only the specific flag bit we added, so a future
                     // retry for the same operation won't be skipped by the

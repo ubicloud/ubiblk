@@ -3,8 +3,13 @@ use super::{
     stripe_fetcher::StripeFetcher,
 };
 
-use crate::{block_device::BlockDevice, stripe_source::StripeSource, Result};
+use crate::{
+    block_device::{bgworker::WriteInitialization, BlockDevice},
+    stripe_source::StripeSource,
+    Result,
+};
 use log::error;
+use std::sync::Arc;
 
 pub struct LazyTask {
     stripe_fetcher: StripeFetcher,
@@ -45,6 +50,20 @@ impl LazyTask {
 
     pub fn fetch_stripe(&mut self, stripe_id: usize) {
         self.stripe_fetcher.handle_fetch_request(stripe_id);
+    }
+
+    pub fn initialize_write(&mut self, write: WriteInitialization) {
+        let write = Arc::new(write);
+        let accepted = self.stripe_fetcher.initialize_write(write.clone());
+        for stripe in write.first_stripe..=write.last_stripe {
+            if !accepted {
+                self.stripe_fetcher.handle_fetch_request(stripe);
+            }
+            if write.track_written {
+                self.metadata_flusher.set_stripe_written(stripe);
+            }
+        }
+        let _ = write.accepted.send(accepted);
     }
 
     pub fn set_stripe_written(&mut self, stripe_id: usize) {

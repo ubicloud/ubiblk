@@ -4,8 +4,17 @@ use log::{error, info};
 
 use super::bdev_lazy::bgworker::LazyTask;
 
+pub struct WriteInitialization {
+    pub first_stripe: usize,
+    pub last_stripe: usize,
+    pub data: Vec<u8>,
+    pub track_written: bool,
+    pub accepted: std::sync::mpsc::Sender<bool>,
+}
+
 pub enum BgWorkerRequest {
     Fetch { stripe_id: usize },
+    InitializeWrite(WriteInitialization),
     SetWritten { stripe_id: usize },
     StartAutofetch,
     Shutdown,
@@ -42,6 +51,11 @@ impl BgWorker {
             BgWorkerRequest::Fetch { stripe_id } => {
                 if let Some(lazy) = self.lazy() {
                     lazy.fetch_stripe(stripe_id);
+                }
+            }
+            BgWorkerRequest::InitializeWrite(write) => {
+                if let Some(lazy) = self.lazy() {
+                    lazy.initialize_write(write);
                 }
             }
             BgWorkerRequest::SetWritten { stripe_id } => {

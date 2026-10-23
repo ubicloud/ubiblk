@@ -1,4 +1,7 @@
-use std::collections::{hash_map::Entry, HashMap, VecDeque};
+use std::{
+    collections::{hash_map::Entry, HashMap, VecDeque},
+    sync::Arc,
+};
 
 use log::{debug, error, info, warn};
 
@@ -6,7 +9,7 @@ use super::super::*;
 
 use crate::{
     backends::SECTOR_SIZE,
-    block_device::SharedMetadataState,
+    block_device::{bgworker::WriteInitialization, SharedMetadataState},
     stripe_source::{BlockDeviceStripeSource, StripeSource},
     utils::aligned_buffer_pool::AlignedBufferPool,
     Result,
@@ -36,6 +39,7 @@ pub struct StripeFetcher {
     stripe_states: HashMap<usize, FetchState>,
     stripe_fetch_retries: HashMap<usize, u8>,
     allocated_buffers: HashMap<usize, SharedBuffer>,
+    initializing_writes: HashMap<usize, Arc<WriteInitialization>>,
     finished_fetches: Vec<(usize, bool)>,
     autofetch: bool,
     disconnected: bool,
@@ -92,6 +96,7 @@ impl StripeFetcher {
             stripe_states: HashMap::new(),
             stripe_fetch_retries: HashMap::new(),
             allocated_buffers: HashMap::new(),
+            initializing_writes: HashMap::new(),
             finished_fetches: Vec::new(),
             autofetch,
             autofetch_queue,
@@ -127,6 +132,26 @@ impl StripeFetcher {
                 entry.insert(FetchState::Queued);
             }
         }
+    }
+
+    /// Accept the entire write or fall back to normal I/O. Never replace an
+    /// initializer already selected by another write or an in-flight fetch.
+    pub fn initialize_write(&mut self, write: Arc<WriteInitialization>) -> bool {
+        if (write.first_stripe..=write.last_stripe).any(|stripe| {
+            self.shared_metadata_state.stripe_fetch_state(stripe) != super::metadata::NotFetched
+                || self.initializing_writes.contains_key(&stripe)
+                || !matches!(
+                    self.stripe_states.get(&stripe),
+                    None | Some(FetchState::Queued)
+                )
+        }) {
+            return false;
+        }
+        for stripe in write.first_stripe..=write.last_stripe {
+            self.handle_fetch_request(stripe);
+            self.initializing_writes.insert(stripe, write.clone());
+        }
+        true
     }
 
     pub fn update(&mut self) {
@@ -187,12 +212,37 @@ impl StripeFetcher {
         while !self.fetch_queue.is_empty() && self.buffer_pool.has_available() {
             let stripe_id = self.fetch_queue.pop_front().unwrap();
             if self.shared_metadata_state.stripe_fetch_state(stripe_id) == super::metadata::Failed {
+                self.initializing_writes.remove(&stripe_id);
                 self.stripe_states.remove(&stripe_id);
                 continue;
+            }
+            if self
+                .initializing_writes
+                .get(&stripe_id)
+                .is_some_and(|write| {
+                    write.track_written && !self.shared_metadata_state.stripe_written(stripe_id)
+                })
+            {
+                self.fetch_queue.push_front(stripe_id);
+                break;
             }
 
             let buf = self.buffer_pool.get_buffer().unwrap();
             self.allocated_buffers.insert(stripe_id, buf.clone());
+            if let Some(write) = self.initializing_writes.get(&stripe_id) {
+                let start = (stripe_id - write.first_stripe)
+                    * self.stripe_sector_count as usize
+                    * SECTOR_SIZE;
+                let len =
+                    (self.stripe_sector_count as usize * SECTOR_SIZE).min(write.data.len() - start);
+                buf.borrow_mut().as_mut_slice()[..len]
+                    .copy_from_slice(&write.data[start..start + len]);
+                self.stripe_states.insert(stripe_id, FetchState::Fetching);
+                if !self.start_write(buf, stripe_id) {
+                    self.fetch_completed(stripe_id, false);
+                }
+                continue;
+            }
             if let Err(e) = self.stripe_source.request(stripe_id, buf.clone()) {
                 error!("Failed to request stripe {stripe_id} from source: {e:?}");
                 self.fetch_completed(stripe_id, false);
@@ -296,6 +346,7 @@ impl StripeFetcher {
         }
 
         if success {
+            self.initializing_writes.remove(&stripe_id);
             self.stripe_states.insert(stripe_id, FetchState::Fetched);
             self.stripe_fetch_retries.remove(&stripe_id);
             self.finished_fetches.push((stripe_id, true));
@@ -310,6 +361,7 @@ impl StripeFetcher {
             self.stripe_states.insert(stripe_id, FetchState::Queued);
         } else {
             error!("Stripe {stripe_id} failed after {MAX_FETCH_RETRIES} retries");
+            self.initializing_writes.remove(&stripe_id);
             self.shared_metadata_state.set_stripe_failed(stripe_id);
             self.stripe_states.remove(&stripe_id);
             self.stripe_fetch_retries.remove(&stripe_id);
@@ -365,6 +417,86 @@ mod tests {
             source_dev,
             target_dev,
             fetcher,
+        }
+    }
+
+    fn initialize(state: &mut TestState, first: usize, last: usize, byte: u8) -> bool {
+        let (accepted, _) = std::sync::mpsc::channel();
+        state
+            .fetcher
+            .initialize_write(Arc::new(WriteInitialization {
+                first_stripe: first,
+                last_stripe: last,
+                data: vec![byte; (last - first + 1) * 4096],
+                track_written: false,
+                accepted,
+            }))
+    }
+
+    #[test]
+    fn a_write_can_replace_a_queued_fetch_and_autofetch_cannot_overwrite_it() {
+        let mut state = prep(true);
+        state.fetcher.handle_fetch_request(0);
+        assert!(initialize(&mut state, 0, 0, 0x5a));
+        assert!(!initialize(&mut state, 0, 1, 0x6b));
+        for _ in 0..1024 {
+            state.fetcher.update();
+        }
+        assert!(state.target_dev.mem.read().unwrap()[..4096]
+            .iter()
+            .all(|&b| b == 0x5a));
+        assert_eq!(
+            state.source_dev.metrics.read().unwrap().reads,
+            state.fetcher.source_stripe_count() as usize - 1
+        );
+    }
+
+    #[test]
+    fn a_write_cannot_replace_an_inflight_fetch_or_its_pending_metadata() {
+        let mut state = prep(false);
+        state.fetcher.handle_fetch_request(0);
+        state.fetcher.start_fetches();
+        assert!(!initialize(&mut state, 0, 0, 0x5a));
+        for _ in 0..4 {
+            state.fetcher.update();
+        }
+        assert!(!initialize(&mut state, 0, 0, 0x5a));
+        assert_eq!(state.source_dev.metrics.read().unwrap().reads, 1);
+        assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
+    }
+
+    #[test]
+    fn initializing_writes_retry_write_submit_and_flush_failures_without_fetching() {
+        for failure in 0..3 {
+            let mut state = prep(false);
+            assert!(initialize(&mut state, 0, 0, 0x5a));
+            if failure == 2 {
+                state.fetcher.start_fetches();
+                state
+                    .target_dev
+                    .fail_next
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                state.fetcher.poll_fetches();
+                assert!(!state.fetcher.shared_metadata_state.stripe_fetched(0));
+            } else if failure == 1 {
+                state
+                    .target_dev
+                    .fail_submit
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                state
+                    .target_dev
+                    .fail_next
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            for _ in 0..8 {
+                state.fetcher.update();
+            }
+            assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
+            assert_eq!(state.source_dev.metrics.read().unwrap().reads, 0);
+            assert!(state.target_dev.mem.read().unwrap()[..4096]
+                .iter()
+                .all(|&b| b == 0x5a));
         }
     }
 

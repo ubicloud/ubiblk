@@ -111,6 +111,7 @@ impl StripeFetcher {
         if self
             .shared_metadata_state
             .stripe_fetched_if_needed(stripe_id)
+            || self.shared_metadata_state.stripe_fetch_state(stripe_id) == super::metadata::Failed
         {
             debug!("Stripe {stripe_id} already fetched or has no source data, skipping fetch");
             return;
@@ -185,6 +186,10 @@ impl StripeFetcher {
     fn start_fetches(&mut self) {
         while !self.fetch_queue.is_empty() && self.buffer_pool.has_available() {
             let stripe_id = self.fetch_queue.pop_front().unwrap();
+            if self.shared_metadata_state.stripe_fetch_state(stripe_id) == super::metadata::Failed {
+                self.stripe_states.remove(&stripe_id);
+                continue;
+            }
 
             let buf = self.buffer_pool.get_buffer().unwrap();
             self.allocated_buffers.insert(stripe_id, buf.clone());

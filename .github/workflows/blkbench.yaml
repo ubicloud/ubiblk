@@ -74,6 +74,8 @@ jobs:
           rm -rf "$work"
           scripts/blkbench-run "$work/verify-flush" --rw verify-flush --bs 4k
           scripts/blkbench-run "$work/verify-pipeline" --rw verify-pipeline --bs 4k
+          scripts/blkbench-run --write-through "$work/write-through" \
+            --rw verify-flush --bs 4k
 
       # 64k writes replace whole 64K stripes, skipping their fetch.
       - name: Verify crash-unsafe copy-on-write
@@ -86,6 +88,22 @@ jobs:
           run() {
             scripts/blkbench-run --base "$work/base.raw" --stripe-size 64K \
               --crash-unsafe "$@"
+          }
+          run "$work/flush-4k" --rw verify-flush --bs 4k
+          run "$work/flush-64k" --rw verify-flush --bs 64k --verify-sectors 1:4
+          run "$work/pipeline-4k" --rw verify-pipeline --bs 4k
+          run "$work/pipeline-64k" --rw verify-pipeline --bs 64k
+
+      - name: Verify crash-unsafe copy-on-write with write-through
+        run: |
+          set -euo pipefail
+          export PATH="$PWD/target/debug:$PWD/blkbench-src:$PATH"
+          work="$PWD/target/tests/blkbench-unsafe-wt"
+          rm -rf "$work" && mkdir -p "$work"
+          head -c 256M /dev/urandom > "$work/base.raw"
+          run() {
+            scripts/blkbench-run --base "$work/base.raw" --stripe-size 64K \
+              --crash-unsafe --write-through "$@"
           }
           run "$work/flush-4k" --rw verify-flush --bs 4k
           run "$work/flush-64k" --rw verify-flush --bs 64k --verify-sectors 1:4

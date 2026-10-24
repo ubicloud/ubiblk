@@ -43,8 +43,9 @@ impl LazyTask {
         self.metadata_state.clone()
     }
 
-    pub fn fetch_stripe(&mut self, stripe_id: usize) {
-        self.stripe_fetcher.handle_fetch_request(stripe_id);
+    pub fn fetch_stripe(&mut self, stripe_id: usize, whole_stripe_write: bool) {
+        self.stripe_fetcher
+            .handle_fetch_request(stripe_id, whole_stripe_write);
     }
 
     pub fn set_stripe_written(&mut self, stripe_id: usize) {
@@ -166,7 +167,10 @@ mod tests {
         let (mut bg_worker, sender, metadata_state) =
             build_bg_worker_with_source(Box::new(flaky_source));
         sender
-            .send(BgWorkerRequest::Fetch { stripe_id: 0 })
+            .send(BgWorkerRequest::Fetch {
+                stripe_id: 0,
+                whole_stripe_write: false,
+            })
             .unwrap();
         bg_worker.receive_requests(false);
 

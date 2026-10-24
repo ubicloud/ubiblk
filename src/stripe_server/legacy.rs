@@ -212,6 +212,7 @@ pub fn load_legacy_config(config_path: &Path, kek_path: Option<&Path>) -> Result
         allow_secret_over_regular_file: true,
         allow_unencrypted_connection: true,
         allow_env_secrets: false,
+        allow_whole_stripe_write_without_fetch: false,
     };
 
     let (encryption, secrets) = match options.encryption_key.as_ref() {

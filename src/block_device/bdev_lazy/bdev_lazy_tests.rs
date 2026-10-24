@@ -34,13 +34,27 @@ mod tests {
     }
 
     fn setup_env(with_image: bool, track_written: bool, data: &[u8]) -> TestEnv {
-        let target_dev = TestBlockDevice::new(DEV_SIZE);
+        setup_env_with(with_image, track_written, false, data, DEV_SIZE)
+    }
+
+    fn setup_env_with(
+        with_image: bool,
+        track_written: bool,
+        skip_whole_stripe_fetch: bool,
+        data: &[u8],
+        size: u64,
+    ) -> TestEnv {
+        let target_dev = TestBlockDevice::new(size);
         let target_mem = target_dev.mem.clone();
         let target_metrics = target_dev.metrics.clone();
 
         let metadata_dev = TestBlockDevice::new(METADATA_SIZE);
         let metadata_fail_next = metadata_dev.fail_next.clone();
-        let metadata = UbiMetadata::new(STRIPE_SHIFT, STRIPE_COUNT, STRIPE_COUNT);
+        let metadata = UbiMetadata::new(
+            STRIPE_SHIFT,
+            target_dev.stripe_count(STRIPE_SECTORS),
+            target_dev.stripe_count(STRIPE_SECTORS),
+        );
         metadata.save_to_bdev(&metadata_dev).unwrap();
 
         let metadata_state = {
@@ -51,7 +65,7 @@ mod tests {
         let (bgworker_ch, bgworker_rx) = channel();
 
         if with_image {
-            let image_dev = TestBlockDevice::new(DEV_SIZE);
+            let image_dev = TestBlockDevice::new(size);
             let stripe_source = Box::new(
                 crate::stripe_source::BlockDeviceStripeSource::new(
                     image_dev.clone(),
@@ -82,6 +96,7 @@ mod tests {
                 bgworker_ch,
                 metadata_state.clone(),
                 track_written,
+                skip_whole_stripe_fetch,
             )
             .unwrap();
             TestEnv {
@@ -95,7 +110,7 @@ mod tests {
                 image_metrics: Some(image_metrics),
             }
         } else {
-            let source_dev = TestBlockDevice::new(DEV_SIZE);
+            let source_dev = TestBlockDevice::new(size);
             let stripe_source = Box::new(
                 crate::stripe_source::BlockDeviceStripeSource::new(
                     source_dev.clone(),
@@ -125,6 +140,7 @@ mod tests {
                 bgworker_ch,
                 metadata_state.clone(),
                 track_written,
+                skip_whole_stripe_fetch,
             )
             .unwrap();
             TestEnv {
@@ -163,6 +179,87 @@ mod tests {
         }
         results.extend(chan.poll());
         results
+    }
+
+    fn write_pattern(chan: &mut Box<dyn IoChannel>, sector: u64, sectors: u64, id: usize) {
+        let buf = shared_buffer(sectors as usize * SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice().fill(0x5a);
+        chan.add_write(sector, sectors as u32, buf, id);
+        chan.submit().unwrap();
+    }
+
+    fn image_reads(env: &TestEnv) -> usize {
+        env.image_metrics.as_ref().unwrap().read().unwrap().reads
+    }
+
+    #[test]
+    fn whole_stripe_writes_fetch_unless_allowed() {
+        let env = setup_env(true, false, b"old");
+        let mut chan = env.lazy.create_channel().unwrap();
+        write_pattern(&mut chan, 0, STRIPE_SECTORS, 1);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert_eq!(image_reads(&env), 1);
+    }
+
+    #[test]
+    fn whole_stripe_writes_skip_source_reads() {
+        for (stripes, track_written) in [(1, false), (1, true), (2, false), (2, true)] {
+            let env = setup_env_with(true, track_written, true, b"old", DEV_SIZE);
+            let mut chan = env.lazy.create_channel().unwrap();
+            write_pattern(&mut chan, 0, stripes * STRIPE_SECTORS, 1);
+            assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+            assert_eq!(image_reads(&env), 0);
+            let len = stripes as usize * STRIPE_SECTORS as usize * SECTOR_SIZE;
+            assert!(env.target_mem.read().unwrap()[..len]
+                .iter()
+                .all(|&b| b == 0x5a));
+            for stripe in 0..stripes as usize {
+                assert!(env.metadata_state.stripe_fetched(stripe));
+                assert_eq!(env.metadata_state.stripe_written(stripe), track_written);
+            }
+        }
+    }
+
+    #[test]
+    fn partially_covered_stripes_are_fetched() {
+        let env = setup_env_with(true, false, true, b"preserved", DEV_SIZE);
+        let mut chan = env.lazy.create_channel().unwrap();
+        // Covers the end of stripe 0, all of stripe 1 and the start of stripe 2.
+        let sectors = 3 * STRIPE_SECTORS - 2;
+        write_pattern(&mut chan, 1, sectors, 1);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert_eq!(image_reads(&env), 2);
+        let mem = env.target_mem.read().unwrap();
+        assert_eq!(&mem[..9], b"preserved");
+        assert!(mem[SECTOR_SIZE..(sectors as usize + 1) * SECTOR_SIZE]
+            .iter()
+            .all(|&b| b == 0x5a));
+    }
+
+    #[test]
+    fn whole_write_to_short_final_stripe_skips_fetch() {
+        let size = (STRIPE_SECTORS + 7) * SECTOR_SIZE as u64;
+        let env = setup_env_with(true, false, true, b"old", size);
+        let mut chan = env.lazy.create_channel().unwrap();
+        write_pattern(&mut chan, STRIPE_SECTORS, 7, 1);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert_eq!(image_reads(&env), 0);
+    }
+
+    #[test]
+    fn whole_stripe_write_fetches_when_a_read_waits_for_the_stripe() {
+        let env = setup_env_with(false, false, true, b"old", DEV_SIZE);
+        let mut reader = env.lazy.create_channel().unwrap();
+        let mut writer = env.lazy.create_channel().unwrap();
+        let read_buf = shared_buffer(SECTOR_SIZE);
+        reader.add_read(0, 1, read_buf.clone(), 1);
+        reader.submit().unwrap();
+        write_pattern(&mut writer, 0, STRIPE_SECTORS, 2);
+        // The read's fetch request is queued first, so the stripe is fetched
+        // and the read sees the source data instead of the target's zeroes.
+        assert_eq!(drive(&env.bgworker, &mut reader), vec![(1, true)]);
+        assert_eq!(&read_buf.borrow().as_slice()[..3], b"old");
+        assert_eq!(drive(&env.bgworker, &mut writer), vec![(2, true)]);
     }
 
     fn tick(env: &TestEnv) {

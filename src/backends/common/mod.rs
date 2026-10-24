@@ -6,7 +6,7 @@ use std::{
     sync::mpsc::{channel, Receiver, Sender},
 };
 
-use log::{error, info};
+use log::{error, info, warn};
 use nix::fcntl::OFlag;
 use nix::sys::statfs::statfs;
 use ubiblk_macros::error_context;
@@ -214,12 +214,22 @@ impl BackendEnv {
             build_raw_image_device(config)?
         };
 
+        let skip_whole_stripe_fetch =
+            config.danger_zone.enabled && config.danger_zone.allow_whole_stripe_write_without_fetch;
+        if skip_whole_stripe_fetch {
+            warn!(
+                "Whole-stripe writes skip the source fetch; stale data can be read or survive a \
+                 crash until such writes reach the disk"
+            );
+        }
+
         let lazy_bdev = block_device::LazyBlockDevice::new(
             disk_device,
             raw_image_device,
             bgworker_sender,
             shared_state,
             config.device.track_written,
+            skip_whole_stripe_fetch,
         )?;
 
         Ok(lazy_bdev)
@@ -565,6 +575,7 @@ mod tests {
                 allow_secret_over_regular_file: true,
                 allow_unencrypted_connection: true,
                 allow_env_secrets: false,
+                allow_whole_stripe_write_without_fetch: false,
             },
             stripe_source,
             secrets: std::collections::HashMap::new(),
@@ -860,6 +871,7 @@ mod tests {
             allow_secret_over_regular_file: true,
             allow_unencrypted_connection: true,
             allow_env_secrets: false,
+            allow_whole_stripe_write_without_fetch: false,
         };
         let secrets = resolve_secrets(&secret_defs, &danger_zone).unwrap();
 

@@ -116,7 +116,7 @@ allow_inline_plaintext_secrets = true
 allow_secret_over_regular_file = true
 allow_unencrypted_connection = true
 allow_env_secrets = true
-allow_whole_stripe_write_without_fetch = true
+allow_crash_unsafe_optimizations = true
 ```
 
 | Flag | Default | Effect when enabled |
@@ -127,7 +127,7 @@ allow_whole_stripe_write_without_fetch = true
 | `allow_secret_over_regular_file` | false | Allow reading `source.file` secrets from regular files (not just pipes) |
 | `allow_unencrypted_connection` | false | Allow remote connections without PSK |
 | `allow_env_secrets` | false | Allow `source.env` secrets (environment variables persist in `/proc/PID/environ`) |
-| `allow_whole_stripe_write_without_fetch` | false | Skip the source fetch for stripes a write replaces entirely. Concurrent reads and a crash can expose the disk's old contents instead of the source data; see [Whole-stripe writes](#whole-stripe-writes) |
+| `allow_crash_unsafe_optimizations` | false | Enable optimizations that leave the disk's contents undefined after a crash of ubiblk or the host; see [Crash-unsafe optimizations](#crash-unsafe-optimizations) |
 
 ## Secrets
 
@@ -318,14 +318,23 @@ secret.ref = "psk-secret"
 PSK is required unless `danger_zone.allow_unencrypted_connection` is enabled.
 The PSK secret must be at least 16 bytes.
 
-### Whole-stripe writes
+### Crash-unsafe optimizations
+
+`danger_zone.allow_crash_unsafe_optimizations` enables optimizations that keep
+the disk consistent while ubiblk runs but not across a crash of ubiblk or the
+host. After such a crash the disk's contents are undefined, so only enable it
+for disks that are discarded rather than reused after a crash, for example the
+disks of ephemeral VMs.
+
+It currently enables one optimization, whole-stripe writes.
+
+#### Whole-stripe writes
 
 Before the first write to a stripe lands, the stripe is fetched: its source
 data is read and written to the disk, so the write only replaces the sectors it
-covers. With `danger_zone.allow_whole_stripe_write_without_fetch`, a stripe that
-a single write covers entirely is instead marked fetched without reading the
-source or writing the disk. This saves a source read and a stripe-sized disk
-write per stripe.
+covers. With crash-unsafe optimizations, a stripe that a single write covers
+entirely is instead marked fetched without reading the source or writing the
+disk. This saves a source read and a stripe-sized disk write per stripe.
 
 The optimization applies only to stripes covered by one request. Linux guests
 send requests of at most `seg_count_max * seg_size_max` bytes (256 KiB with the
@@ -333,17 +342,13 @@ defaults), while the stripe size is set when the metadata is initialized with
 `init-metadata --stripe-sector-count-shift` (1 MiB by default). A guest only
 benefits when its requests can be at least as large as a stripe.
 
-The stripe is marked fetched before the write reaches the disk. Until it does:
-
-- A concurrent read of the stripe returns the disk's old contents (zeroes on a
-  new disk) rather than the source data. Reads that were already waiting for
-  the stripe are not affected, because the stripe is then fetched as usual.
-- After a crash, a stripe whose write had not reached the disk, for example
-  because the guest had not flushed it, reads back as the disk's old contents.
-- If the write fails, the stripe keeps the disk's old contents.
-
-Only enable it when the guest does not depend on reading source data in these
-cases, for example for ephemeral VMs.
+The stripe is marked fetched before the write reaches the disk. After a crash,
+a stripe whose write had not reached the disk, for example because the guest
+had not flushed it, reads back as the disk's old contents (zeroes on a new
+disk) rather than the source data. While ubiblk runs, the guest cannot tell the
+difference: a read of the stripe overlaps the in-flight write, and a failed
+write returns an error, so the guest cannot rely on that range's contents in
+either case.
 
 ## Example Configs
 

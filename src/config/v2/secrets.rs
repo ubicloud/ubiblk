@@ -690,7 +690,7 @@ encoding = "base64"
         let danger_zone = DangerZone {
             enabled: true,
             allow_env_secrets: true,
-            allow_whole_stripe_write_without_fetch: false,
+            allow_crash_unsafe_optimizations: false,
             ..DangerZone::default()
         };
 

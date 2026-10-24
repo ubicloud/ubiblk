@@ -1,0 +1,87 @@
+#!/bin/bash
+# Runs blkbench against a fresh 4-queue ubiblk device. Needs sudo to read the
+# open flags of the backend, which is not dumpable.
+
+set -euo pipefail
+
+init_args=()
+crash_unsafe=false
+write_through=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base | --stripe-size)
+      init_args+=("$1" "$2")
+      shift 2
+      ;;
+    --write-through)
+      init_args+=("$1")
+      write_through=true
+      shift
+      ;;
+    --crash-unsafe)
+      crash_unsafe=true
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+if [[ $# -lt 1 ]]; then
+  echo "usage: $0 [--base IMAGE] [--stripe-size SIZE] [--write-through]" \
+    "[--crash-unsafe] DIR BLKBENCH_ARGS..." >&2
+  exit 2
+fi
+dir=$1
+shift
+
+python3 "$(dirname "$0")/ubiblk-init" --size 256M --dir "$dir" \
+  --num-queues 4 --queue-size 256 --force "${init_args[@]}"
+if $crash_unsafe; then
+  sed -i 's/^\[danger_zone\]$/&\nallow_crash_unsafe_optimizations = true/' "$dir/config.toml"
+  grep -q '^allow_crash_unsafe_optimizations = true$' "$dir/config.toml"
+fi
+echo "== $dir/config.toml"
+cat "$dir/config.toml"
+
+cd "$dir"
+rm -f vhost.sock
+RUST_LOG=warn vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
+pid=$!
+trap 'kill -9 "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+
+for _ in $(seq 1 50); do [ -S vhost.sock ] && break; sleep 0.1; done
+if [ ! -S vhost.sock ]; then
+  echo "error: vhost-backend did not create vhost.sock" >&2
+  exit 1
+fi
+
+if $crash_unsafe && ! grep -q "Crash-unsafe optimizations are enabled" vhost-backend.log; then
+  echo "error: crash-unsafe optimizations are not enabled" >&2
+  exit 1
+fi
+
+expect_sync=false
+if $write_through && ! $crash_unsafe; then
+  expect_sync=true
+fi
+disk=$(realpath disk.raw)
+flags=$(sudo sh -c '
+  for fd in /proc/'"$pid"'/fd/*; do
+    [ "$(readlink "$fd")" = "$1" ] || continue
+    awk "/^flags:/ { print \$2 }" "/proc/'"$pid"'/fdinfo/${fd##*/}"
+  done' sh "$disk")
+if [ -z "$flags" ]; then
+  echo "error: vhost-backend has no open file descriptor for $disk" >&2
+  exit 1
+fi
+for f in $flags; do
+  has_sync=false
+  if (( 8#$f & 8#4010000 )); then has_sync=true; fi
+  if [ "$has_sync" != "$expect_sync" ]; then
+    echo "error: $disk open flags $f, expected O_SYNC: $expect_sync" >&2
+    exit 1
+  fi
+done
+
+timeout 120 blkbench --path vhost.sock --iodepth 32 --numjobs 4 --size 64M "$@"

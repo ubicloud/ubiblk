@@ -77,11 +77,11 @@ pub struct DangerZone {
     pub allow_unencrypted_connection: bool,
     #[serde(default)]
     pub allow_env_secrets: bool,
-    /// Skip the source fetch for stripes a write replaces entirely. Until the
-    /// write reaches the disk, concurrent reads and a crash expose stale target
-    /// data instead of the source data.
+    /// Enable optimizations that leave the disk's contents undefined after a
+    /// crash of ubiblk or the host, such as skipping the source fetch for
+    /// stripes a write replaces entirely.
     #[serde(default)]
-    pub allow_whole_stripe_write_without_fetch: bool,
+    pub allow_crash_unsafe_optimizations: bool,
 }
 
 impl DangerZone {
@@ -107,8 +107,8 @@ impl DangerZone {
         if self.allow_env_secrets {
             flags.push("allow_env_secrets");
         }
-        if self.allow_whole_stripe_write_without_fetch {
-            flags.push("allow_whole_stripe_write_without_fetch");
+        if self.allow_crash_unsafe_optimizations {
+            flags.push("allow_crash_unsafe_optimizations");
         }
         flags
     }
@@ -196,7 +196,7 @@ mod tests {
             allow_secret_over_regular_file: true,
             allow_unencrypted_connection: true,
             allow_env_secrets: true,
-            allow_whole_stripe_write_without_fetch: true,
+            allow_crash_unsafe_optimizations: true,
         };
         let flags = dz.ignored_flags();
         assert_eq!(flags.len(), 6);
@@ -205,6 +205,6 @@ mod tests {
         assert!(flags.contains(&"allow_secret_over_regular_file"));
         assert!(flags.contains(&"allow_unencrypted_connection"));
         assert!(flags.contains(&"allow_env_secrets"));
-        assert!(flags.contains(&"allow_whole_stripe_write_without_fetch"));
+        assert!(flags.contains(&"allow_crash_unsafe_optimizations"));
     }
 }

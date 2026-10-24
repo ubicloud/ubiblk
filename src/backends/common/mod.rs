@@ -215,11 +215,11 @@ impl BackendEnv {
         };
 
         let skip_whole_stripe_fetch =
-            config.danger_zone.enabled && config.danger_zone.allow_whole_stripe_write_without_fetch;
+            config.danger_zone.enabled && config.danger_zone.allow_crash_unsafe_optimizations;
         if skip_whole_stripe_fetch {
             warn!(
-                "Whole-stripe writes skip the source fetch; stale data can be read or survive a \
-                 crash until such writes reach the disk"
+                "Crash-unsafe optimizations are enabled; the disk's contents are undefined after \
+                 a crash"
             );
         }
 
@@ -575,7 +575,7 @@ mod tests {
                 allow_secret_over_regular_file: true,
                 allow_unencrypted_connection: true,
                 allow_env_secrets: false,
-                allow_whole_stripe_write_without_fetch: false,
+                allow_crash_unsafe_optimizations: false,
             },
             stripe_source,
             secrets: std::collections::HashMap::new(),
@@ -871,7 +871,7 @@ mod tests {
             allow_secret_over_regular_file: true,
             allow_unencrypted_connection: true,
             allow_env_secrets: false,
-            allow_whole_stripe_write_without_fetch: false,
+            allow_crash_unsafe_optimizations: false,
         };
         let secrets = resolve_secrets(&secret_defs, &danger_zone).unwrap();
 

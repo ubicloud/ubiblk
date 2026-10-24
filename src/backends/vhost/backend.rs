@@ -348,7 +348,7 @@ mod tests {
                 allow_secret_over_regular_file: true,
                 allow_unencrypted_connection: true,
                 allow_env_secrets: false,
-                allow_whole_stripe_write_without_fetch: false,
+                allow_crash_unsafe_optimizations: false,
             },
         }
     }

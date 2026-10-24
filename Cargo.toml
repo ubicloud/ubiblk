@@ -50,7 +50,7 @@ sha2 = "0.11.0"
 hmac = "0.13.0"
 ciborium = "0.2.2"
 aws-config = "1.8.12"
-aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["http-1x", "default-https-client", "rt-tokio"] }
 aws-smithy-runtime-api = "1.11"
 fastrand = "2.3"
 tokio = { version = "1.48.0", features = ["rt"] }
@@ -70,7 +70,7 @@ bindgen = "0.72.1"
 virtio-queue = { version = "0.18.0", features = ["test-utils"] }
 vm-memory = { version = "0.18.0", features = ["backend-mmap", "backend-atomic"] }
 aws-smithy-mocks = "0.3.0"
-aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
+aws-sdk-s3 = { version = "1.120.0", default-features = false, features = ["http-1x", "default-https-client", "rt-tokio"] }
 
 [features]
 default = []

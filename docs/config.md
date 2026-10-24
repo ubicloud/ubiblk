@@ -326,7 +326,16 @@ host. After such a crash the disk's contents are undefined, so only enable it
 for disks that are discarded rather than reused after a crash, for example the
 disks of ephemeral VMs.
 
-It currently enables one optimization, whole-stripe writes.
+It enables the following optimizations.
+
+#### Unflushed metadata updates
+
+When a stripe is fetched or first written, its flag in the metadata is updated
+with a one-sector write followed by a flush. With crash-unsafe optimizations,
+the flush is skipped, so each update costs one write instead of a write and a
+cache flush. While ubiblk runs, the update is visible as soon as the write
+completes. After a crash, updates can be lost, so a stripe can be fetched again
+over data the guest wrote.
 
 #### Whole-stripe writes
 

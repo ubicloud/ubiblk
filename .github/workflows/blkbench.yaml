@@ -63,119 +63,39 @@ jobs:
       - name: Build blkbench
         run: make -C blkbench-src -j"$(nproc)" LDFLAGS="-Wl,-rpath,/usr/local/lib/x86_64-linux-gnu"
 
-      - name: Build ubiblk and set up the device
+      - name: Build ubiblk
+        run: cargo build --bin vhost-backend --bin init-metadata
+
+      - name: Verify
         run: |
           set -euo pipefail
-          cargo build --bin vhost-backend --bin init-metadata
-          export PATH="$PWD/target/debug:$PATH"
+          export PATH="$PWD/target/debug:$PWD/blkbench-src:$PATH"
           work="$PWD/target/tests/blkbench"
-          rm -rf "$work" && mkdir -p "$work"
-          python3 scripts/ubiblk-init --size 256M --dir "$work" \
-            --num-queues 4 --queue-size 256 --force
-          init-metadata --config "$work/config.toml" --stripe-sector-count-shift 11
+          rm -rf "$work"
+          scripts/blkbench-run "$work/verify-flush" --rw verify-flush --bs 4k
+          scripts/blkbench-run "$work/verify-pipeline" --rw verify-pipeline --bs 4k
 
-      - name: Verify (verify-flush)
-        run: |
-          set -euo pipefail
-          export PATH="$PWD/target/debug:$PATH"
-          blkbench="$PWD/blkbench-src/blkbench"
-          cd target/tests/blkbench
-          rm -f vhost.sock
-          vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
-          pid=$!
-          for _ in $(seq 1 50); do [ -S vhost.sock ] && break; sleep 0.1; done
-          if [ ! -S vhost.sock ]; then
-            echo "error: vhost-backend did not create vhost.sock" >&2
-            kill -9 "$pid" 2>/dev/null || true
-            exit 1
-          fi
-          rc=0
-          timeout 120 "$blkbench" --path vhost.sock --rw verify-flush \
-            --bs 4k --iodepth 32 --numjobs 4 --size 64M || rc=$?
-          kill -9 "$pid" 2>/dev/null || true
-          wait "$pid" 2>/dev/null || true
-          exit "$rc"
-
-      - name: Verify (verify-pipeline)
-        run: |
-          set -euo pipefail
-          export PATH="$PWD/target/debug:$PATH"
-          blkbench="$PWD/blkbench-src/blkbench"
-          cd target/tests/blkbench
-          rm -f vhost.sock
-          vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
-          pid=$!
-          for _ in $(seq 1 50); do [ -S vhost.sock ] && break; sleep 0.1; done
-          if [ ! -S vhost.sock ]; then
-            echo "error: vhost-backend did not create vhost.sock" >&2
-            kill -9 "$pid" 2>/dev/null || true
-            exit 1
-          fi
-          rc=0
-          timeout 120 "$blkbench" --path vhost.sock --rw verify-pipeline \
-            --bs 4k --iodepth 32 --numjobs 4 --size 64M || rc=$?
-          kill -9 "$pid" 2>/dev/null || true
-          wait "$pid" 2>/dev/null || true
-          exit "$rc"
-
-      # Copy-on-write over a random base image with crash-unsafe
-      # optimizations, so stripe fetches and metadata updates skip their
-      # flushes. 64K stripes let the 64k runs replace whole stripes, which
-      # skips the fetch entirely. Each run starts from a fresh disk so every
-      # write races the fetch of its stripe across the 4 queues.
+      # 64k writes replace whole 64K stripes, skipping their fetch.
       - name: Verify crash-unsafe copy-on-write
         run: |
           set -euo pipefail
-          export PATH="$PWD/target/debug:$PATH"
-          blkbench="$PWD/blkbench-src/blkbench"
+          export PATH="$PWD/target/debug:$PWD/blkbench-src:$PATH"
           work="$PWD/target/tests/blkbench-unsafe"
           rm -rf "$work" && mkdir -p "$work"
           head -c 256M /dev/urandom > "$work/base.raw"
           run() {
-            local mode=$1 bs=$2
-            shift 2
-            local dir="$work/$mode-$bs"
-            python3 scripts/ubiblk-init --size 256M --dir "$dir" \
-              --base "$work/base.raw" --stripe-size 64K \
-              --num-queues 4 --queue-size 256 --force
-            sed -i 's/^\[danger_zone\]$/&\nallow_crash_unsafe_optimizations = true/' \
-              "$dir/config.toml"
-            grep -q '^allow_crash_unsafe_optimizations = true$' "$dir/config.toml"
-            echo "== $mode $bs: $dir/config.toml"
-            cat "$dir/config.toml"
-            (
-              cd "$dir"
-              RUST_LOG=warn vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
-              pid=$!
-              for _ in $(seq 1 50); do [ -S vhost.sock ] && break; sleep 0.1; done
-              if [ ! -S vhost.sock ]; then
-                echo "error: vhost-backend did not create vhost.sock" >&2
-                kill -9 "$pid" 2>/dev/null || true
-                exit 1
-              fi
-              if ! grep -q "Crash-unsafe optimizations are enabled" vhost-backend.log; then
-                echo "error: crash-unsafe optimizations are not enabled" >&2
-                kill -9 "$pid" 2>/dev/null || true
-                exit 1
-              fi
-              rc=0
-              timeout 120 "$blkbench" --path vhost.sock --rw "$mode" \
-                --bs "$bs" --iodepth 32 --numjobs 4 --size 64M "$@" || rc=$?
-              kill -9 "$pid" 2>/dev/null || true
-              wait "$pid" 2>/dev/null || true
-              exit "$rc"
-            )
+            scripts/blkbench-run --base "$work/base.raw" --stripe-size 64K \
+              --crash-unsafe "$@"
           }
-          run verify-flush 4k
-          run verify-flush 64k --verify-sectors 1:4
-          run verify-pipeline 4k
-          run verify-pipeline 64k
+          run "$work/flush-4k" --rw verify-flush --bs 4k
+          run "$work/flush-64k" --rw verify-flush --bs 64k --verify-sectors 1:4
+          run "$work/pipeline-4k" --rw verify-pipeline --bs 4k
+          run "$work/pipeline-64k" --rw verify-pipeline --bs 64k
 
       - name: Dump vhost-backend log
         if: ${{ always() }}
         run: |
-          for log in target/tests/blkbench/vhost-backend.log \
-                     target/tests/blkbench-unsafe/*/vhost-backend.log; do
+          for log in target/tests/blkbench*/*/vhost-backend.log; do
             [ -f "$log" ] || continue
             echo "== $log"
             cat "$log"

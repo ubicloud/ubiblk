@@ -77,6 +77,11 @@ pub struct DangerZone {
     pub allow_unencrypted_connection: bool,
     #[serde(default)]
     pub allow_env_secrets: bool,
+    /// Skip the source fetch for stripes a write replaces entirely. Until the
+    /// write reaches the disk, concurrent reads and a crash expose stale target
+    /// data instead of the source data.
+    #[serde(default)]
+    pub allow_whole_stripe_write_without_fetch: bool,
 }
 
 impl DangerZone {
@@ -101,6 +106,9 @@ impl DangerZone {
         }
         if self.allow_env_secrets {
             flags.push("allow_env_secrets");
+        }
+        if self.allow_whole_stripe_write_without_fetch {
+            flags.push("allow_whole_stripe_write_without_fetch");
         }
         flags
     }
@@ -188,13 +196,15 @@ mod tests {
             allow_secret_over_regular_file: true,
             allow_unencrypted_connection: true,
             allow_env_secrets: true,
+            allow_whole_stripe_write_without_fetch: true,
         };
         let flags = dz.ignored_flags();
-        assert_eq!(flags.len(), 5);
+        assert_eq!(flags.len(), 6);
         assert!(flags.contains(&"allow_unencrypted_disk"));
         assert!(flags.contains(&"allow_inline_plaintext_secrets"));
         assert!(flags.contains(&"allow_secret_over_regular_file"));
         assert!(flags.contains(&"allow_unencrypted_connection"));
         assert!(flags.contains(&"allow_env_secrets"));
+        assert!(flags.contains(&"allow_whole_stripe_write_without_fetch"));
     }
 }

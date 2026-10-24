@@ -171,6 +171,7 @@ mod tests {
                 allow_secret_over_regular_file: true,
                 allow_unencrypted_connection: true,
                 allow_env_secrets: false,
+                allow_whole_stripe_write_without_fetch: false,
             },
             stripe_source: None,
             secrets: std::collections::HashMap::new(),
@@ -208,8 +209,15 @@ mod tests {
         let metadata = UbiMetadata::new(3, 1, 0);
         let metadata_state = SharedMetadataState::new(&metadata);
         let (bgworker_ch, _bgworker_rx) = std::sync::mpsc::channel();
-        let lazy =
-            LazyBlockDevice::new(Box::new(base), None, bgworker_ch, metadata_state, false).unwrap();
+        let lazy = LazyBlockDevice::new(
+            Box::new(base),
+            None,
+            bgworker_ch,
+            metadata_state,
+            false,
+            false,
+        )
+        .unwrap();
         let io_channel = lazy.create_channel().unwrap();
         let thread = UbiBlkBackendThread::new(
             gm,

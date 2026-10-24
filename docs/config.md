@@ -116,6 +116,7 @@ allow_inline_plaintext_secrets = true
 allow_secret_over_regular_file = true
 allow_unencrypted_connection = true
 allow_env_secrets = true
+allow_whole_stripe_write_without_fetch = true
 ```
 
 | Flag | Default | Effect when enabled |
@@ -126,6 +127,7 @@ allow_env_secrets = true
 | `allow_secret_over_regular_file` | false | Allow reading `source.file` secrets from regular files (not just pipes) |
 | `allow_unencrypted_connection` | false | Allow remote connections without PSK |
 | `allow_env_secrets` | false | Allow `source.env` secrets (environment variables persist in `/proc/PID/environ`) |
+| `allow_whole_stripe_write_without_fetch` | false | Skip the source fetch for stripes a write replaces entirely, avoiding a source read and a disk write per stripe. The stripe is marked fetched before the write reaches the disk, so until it does, concurrent reads of the stripe and a crash expose the target's old contents (zeroes on a new disk) instead of the source data. |
 
 ## Secrets
 

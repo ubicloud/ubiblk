@@ -107,7 +107,10 @@ impl StripeFetcher {
             || !self.autofetch_queue.is_empty()
     }
 
-    pub fn handle_fetch_request(&mut self, stripe_id: usize) {
+    /// Requests the stripe's source data. A write that replaces the whole
+    /// stripe doesn't need it, so unless a fetch is already pending, the stripe
+    /// is marked fetched without reading the source or writing the target.
+    pub fn handle_fetch_request(&mut self, stripe_id: usize, whole_stripe_write: bool) {
         if self
             .shared_metadata_state
             .stripe_fetched_if_needed(stripe_id)
@@ -120,6 +123,11 @@ impl StripeFetcher {
         match self.stripe_states.entry(stripe_id) {
             Entry::Occupied(_) => {
                 debug!("Stripe {stripe_id} has already been requested");
+            }
+            Entry::Vacant(entry) if whole_stripe_write => {
+                debug!("Stripe {stripe_id} is replaced by a write, skipping fetch");
+                entry.insert(FetchState::Fetched);
+                self.finished_fetches.push((stripe_id, true));
             }
             Entry::Vacant(entry) => {
                 debug!("Enqueueing stripe {stripe_id} for fetch");
@@ -178,7 +186,7 @@ impl StripeFetcher {
     pub fn update_autofetch(&mut self) {
         if self.autofetch && self.fetch_queue.is_empty() {
             if let Some(stripe_id) = self.autofetch_queue.pop_front() {
-                self.handle_fetch_request(stripe_id);
+                self.handle_fetch_request(stripe_id, false);
             }
         }
     }
@@ -371,7 +379,7 @@ mod tests {
     #[test]
     fn test_basic_fetch() {
         let mut state = prep(false);
-        state.fetcher.handle_fetch_request(0);
+        state.fetcher.handle_fetch_request(0, false);
         for _ in 0..10 {
             state.fetcher.update();
         }
@@ -388,6 +396,31 @@ mod tests {
         assert_eq!(target_metrics.reads, 0);
         assert_eq!(target_metrics.writes, 1);
         assert_eq!(target_metrics.flushes, 1);
+    }
+
+    #[test]
+    fn whole_stripe_write_skips_the_fetch() {
+        let mut state = prep(false);
+        state.fetcher.handle_fetch_request(0, true);
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
+        assert_eq!(state.source_dev.metrics.read().unwrap().reads, 0);
+        assert_eq!(state.target_dev.metrics.read().unwrap().writes, 0);
+    }
+
+    #[test]
+    fn whole_stripe_write_does_not_skip_a_pending_fetch() {
+        let mut state = prep(false);
+        state.fetcher.handle_fetch_request(0, false);
+        state.fetcher.handle_fetch_request(0, true);
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
+        assert_eq!(state.source_dev.metrics.read().unwrap().reads, 1);
+        assert_eq!(state.target_dev.metrics.read().unwrap().writes, 1);
     }
 
     // Once the pool has cycled, a fetch reuses a dirty buffer: the part of the
@@ -424,7 +457,7 @@ mod tests {
         .unwrap();
 
         for stripe_id in 0..=full {
-            fetcher.handle_fetch_request(stripe_id);
+            fetcher.handle_fetch_request(stripe_id, false);
             for _ in 0..10 {
                 fetcher.update();
             }
@@ -439,7 +472,7 @@ mod tests {
     #[test]
     fn test_repeat_requests_ignored() {
         let mut state = prep(false);
-        state.fetcher.handle_fetch_request(1);
+        state.fetcher.handle_fetch_request(1, false);
         for _ in 0..10 {
             state.fetcher.update();
         }
@@ -447,7 +480,7 @@ mod tests {
         assert_eq!(finished.len(), 1);
         assert_eq!(finished[0], (1, true));
 
-        state.fetcher.handle_fetch_request(1);
+        state.fetcher.handle_fetch_request(1, false);
         for _ in 0..10 {
             state.fetcher.update();
         }
@@ -508,7 +541,7 @@ mod tests {
     #[test]
     fn test_runtime_autofetch_skips_already_fetched_stripes() {
         let mut state = prep(false);
-        state.fetcher.handle_fetch_request(1);
+        state.fetcher.handle_fetch_request(1, false);
         for _ in 0..100 {
             state.fetcher.update();
         }
@@ -558,7 +591,7 @@ mod tests {
 
         // Now request those specifically.
         for stripe_id in &priority_list {
-            state.fetcher.handle_fetch_request(*stripe_id);
+            state.fetcher.handle_fetch_request(*stripe_id, false);
         }
 
         for _ in 0..20 {

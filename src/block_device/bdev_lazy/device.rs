@@ -44,6 +44,8 @@ struct LazyIoChannel {
     metadata_state: SharedMetadataState,
     stripe_fetches_requested: HashSet<usize>,
     track_written: bool,
+    skip_whole_stripe_fetch: bool,
+    sector_count: u64,
 }
 
 impl LazyIoChannel {
@@ -53,6 +55,8 @@ impl LazyIoChannel {
         bgworker_ch: Sender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
         track_written: bool,
+        skip_whole_stripe_fetch: bool,
+        sector_count: u64,
     ) -> Self {
         LazyIoChannel {
             base,
@@ -63,6 +67,8 @@ impl LazyIoChannel {
             metadata_state,
             stripe_fetches_requested: HashSet::new(),
             track_written,
+            skip_whole_stripe_fetch,
+            sector_count,
         }
     }
 }
@@ -96,13 +102,28 @@ impl LazyIoChannel {
         true
     }
 
+    /// Returns whether a write request replaces all of the stripe's data.
+    fn write_covers_stripe(&self, request: &RWRequest, stripe_id: usize) -> bool {
+        let stripe_sectors = self.metadata_state.stripe_sector_count();
+        let stripe_start = stripe_id as u64 * stripe_sectors;
+        let stripe_end = (stripe_start + stripe_sectors).min(self.sector_count);
+        request.kind == RequestType::Out
+            && request.sector_offset <= stripe_start
+            && stripe_end <= request.sector_offset + request.sector_count as u64
+    }
+
     fn start_stripe_fetches(&mut self, request: &RWRequest) -> Result<()> {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
             if !self.metadata_state.stripe_fetched_if_needed(stripe_id)
                 && !self.stripe_fetches_requested.contains(&stripe_id)
             {
+                let whole_stripe_write =
+                    self.skip_whole_stripe_fetch && self.write_covers_stripe(request, stripe_id);
                 self.bgworker_ch
-                    .send(BgWorkerRequest::Fetch { stripe_id })
+                    .send(BgWorkerRequest::Fetch {
+                        stripe_id,
+                        whole_stripe_write,
+                    })
                     .with_context(|| {
                         format!("failed to send fetch request for stripe {stripe_id}")
                     })?;
@@ -329,15 +350,22 @@ pub struct LazyBlockDevice {
     bgworker_ch: Sender<BgWorkerRequest>,
     metadata_state: SharedMetadataState,
     track_written: bool,
+    skip_whole_stripe_fetch: bool,
 }
 
 impl LazyBlockDevice {
+    /// With `skip_whole_stripe_fetch`, a write that replaces a whole unfetched
+    /// stripe marks it fetched without reading the source. The stripe is
+    /// marked fetched before the write reaches the disk, so until it does,
+    /// concurrent reads and a crash expose the target's old contents instead
+    /// of the source data.
     pub fn new(
         base: Box<dyn BlockDevice>,
         image: Option<Box<dyn BlockDevice>>,
         bgworker_ch: Sender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
         track_written: bool,
+        skip_whole_stripe_fetch: bool,
     ) -> Result<Box<Self>> {
         Ok(Box::new(LazyBlockDevice {
             base,
@@ -345,6 +373,7 @@ impl LazyBlockDevice {
             bgworker_ch,
             metadata_state,
             track_written,
+            skip_whole_stripe_fetch,
         }))
     }
 }
@@ -364,6 +393,8 @@ impl BlockDevice for LazyBlockDevice {
             self.bgworker_ch.clone(),
             self.metadata_state.clone(),
             self.track_written,
+            self.skip_whole_stripe_fetch,
+            self.base.sector_count(),
         )))
     }
 
@@ -378,6 +409,7 @@ impl BlockDevice for LazyBlockDevice {
             bgworker_ch: self.bgworker_ch.clone(),
             metadata_state: self.metadata_state.clone(),
             track_written: self.track_written,
+            skip_whole_stripe_fetch: self.skip_whole_stripe_fetch,
         })
     }
 }

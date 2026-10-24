@@ -5,8 +5,15 @@ use log::{error, info};
 use super::bdev_lazy::bgworker::LazyTask;
 
 pub enum BgWorkerRequest {
-    Fetch { stripe_id: usize },
-    SetWritten { stripe_id: usize },
+    Fetch {
+        stripe_id: usize,
+        /// The requester writes the whole stripe, so the source data may be
+        /// skipped.
+        whole_stripe_write: bool,
+    },
+    SetWritten {
+        stripe_id: usize,
+    },
     StartAutofetch,
     Shutdown,
 }
@@ -39,9 +46,12 @@ impl BgWorker {
 
     fn process_request(&mut self, req: BgWorkerRequest) {
         match req {
-            BgWorkerRequest::Fetch { stripe_id } => {
+            BgWorkerRequest::Fetch {
+                stripe_id,
+                whole_stripe_write,
+            } => {
                 if let Some(lazy) = self.lazy() {
-                    lazy.fetch_stripe(stripe_id);
+                    lazy.fetch_stripe(stripe_id, whole_stripe_write);
                 }
             }
             BgWorkerRequest::SetWritten { stripe_id } => {

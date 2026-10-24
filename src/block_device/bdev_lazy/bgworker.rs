@@ -36,6 +36,7 @@ impl LazyTask {
             metadata_state.clone(),
             alignment,
             autofetch,
+            !crash_unsafe_optimizations,
         )?;
         Ok(LazyTask {
             stripe_fetcher,

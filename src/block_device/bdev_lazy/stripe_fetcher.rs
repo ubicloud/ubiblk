@@ -39,6 +39,9 @@ pub struct StripeFetcher {
     finished_fetches: Vec<(usize, bool)>,
     autofetch: bool,
     disconnected: bool,
+    /// Flush each fetched stripe before publishing it. Without the flush, a
+    /// crash can lose fetched data that the metadata marks as fetched.
+    flush_fetches: bool,
 }
 
 impl StripeFetcher {
@@ -49,6 +52,7 @@ impl StripeFetcher {
         shared_metadata_state: SharedMetadataState,
         alignment: usize,
         autofetch: bool,
+        flush_fetches: bool,
     ) -> Result<Self> {
         let fetch_target_channel = target_dev.create_channel()?;
 
@@ -96,6 +100,7 @@ impl StripeFetcher {
             autofetch,
             autofetch_queue,
             disconnected: false,
+            flush_fetches,
         })
     }
 
@@ -215,7 +220,7 @@ impl StripeFetcher {
         // Overall fetching logic (assuming things go well):
         // 1. Read from the source channel.
         // 2. Write to the target channel.
-        // 3. Flush the target channel.
+        // 3. Flush the target channel, unless flush_fetches is off.
         // 4. Mark the stripe as fetched in the shared state.
 
         // Handle completions from the source channel. Did any fetches from the
@@ -243,6 +248,9 @@ impl StripeFetcher {
             }
 
             match self.stripe_states.get(&stripe_id) {
+                Some(FetchState::Fetching) if !self.flush_fetches => {
+                    self.fetch_completed(stripe_id, true);
+                }
                 Some(FetchState::Fetching) => {
                     debug!("Stripe {stripe_id} write completed, flushing...");
                     if self.start_flush(stripe_id) {
@@ -339,6 +347,10 @@ mod tests {
     }
 
     fn prep(autofetch: bool) -> TestState {
+        prep_with(autofetch, true)
+    }
+
+    fn prep_with(autofetch: bool, flush_fetches: bool) -> TestState {
         let source_size: u64 = 1024 * 1024; // 1 MiB
         let target_size: u64 = 2 * 1024 * 1024; // 2 MiB
         let stripe_sector_count_shift = 3; // 8 sectors per stripe
@@ -366,6 +378,7 @@ mod tests {
             shared_metadata_state.clone(),
             SECTOR_SIZE,
             autofetch,
+            flush_fetches,
         )
         .unwrap();
 
@@ -396,6 +409,25 @@ mod tests {
         assert_eq!(target_metrics.reads, 0);
         assert_eq!(target_metrics.writes, 1);
         assert_eq!(target_metrics.flushes, 1);
+    }
+
+    #[test]
+    fn fetch_without_flush() {
+        let mut state = prep_with(false, false);
+        state
+            .source_dev
+            .write(0, &[0xAAu8; SECTOR_SIZE], SECTOR_SIZE);
+        state.fetcher.handle_fetch_request(0, false);
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
+
+        let target_metrics = state.target_dev.metrics.read().unwrap();
+        assert_eq!(target_metrics.writes, 1);
+        assert_eq!(target_metrics.flushes, 0);
+        let mem = state.target_dev.mem.read().unwrap();
+        assert_eq!(&mem[..SECTOR_SIZE], &[0xAAu8; SECTOR_SIZE]);
     }
 
     #[test]
@@ -453,6 +485,7 @@ mod tests {
             SharedMetadataState::new(&metadata),
             SECTOR_SIZE,
             false,
+            true,
         )
         .unwrap();
 

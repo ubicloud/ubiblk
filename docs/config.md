@@ -337,6 +337,15 @@ cache flush. While ubiblk runs, the update is visible as soon as the write
 completes. After a crash, updates can be lost, so a stripe can be fetched again
 over data the guest wrote.
 
+#### Unflushed stripe fetches
+
+A fetch writes the stripe's source data to the disk and flushes the disk before
+marking the stripe fetched. With crash-unsafe optimizations, the flush is
+skipped. The stripe is still marked fetched only after its write completes, so
+while ubiblk runs, the guest's own I/O to the stripe always sees the fetched
+data. After a crash, the metadata can mark a stripe fetched whose data never
+reached the disk.
+
 #### Whole-stripe writes
 
 Before the first write to a stripe lands, the stripe is fetched: its source

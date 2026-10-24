@@ -33,6 +33,7 @@ struct BgWorkerConfig {
     metadata_dev: Box<dyn BlockDevice>,
     alignment: usize,
     autofetch: bool,
+    crash_unsafe_optimizations: bool,
     shared_state: SharedMetadataState,
     receiver: Receiver<BgWorkerRequest>,
 }
@@ -170,6 +171,7 @@ impl BackendEnv {
                 .stripe_source
                 .as_ref()
                 .is_some_and(|stripe_source| stripe_source.autofetch()),
+            crash_unsafe_optimizations: config.danger_zone.crash_unsafe_optimizations(),
             shared_state,
             receiver: bgworker_receiver,
         };
@@ -214,8 +216,7 @@ impl BackendEnv {
             build_raw_image_device(config)?
         };
 
-        let skip_whole_stripe_fetch =
-            config.danger_zone.enabled && config.danger_zone.allow_crash_unsafe_optimizations;
+        let skip_whole_stripe_fetch = config.danger_zone.crash_unsafe_optimizations();
         if skip_whole_stripe_fetch {
             warn!(
                 "Crash-unsafe optimizations are enabled; the disk's contents are undefined after \
@@ -276,6 +277,7 @@ impl BackendEnv {
             metadata_dev,
             alignment,
             autofetch,
+            crash_unsafe_optimizations,
             shared_state,
             receiver,
         } = config;
@@ -294,6 +296,7 @@ impl BackendEnv {
             &*metadata_dev,
             alignment,
             autofetch,
+            crash_unsafe_optimizations,
             shared_state,
         )?;
         let mut worker = BgWorker::new(receiver);
@@ -703,6 +706,7 @@ mod tests {
                 metadata_dev: Box::new(metadata_dev),
                 alignment: 4096,
                 autofetch: false,
+                crash_unsafe_optimizations: false,
                 shared_state,
                 receiver,
             },

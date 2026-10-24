@@ -85,6 +85,10 @@ pub struct DangerZone {
 }
 
 impl DangerZone {
+    pub fn crash_unsafe_optimizations(&self) -> bool {
+        self.enabled && self.allow_crash_unsafe_optimizations
+    }
+
     /// Returns the names of `allow_*` flags that are set to `true` but ignored
     /// because `enabled` is `false`.
     pub fn ignored_flags(&self) -> Vec<&'static str> {

@@ -19,11 +19,16 @@ impl LazyTask {
         metadata_dev: &dyn BlockDevice,
         alignment: usize,
         autofetch: bool,
+        crash_unsafe_optimizations: bool,
         metadata_state: SharedMetadataState,
     ) -> Result<Self> {
         let source_sector_count = stripe_source.sector_count();
-        let metadata_flusher =
-            MetadataFlusher::new(metadata_dev, source_sector_count, metadata_state.clone())?;
+        let metadata_flusher = MetadataFlusher::new(
+            metadata_dev,
+            source_sector_count,
+            metadata_state.clone(),
+            !crash_unsafe_optimizations,
+        )?;
         let stripe_fetcher = StripeFetcher::new(
             stripe_source,
             target_dev,
@@ -113,6 +118,7 @@ mod tests {
             &metadata_dev,
             4096,
             false,
+            false,
             metadata_state.clone(),
         )
         .unwrap();
@@ -147,6 +153,7 @@ mod tests {
             &target_dev,
             &metadata_dev,
             4096,
+            false,
             false,
             metadata_state,
         )

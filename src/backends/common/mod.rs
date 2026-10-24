@@ -506,6 +506,12 @@ pub fn build_raw_image_device(config: &v2::Config) -> Result<Option<Box<dyn Bloc
     }
 }
 
+/// O_SYNC only adds durability across crashes, which crash-unsafe
+/// optimizations give up.
+fn sync_io(config: &v2::Config) -> bool {
+    config.tuning.write_through && !config.danger_zone.crash_unsafe_optimizations()
+}
+
 pub fn build_block_device(
     path: &Path,
     config: &v2::Config,
@@ -517,7 +523,7 @@ pub fn build_block_device(
         config.tuning.queue_size,
         readonly,
         true,
-        config.tuning.write_through,
+        sync_io(config),
     )?;
 
     if let Some(encryption) = &config.encryption {
@@ -992,6 +998,42 @@ mod tests {
         let mut env = BackendEnv::build(&config).unwrap();
         // No bgworker_config, so this is a no-op
         env.run_bgworker_thread().unwrap();
+    }
+
+    #[test]
+    fn crash_unsafe_optimizations_drop_o_sync() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+        let disk_path = disk_file.path().canonicalize().unwrap();
+
+        let open_flags = |config: &v2::Config| {
+            let device = build_block_device(&disk_path, config, false).unwrap();
+            let _channel = device.create_channel().unwrap();
+            let mut flags = 0;
+            for entry in std::fs::read_dir("/proc/self/fd").unwrap() {
+                let entry = entry.unwrap();
+                if std::fs::read_link(entry.path()).ok().as_deref() != Some(disk_path.as_path()) {
+                    continue;
+                }
+                let fd = entry.file_name().into_string().unwrap();
+                let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{fd}")).unwrap();
+                let fd_flags = fdinfo
+                    .lines()
+                    .find_map(|line| line.strip_prefix("flags:"))
+                    .unwrap();
+                flags |= i32::from_str_radix(fd_flags.trim(), 8).unwrap();
+            }
+            flags
+        };
+
+        let mut config = test_config(&disk_path, None, None);
+        config.tuning.write_through = true;
+        assert_eq!(open_flags(&config) & libc::O_SYNC, libc::O_SYNC);
+
+        config.danger_zone.allow_crash_unsafe_optimizations = true;
+        let flags = open_flags(&config);
+        assert_eq!(flags & libc::O_SYNC, 0);
+        assert_ne!(flags & libc::O_DIRECT, 0);
     }
 
     #[test]

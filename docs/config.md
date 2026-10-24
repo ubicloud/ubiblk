@@ -84,7 +84,7 @@ write_through = false
 | `poll_timeout_us` | integer | 1000 | 0–10000000 | Poll timeout in microseconds |
 | `cpus` | list of integers | none | — | CPU pinning (length must match `num_queues`) |
 | `io_engine` | string | `"io_uring"` | `"io_uring"`, `"sync"` | I/O engine |
-| `write_through` | boolean | false | — | Enable write-through mode |
+| `write_through` | boolean | false | — | Enable write-through mode. Writes are durable when they complete, unless [crash-unsafe optimizations](#crash-unsafe-optimizations) are enabled |
 
 ## `[encryption]`
 
@@ -345,6 +345,17 @@ skipped. The stripe is still marked fetched only after its write completes, so
 while ubiblk runs, the guest's own I/O to the stripe always sees the fetched
 data. After a crash, the metadata can mark a stripe fetched whose data never
 reached the disk.
+
+#### Write-through without O_SYNC
+
+With `tuning.write_through`, the guest is told the disk has no volatile write
+cache, so it never sends flushes, and ubiblk opens the disk and metadata files
+with `O_SYNC` so that each write is durable when it completes. With
+crash-unsafe optimizations, the files are opened without `O_SYNC`. Writes still
+use `O_DIRECT` and are visible as soon as they complete, but the filesystem
+holding the files no longer commits its journal for each write, for example to
+allocate the blocks of a sparse file. After a crash, recent writes can be lost
+even though the guest never had to flush them.
 
 #### Whole-stripe writes
 

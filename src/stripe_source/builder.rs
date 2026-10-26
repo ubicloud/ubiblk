@@ -57,6 +57,15 @@ impl StripeSourceBuilder {
                         store,
                         Self::build_archive_kek(config, &self.device_config.secrets)?,
                     )?;
+                    let archive_stripe_sector_count = stripe_source.stripe_sector_count();
+                    if archive_stripe_sector_count != self.stripe_sector_count {
+                        return Err(crate::ubiblk_error!(InvalidParameter {
+                            description: format!(
+                                "archive stripe sector count {archive_stripe_sector_count} does not match expected {}",
+                                self.stripe_sector_count,
+                            ),
+                        }));
+                    }
                     return Ok(Box::new(stripe_source));
                 }
                 v2::stripe_source::StripeSourceConfig::Remote(config) => {
@@ -246,6 +255,11 @@ impl StripeSourceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::archive::{ArchiveCompressionAlgorithm, StripeArchiver};
+    use crate::backends::SECTOR_SIZE;
+    use crate::block_device::{
+        bdev_test::TestBlockDevice, metadata_flags, shared_buffer, UbiMetadata,
+    };
     use crate::config::v2::secrets::{resolve_secrets, SecretDef, SecretEncoding, SecretSource};
     use crate::config::v2::stripe_source::{
         ArchiveStorageConfig, RateLimitedRetryConfig, StripeSourceConfig,
@@ -316,6 +330,58 @@ mod tests {
             result.is_ok(),
             "Should successfully build a NullBlockDevice source when no paths provided"
         );
+    }
+
+    #[test]
+    fn test_build_archive_checks_stripe_sector_count() {
+        let dir = tempdir().unwrap();
+        let stripe_sectors = 8;
+        let stripe_size = stripe_sectors as usize * SECTOR_SIZE;
+        let device = TestBlockDevice::new(stripe_size as u64);
+        let data = vec![0xAB; stripe_size];
+        device.write(0, &data, data.len());
+        let mut metadata = UbiMetadata::new(3, 1, 0);
+        metadata.stripe_headers[0] |= metadata_flags::WRITTEN;
+        let mut archiver = StripeArchiver::new(
+            Box::new(BlockDeviceStripeSource::new(NullBlockDevice::new(), stripe_sectors).unwrap()),
+            &device,
+            metadata,
+            Box::new(FileSystemStore::new(dir.path().into()).unwrap()),
+            false,
+            ArchiveCompressionAlgorithm::None,
+            KeyEncryptionCipher::default(),
+            1,
+        )
+        .unwrap();
+        archiver.archive_all().unwrap();
+
+        let mut config = create_test_config(None, None);
+        config.stripe_source = Some(StripeSourceConfig::Archive(
+            ArchiveStorageConfig::Filesystem {
+                path: dir.path().into(),
+                archive_kek: None,
+                autofetch: false,
+            },
+        ));
+
+        for expected in [4, 16] {
+            let err = StripeSourceBuilder::new(config.clone(), expected, false)
+                .build()
+                .err()
+                .expect("mismatched archive stripe sizes must be rejected");
+            assert!(
+                matches!(err, crate::UbiblkError::InvalidParameter { ref description, .. }
+                if description == &format!("archive stripe sector count 8 does not match expected {expected}"))
+            );
+        }
+
+        let mut source = StripeSourceBuilder::new(config, stripe_sectors, false)
+            .build()
+            .unwrap();
+        let buffer = shared_buffer(stripe_size);
+        source.request(0, buffer.clone()).unwrap();
+        assert_eq!(source.poll(), vec![(0, true)]);
+        assert_eq!(buffer.borrow().as_slice(), data);
     }
 
     #[test]

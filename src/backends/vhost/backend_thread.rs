@@ -367,18 +367,19 @@ impl UbiBlkBackendThread {
         desc_chain: DescChain,
         vring: &mut Vring<'_>,
     ) {
-        let (data_addr, data_len) = request.data()[0];
+        let data_addr = match request.data().first() {
+            Some(&(addr, len)) if len >= VIRTIO_BLK_ID_BYTES => addr,
+            _ => {
+                self.complete_io(
+                    vring,
+                    &desc_chain,
+                    request.status_addr(),
+                    VIRTIO_BLK_S_IOERR as u8,
+                );
+                return;
+            }
+        };
         let mem = desc_chain.memory();
-
-        if data_len < VIRTIO_BLK_ID_BYTES {
-            self.complete_io(
-                vring,
-                &desc_chain,
-                request.status_addr(),
-                VIRTIO_BLK_S_IOERR as u8,
-            );
-            return;
-        }
 
         let mut buf = [0u8; VIRTIO_BLK_ID_BYTES as usize];
         let serial_bytes = self.device_id.as_bytes();

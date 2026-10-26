@@ -6,7 +6,7 @@ mod tests {
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
     use virtio_bindings::virtio_blk::{
         VIRTIO_BLK_ID_BYTES, VIRTIO_BLK_S_IOERR, VIRTIO_BLK_S_OK, VIRTIO_BLK_S_UNSUPP,
-        VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT,
+        VIRTIO_BLK_T_GET_ID, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT,
     };
     use virtio_queue::{
         desc::{split::Descriptor as SplitDescriptor, RawDescriptor},
@@ -353,6 +353,43 @@ mod tests {
 
         let status = mem.read_obj::<u8>(status_addr).unwrap();
         assert_eq!(status, VIRTIO_BLK_S_IOERR as u8);
+    }
+
+    #[test]
+    fn process_queue_rejects_get_device_id_without_data() {
+        let (mut thread, mem) = create_thread();
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let header_addr = GuestAddress(0x4000);
+        let status_addr = GuestAddress(0x5000);
+        mem.write_obj(VIRTIO_BLK_T_GET_ID, header_addr).unwrap();
+        mem.write_obj(0u32, header_addr.unchecked_add(4)).unwrap();
+        mem.write_obj(0u64, header_addr.unchecked_add(8)).unwrap();
+        mem.write_obj(0xFFu8, status_addr).unwrap();
+        let descs = [
+            RawDescriptor::from(SplitDescriptor::new(
+                header_addr.0,
+                16,
+                VRING_DESC_F_NEXT as u16,
+                1,
+            )),
+            RawDescriptor::from(SplitDescriptor::new(
+                status_addr.0,
+                1,
+                VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+        ];
+        queue.add_desc_chains(&descs, 0).unwrap();
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+
+        assert_eq!(
+            mem.read_obj::<u8>(status_addr).unwrap(),
+            VIRTIO_BLK_S_IOERR as u8
+        );
+        assert_eq!(read_used_idx(&mem, queue.used_addr()), 1);
     }
 
     #[test]

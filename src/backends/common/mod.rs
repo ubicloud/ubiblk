@@ -603,6 +603,69 @@ mod tests {
     }
 
     #[test]
+    fn backend_starts_with_fetched_stripes_and_unavailable_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut metadata = UbiMetadata::new(3, 2, 2);
+        for header in &mut metadata.stripe_headers {
+            *header |= block_device::metadata_flags::FETCHED;
+        }
+        let mut bytes = vec![0; metadata.metadata_size()];
+        metadata.write_to_buf(&mut bytes).unwrap();
+        std::fs::write(dir.path().join("metadata"), bytes).unwrap();
+        std::fs::write(dir.path().join("disk"), vec![0; metadata.stripe_size() * 2]).unwrap();
+
+        // Port zero cannot serve either source.
+        for source in [
+            r#"
+type = "remote"
+address = "127.0.0.1:0"
+connections = 1
+connect_timeout_ms = 100
+operation_attempt_timeout_ms = 100
+"#,
+            r#"
+type = "archive"
+storage = "s3"
+bucket = "unavailable"
+region = "us-east-1"
+endpoint = "http://127.0.0.1:0"
+access_key_id.ref = "test-key"
+secret_access_key.ref = "test-key"
+connections = 1
+connect_timeout_ms = 100
+operation_attempt_timeout_ms = 100
+max_attempts = 1
+"#,
+        ] {
+            let config_path = dir.path().join("config.toml");
+            std::fs::write(
+                &config_path,
+                format!(
+                    r#"
+[device]
+data_path = "disk"
+metadata_path = "metadata"
+[tuning]
+io_engine = "sync"
+[danger_zone]
+enabled = true
+allow_unencrypted_disk = true
+allow_unencrypted_connection = true
+allow_inline_plaintext_secrets = true
+[secrets.test-key]
+source.inline = "test-credentials"
+[stripe_source]
+{source}
+"#
+                ),
+            )
+            .unwrap();
+            let config = v2::Config::load(&config_path).unwrap();
+            run_backend_loop(&config, "test-backend", false, |_| Ok(())).unwrap();
+        }
+    }
+
+    #[test]
     fn ensure_metadata_file_creates_with_mode_0600() {
         let dir = tempfile::tempdir().unwrap();
         let metadata_path = dir.path().join("metadata.bin");

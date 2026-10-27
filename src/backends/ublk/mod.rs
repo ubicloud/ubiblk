@@ -81,6 +81,7 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
         queue_size,
         io_buf_bytes,
         alignment: backend_alignment,
+        tuning: config.tuning.clone(),
         symlink: device_symlink.clone(),
     };
     let io_trackers = backend_env.io_trackers().clone();
@@ -143,6 +144,7 @@ struct Device {
     queue_size: u16,
     io_buf_bytes: u32,
     alignment: usize,
+    tuning: v2::tuning::TuningSection,
     symlink: Option<PathBuf>,
 }
 
@@ -188,7 +190,7 @@ fn run_ublk_device(
     let alignment = device.alignment;
     let announce_symlink = device.symlink.clone();
     ctrl.run_target(
-        move |dev| configure_ublk_device(dev, device_size),
+        move |dev| configure_ublk_device(dev, device_size, &device.tuning),
         move |qid, dev| {
             let io_tracker = io_trackers[qid as usize].clone();
             serve_ublk_queue(qid, dev, bdev.clone(), alignment, io_tracker)
@@ -225,9 +227,20 @@ fn handle_ctrlc_shutdown(dev_id: u32, device_symlink: Option<&Path>) {
 fn configure_ublk_device(
     dev: &mut UblkDev,
     device_size: u64,
+    tuning: &v2::tuning::TuningSection,
 ) -> std::result::Result<(), UblkError> {
     dev.set_default_params(device_size);
+    configure_ublk_topology(&mut dev.tgt.params.basic, tuning);
     Ok(())
+}
+
+fn configure_ublk_topology(
+    params: &mut libublk::sys::ublk_param_basic,
+    tuning: &v2::tuning::TuningSection,
+) {
+    params.physical_bs_shift = tuning.physical_block_size.trailing_zeros() as u8;
+    params.io_min_shift = tuning.min_io_size.trailing_zeros() as u8;
+    params.io_opt_shift = tuning.opt_io_size.trailing_zeros() as u8;
 }
 
 fn announce_ublk_device(ctrl: &UblkCtrl, device_symlink: Option<&Path>) {
@@ -407,6 +420,42 @@ fn serve_ublk_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn io_topology_uses_byte_shifts_and_preserves_other_device_params() {
+        let custom = v2::tuning::TuningSection {
+            physical_block_size: 512,
+            min_io_size: 4096,
+            opt_io_size: 131072,
+            ..Default::default()
+        };
+        for (tuning, expected) in [
+            (v2::tuning::TuningSection::default(), (12, 12, 12)),
+            (custom, (9, 12, 17)),
+        ] {
+            tuning.validate().unwrap();
+            let mut params = libublk::sys::ublk_param_basic {
+                logical_bs_shift: 9,
+                max_sectors: 128,
+                dev_sectors: 4096,
+                attrs: libublk::sys::UBLK_ATTR_VOLATILE_CACHE,
+                ..Default::default()
+            };
+            configure_ublk_topology(&mut params, &tuning);
+            assert_eq!(
+                (
+                    params.physical_bs_shift,
+                    params.io_min_shift,
+                    params.io_opt_shift
+                ),
+                expected
+            );
+            assert_eq!(params.logical_bs_shift, 9);
+            assert_eq!(params.max_sectors, 128);
+            assert_eq!(params.dev_sectors, 4096);
+            assert_eq!(params.attrs, libublk::sys::UBLK_ATTR_VOLATILE_CACHE);
+        }
+    }
 
     #[test]
     fn test_create_device_symlink() {

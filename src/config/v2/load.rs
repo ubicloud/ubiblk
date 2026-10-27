@@ -329,6 +329,9 @@ mod tests {
             num_queues = 2
             cpus = [0, 1]
             poll_timeout_us = 5000
+            physical_block_size = 512
+            min_io_size = 4096
+            opt_io_size = 131072
             [encryption]
             xts_key.ref = "my_xts_key"
             [secrets.my_xts_key]
@@ -342,6 +345,9 @@ mod tests {
         assert_eq!(config.tuning.num_queues, 2);
         assert_eq!(config.tuning.cpus, Some(vec![0, 1]));
         assert_eq!(config.tuning.poll_timeout_us, 5000);
+        assert_eq!(config.tuning.physical_block_size, 512);
+        assert_eq!(config.tuning.min_io_size, 4096);
+        assert_eq!(config.tuning.opt_io_size, 131072);
         assert!(config.encryption.is_some());
         assert_eq!(config.secrets.len(), 1);
         assert!(config.secrets.contains_key("my_xts_key"));

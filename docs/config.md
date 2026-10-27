@@ -69,6 +69,9 @@ num_queues = 4
 queue_size = 128
 seg_size_max = 65536
 seg_count_max = 4
+physical_block_size = 4096
+min_io_size = 4096
+opt_io_size = 4096
 poll_timeout_us = 1000
 cpus = [0, 1, 2, 3]
 io_engine = "io_uring"
@@ -81,10 +84,27 @@ write_through = false
 | `queue_size` | integer | 64 | power of 2, max 65536 | Queue depth |
 | `seg_size_max` | integer | 65536 | 1–1048576 | Max I/O segment size (bytes) |
 | `seg_count_max` | integer | 4 | 1–256 | Max segments per I/O |
+| `physical_block_size` | integer | 4096 | power of 2, 512–`min_io_size` | Advertised physical block size (bytes) |
+| `min_io_size` | integer | 4096 | power of 2, `physical_block_size`–16777216 | Advertised minimum efficient I/O size (bytes) |
+| `opt_io_size` | integer | 4096 | power of 2, `min_io_size`–2147483648 | Advertised optimal sustained I/O size (bytes) |
 | `poll_timeout_us` | integer | 1000 | 0–10000000 | Poll timeout in microseconds |
 | `cpus` | list of integers | none | — | CPU pinning (length must match `num_queues`) |
 | `io_engine` | string | `"io_uring"` | `"io_uring"`, `"sync"` | I/O engine |
 | `write_through` | boolean | false | — | Enable write-through mode. Writes are durable when they complete, unless [crash-unsafe optimizations](#crash-unsafe-optimizations) are enabled |
+
+The I/O topology settings apply to both the vhost-user and ublk backends.
+Logical sectors remain 512 bytes. The 4 KiB defaults suit backing devices with
+4 KiB physical sectors, including 512e disks; ubiblk does not detect the backing
+device's topology. For a device with 512-byte physical sectors, all three values
+can be set to 512. Minimum and optimal sizes must be multiples of the preceding
+size, which the power-of-two and ordering requirements enforce. The minimum
+size limit comes from virtio's 16-bit count of logical blocks.
+
+These values advertise alignment and preferred I/O sizes to the guest or host
+kernel. They do not resize or coalesce requests and do not change ubiblk's
+512-byte metadata updates. Existing configurations that omit these fields use
+the new defaults: vhost-user now advertises 4 KiB physical, minimum, and optimal
+sizes instead of 512 bytes; ublk's defaults remain 4 KiB.
 
 ## `[encryption]`
 

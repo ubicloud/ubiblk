@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::{config::v2::MAX_NUM_QUEUES, ubiblk_error};
+use crate::{backends::SECTOR_SIZE, config::v2::MAX_NUM_QUEUES, ubiblk_error};
 
 /// I/O engine selection.
 #[derive(Debug, Clone, Deserialize, PartialEq, Default)]
@@ -23,6 +23,15 @@ pub struct TuningSection {
     pub seg_size_max: u32,
     #[serde(default = "default_seg_count_max")]
     pub seg_count_max: u32,
+    /// Advertised physical block size in bytes; logical sectors remain 512 bytes.
+    #[serde(default = "default_io_size")]
+    pub physical_block_size: u32,
+    /// Advertised minimum efficient I/O size in bytes.
+    #[serde(default = "default_io_size")]
+    pub min_io_size: u32,
+    /// Advertised optimal sustained I/O size in bytes.
+    #[serde(default = "default_io_size")]
+    pub opt_io_size: u32,
     #[serde(default = "default_poll_timeout_us")]
     pub poll_timeout_us: u64,
     #[serde(default)]
@@ -40,6 +49,9 @@ impl Default for TuningSection {
             queue_size: default_queue_size(),
             seg_size_max: default_seg_size_max(),
             seg_count_max: default_seg_count_max(),
+            physical_block_size: default_io_size(),
+            min_io_size: default_io_size(),
+            opt_io_size: default_io_size(),
             poll_timeout_us: default_poll_timeout_us(),
             cpus: None,
             io_engine: IoEngine::default(),
@@ -50,6 +62,35 @@ impl Default for TuningSection {
 
 impl TuningSection {
     pub fn validate(&self) -> crate::Result<()> {
+        for (name, size) in [
+            ("physical_block_size", self.physical_block_size),
+            ("min_io_size", self.min_io_size),
+            ("opt_io_size", self.opt_io_size),
+        ] {
+            if size < SECTOR_SIZE as u32 || !size.is_power_of_two() {
+                return Err(ubiblk_error!(InvalidParameter {
+                    description: format!(
+                        "{name} {size} is invalid (must be a power of two, at least {SECTOR_SIZE} bytes)"
+                    ),
+                }));
+            }
+        }
+        if self.min_io_size < self.physical_block_size {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: "min_io_size must be at least physical_block_size".to_string(),
+            }));
+        }
+        if self.min_io_size / SECTOR_SIZE as u32 > u16::MAX as u32 {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: "min_io_size exceeds the virtio limit of 65535 logical blocks"
+                    .to_string(),
+            }));
+        }
+        if self.opt_io_size < self.min_io_size {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: "opt_io_size must be at least min_io_size".to_string(),
+            }));
+        }
         if self.num_queues == 0 || self.num_queues > MAX_NUM_QUEUES {
             return Err(ubiblk_error!(InvalidParameter {
                 description: format!(
@@ -121,6 +162,10 @@ fn default_seg_count_max() -> u32 {
     4
 }
 
+fn default_io_size() -> u32 {
+    4096
+}
+
 fn default_poll_timeout_us() -> u64 {
     1000
 }
@@ -133,6 +178,56 @@ mod tests {
     fn default_tuning_section_is_valid() {
         let tuning = TuningSection::default();
         assert!(tuning.validate().is_ok());
+    }
+
+    #[test]
+    fn omitted_topology_fields_default_to_4k() {
+        for input in ["", "physical_block_size = 512"] {
+            let tuning: TuningSection = toml::from_str(input).unwrap();
+            assert_eq!(
+                tuning.physical_block_size,
+                if input.is_empty() { 4096 } else { 512 }
+            );
+            assert_eq!(tuning.min_io_size, 4096);
+            assert_eq!(tuning.opt_io_size, 4096);
+            tuning.validate().unwrap();
+        }
+    }
+
+    #[test]
+    fn topology_rejects_zero_small_and_non_power_of_two_sizes() {
+        for field in ["physical_block_size", "min_io_size", "opt_io_size"] {
+            for size in [0, 256, 768] {
+                let input = format!("{field} = {size}");
+                let tuning: TuningSection = toml::from_str(&input).unwrap();
+                let err = tuning.validate().unwrap_err().to_string();
+                assert!(err.contains(field), "{input}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn topology_validates_ordering_and_virtio_field_limit() {
+        for (input, expected_error) in [
+            ("physical_block_size = 8192", "physical_block_size"),
+            ("min_io_size = 8192", "opt_io_size"),
+            (
+                "min_io_size = 33554432\nopt_io_size = 33554432",
+                "65535 logical blocks",
+            ),
+        ] {
+            let tuning: TuningSection = toml::from_str(input).unwrap();
+            let err = tuning.validate().unwrap_err().to_string();
+            assert!(err.contains(expected_error), "{input}: {err}");
+        }
+
+        for input in [
+            "physical_block_size = 512\nmin_io_size = 512\nopt_io_size = 512",
+            "physical_block_size = 16777216\nmin_io_size = 16777216\nopt_io_size = 2147483648",
+        ] {
+            let tuning: TuningSection = toml::from_str(input).unwrap();
+            tuning.validate().unwrap();
+        }
     }
 
     #[test]

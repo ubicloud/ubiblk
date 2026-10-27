@@ -55,8 +55,10 @@ impl UbiBlkBackend {
             blk_size: SECTOR_SIZE as u32, /* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
             size_max: config.tuning.seg_size_max, /* The maximum segment size (if VIRTIO_BLK_F_SIZE_MAX) */
             seg_max: config.tuning.seg_count_max, /* The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX) */
-            min_io_size: 1, /* minimum I/O size without performance penalty in logical blocks. */
-            opt_io_size: 1, /* optimal sustained I/O size in logical blocks. */
+            physical_block_exp: (config.tuning.physical_block_size / SECTOR_SIZE as u32)
+                .trailing_zeros() as u8,
+            min_io_size: (config.tuning.min_io_size / SECTOR_SIZE as u32) as u16,
+            opt_io_size: config.tuning.opt_io_size / SECTOR_SIZE as u32,
             num_queues: config.tuning.num_queues as u16,
             writeback,
             ..Default::default()
@@ -531,10 +533,37 @@ mod tests {
         let virtio_config: VirtioBlockConfig = *VirtioBlockConfig::from_slice(&bytes).unwrap();
         let capacity = virtio_config.capacity;
         let blk_size = virtio_config.blk_size;
+        let physical_block_exp = virtio_config.physical_block_exp;
+        let min_io_size = virtio_config.min_io_size;
+        let opt_io_size = virtio_config.opt_io_size;
         let queues = virtio_config.num_queues;
         assert_eq!(capacity, 8);
         assert_eq!(blk_size, SECTOR_SIZE as u32);
+        assert_eq!(physical_block_exp, 3);
+        assert_eq!(min_io_size, 8);
+        assert_eq!(opt_io_size, 8);
         assert_eq!(queues as usize, DEFAULT_NUM_QUEUES);
+    }
+
+    #[test]
+    fn get_config_reports_custom_io_topology_in_logical_blocks() {
+        let mut config = default_config("img".to_string());
+        config.tuning.physical_block_size = 512;
+        config.tuning.min_io_size = 4096;
+        config.tuning.opt_io_size = 131072;
+        config.tuning.validate().unwrap();
+        let backend = build_backend(&config).unwrap();
+
+        let bytes = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
+        let virtio_config = VirtioBlockConfig::from_slice(&bytes).unwrap();
+        let blk_size = virtio_config.blk_size;
+        let physical_block_exp = virtio_config.physical_block_exp;
+        let min_io_size = virtio_config.min_io_size;
+        let opt_io_size = virtio_config.opt_io_size;
+        assert_eq!(blk_size, 512);
+        assert_eq!(physical_block_exp, 0);
+        assert_eq!(min_io_size, 8);
+        assert_eq!(opt_io_size, 256);
     }
 
     /// queues_per_thread should reflect the number of queues configured.

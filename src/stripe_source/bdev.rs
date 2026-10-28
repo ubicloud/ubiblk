@@ -1,6 +1,7 @@
 use crate::backends::SECTOR_SIZE;
 use crate::block_device::{BlockDevice, IoChannel, SharedBuffer};
 use crate::Result;
+use log::error;
 
 use super::*;
 
@@ -48,7 +49,11 @@ impl StripeSource for BlockDeviceStripeSource {
             stripe_id,
         );
 
-        self.channel.submit()
+        // The read stays in the channel, which retries the submit on poll.
+        if let Err(e) = self.channel.submit() {
+            error!("Failed to submit read for stripe {stripe_id}: {e}");
+        }
+        Ok(())
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {

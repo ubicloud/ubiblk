@@ -147,8 +147,6 @@ impl LazyIoChannel {
     }
 
     fn process_queued_rw_requests(&mut self) {
-        let mut added_requests = Vec::new();
-
         while let Some(front) = self.queued_rw_requests.front() {
             match self.request_stripes_fetch_status(front) {
                 StripesFetchStatus::Complete => {}
@@ -192,21 +190,10 @@ impl LazyIoChannel {
                     );
                 }
             }
-
-            added_requests.push(request.id);
         }
 
-        if !added_requests.is_empty() {
-            if let Err(e) = self.base.submit() {
-                error!(
-                    "Failed to submit {} queued requests: {}",
-                    added_requests.len(),
-                    e
-                );
-                for id in added_requests {
-                    self.finished_requests.push((id, false));
-                }
-            }
+        if let Err(e) = self.base.submit() {
+            error!("Failed to submit queued requests: {e}");
         }
     }
 }
@@ -319,10 +306,9 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn submit(&mut self) -> Result<()> {
-        if let Some(image_channel) = &mut self.image {
-            image_channel.submit()?;
-        }
-        self.base.submit()
+        let image_result = self.image.as_mut().map_or(Ok(()), |ch| ch.submit());
+        let base_result = self.base.submit();
+        image_result.and(base_result)
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {

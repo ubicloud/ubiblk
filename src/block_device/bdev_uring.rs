@@ -73,6 +73,17 @@ impl UringIoChannel {
 // therefore rests on the caller's request-slot lifecycle (a slot is not reused
 // until its completion), not on `AtomicRefCell`; the `Send`/`Sync` on
 // `SharedBuffer` does not make concurrent access during this window sound.
+impl UringIoChannel {
+    /// SQEs that io_uring_enter did not consume stay in the ring, counted as
+    /// pending, until a later call enters them.
+    fn enter(&mut self) -> std::io::Result<()> {
+        let submitted = self.ring.submit()? as u64;
+        self.submissions += submitted;
+        self.pending -= submitted;
+        Ok(())
+    }
+}
+
 impl IoChannel for UringIoChannel {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize) {
         let mut buf = buf.borrow_mut();
@@ -130,13 +141,10 @@ impl IoChannel for UringIoChannel {
         if self.pending == 0 {
             return Ok(());
         }
-        self.submissions += self.pending;
-        self.pending = 0;
-        if let Err(e) = self.ring.submit() {
+        self.enter().map_err(|e| {
             error!("Failed to submit IO request: {e}");
-            return Err(crate::ubiblk_error!(IoError { source: e }));
-        }
-        Ok(())
+            crate::ubiblk_error!(IoError { source: e })
+        })
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
@@ -171,6 +179,9 @@ impl IoChannel for UringIoChannel {
                 }
                 None => break,
             }
+        }
+        if self.pending > 0 {
+            let _ = self.enter();
         }
         finished_requests
     }

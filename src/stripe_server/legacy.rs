@@ -1,4 +1,4 @@
-//! Serving-only compatibility for legacy v0.2.x volumes.
+//! Compatibility for legacy v0.2.x volumes.
 //!
 //! v0.2.x metadata predates the current format: stripe headers carry only
 //! fetched (bit 0) and written (bit 1) — no HAS_SOURCE bit — packed one byte
@@ -6,9 +6,9 @@
 //! config is a YAML `Options` file whose XTS keys are KEK-wrapped.
 //!
 //! This module reads those formats and produces an in-memory current-format
-//! config + metadata so the existing serving path can migrate the volume. It is
-//! intentionally narrow — serving only, no write support — and touches none of
-//! the general metadata or config code.
+//! config + metadata, either so the existing serving path can migrate the
+//! volume, or so `convert-legacy-metadata` can upgrade it in place. It touches
+//! none of the general metadata or config code.
 
 use std::{collections::HashMap, fs::File, path::Path, time::Duration};
 
@@ -44,6 +44,10 @@ const UBI_MAGIC: &[u8] = b"BDEV_UBI\0";
 /// `init-metadata` capped it at 16 == 2^16 sectors == 32 MiB stripes). Bounding
 /// it keeps `1 << shift` and the derived stripe size well within range.
 const MAX_LEGACY_STRIPE_SECTOR_COUNT_SHIFT: u8 = 16;
+/// v0.2.x and v0.3.x stripe header bits. Only v0.3.x sets NO_SOURCE.
+const LEGACY_FETCHED: u8 = 1 << 0;
+const LEGACY_WRITTEN: u8 = 1 << 1;
+const LEGACY_NO_SOURCE: u8 = 1 << 2;
 /// Secret id for the XTS key synthesized from a legacy config.
 const LEGACY_XTS_KEY_ID: &str = "__legacy_xts_key";
 
@@ -75,7 +79,7 @@ fn is_legacy_v0_2(buf: &[u8]) -> bool {
 }
 
 /// Read the whole metadata device into a buffer.
-fn read_metadata_bytes(bdev: &dyn BlockDevice) -> Result<SharedBuffer> {
+pub fn read_metadata_bytes(bdev: &dyn BlockDevice) -> Result<SharedBuffer> {
     let mut io_channel = bdev.create_channel()?;
     let sector_count = bdev.sector_count();
 
@@ -104,14 +108,84 @@ fn read_metadata_bytes(bdev: &dyn BlockDevice) -> Result<SharedBuffer> {
 /// Translate v0.2.x metadata into the current in-memory layout for *serving*.
 /// A header of 0 means the stripe is still in the source, so it becomes
 /// HAS_SOURCE; anything already local (fetched and/or written) becomes WRITTEN.
-/// The shift lives at byte 13, headers follow sector 0, one byte per stripe.
+fn translate_v0_2_metadata(buf: &[u8], data_sector_count: u64) -> Result<Box<UbiMetadata>> {
+    let (shift, legacy_headers) = v0_2_stripe_headers(buf, data_sector_count)?;
+    let mut metadata = UbiMetadata::new(shift, legacy_headers.len(), 0);
+    for (header, &legacy) in metadata.stripe_headers.iter_mut().zip(legacy_headers) {
+        *header = if legacy == 0 {
+            metadata_flags::HAS_SOURCE
+        } else {
+            metadata_flags::WRITTEN
+        };
+    }
+    Ok(metadata)
+}
+
+/// Convert v0.2.x or v0.3.x metadata (both have version 0.0) into
+/// current-format metadata for a volume that keeps running from the same data
+/// device. Unlike the serving translation, every flag is kept: a stripe the
+/// source has gets HAS_SOURCE, plus FETCHED and WRITTEN as recorded. Stripes
+/// past the end of the source are created as fetched by v0.2.x and as
+/// NO_SOURCE by v0.3.x; anything else means the metadata doesn't match the
+/// source.
+pub fn convert_v0_2_metadata(
+    buf: &[u8],
+    data_sector_count: u64,
+    has_source: impl Fn(usize) -> bool,
+) -> Result<Box<UbiMetadata>> {
+    if !is_legacy_v0_2(buf) {
+        return Err(crate::ubiblk_error!(MetadataError {
+            description: "Metadata is not in the legacy v0.2.x format".to_string(),
+        }));
+    }
+
+    let (shift, legacy_headers) = v0_2_stripe_headers(buf, data_sector_count)?;
+    let mut metadata = UbiMetadata::new(shift, legacy_headers.len(), 0);
+    for (stripe_id, (header, &legacy)) in metadata
+        .stripe_headers
+        .iter_mut()
+        .zip(legacy_headers)
+        .enumerate()
+    {
+        let fetched = legacy & LEGACY_FETCHED != 0;
+        let no_source = legacy & LEGACY_NO_SOURCE != 0;
+        let mut converted = 0;
+        if has_source(stripe_id) {
+            if no_source {
+                return Err(crate::ubiblk_error!(MetadataError {
+                    description: format!(
+                        "Legacy stripe {stripe_id} has no source but the source has it"
+                    ),
+                }));
+            }
+            converted |= metadata_flags::HAS_SOURCE;
+            if fetched {
+                converted |= metadata_flags::FETCHED;
+            }
+        } else if !fetched && !no_source {
+            return Err(crate::ubiblk_error!(MetadataError {
+                description: format!(
+                    "Legacy stripe {stripe_id} is not fetched but the source doesn't have it"
+                ),
+            }));
+        }
+        if legacy & LEGACY_WRITTEN != 0 {
+            converted |= metadata_flags::WRITTEN;
+        }
+        *header = converted;
+    }
+    Ok(metadata)
+}
+
+/// Parse the stripe shift and stripe headers of v0.2.x metadata. The shift
+/// lives at byte 13, headers follow sector 0, one byte per stripe.
 ///
 /// v0.2.x stores no stripe count: the effective count comes from the data
 /// device size, and the metadata's header array is only a capacity that may be
 /// larger. So derive the count from `data_sector_count` (matching v0.2.x's own
 /// `source_sector_count.div_ceil(stripe_size)`) and read exactly that many
 /// headers, rather than trusting the metadata file's size.
-fn translate_v0_2_metadata(buf: &[u8], data_sector_count: u64) -> Result<Box<UbiMetadata>> {
+fn v0_2_stripe_headers(buf: &[u8], data_sector_count: u64) -> Result<(u8, &[u8])> {
     if buf.len() < SECTOR_SIZE {
         return Err(crate::ubiblk_error!(MetadataError {
             description: format!("Legacy metadata too small: {} < {SECTOR_SIZE}", buf.len()),
@@ -137,16 +211,7 @@ fn translate_v0_2_metadata(buf: &[u8], data_sector_count: u64) -> Result<Box<Ubi
         }));
     }
 
-    let legacy_headers = &buf[SECTOR_SIZE..SECTOR_SIZE + stripe_count];
-    let mut metadata = UbiMetadata::new(shift, stripe_count, 0);
-    for (header, &legacy) in metadata.stripe_headers.iter_mut().zip(legacy_headers) {
-        *header = if legacy == 0 {
-            metadata_flags::HAS_SOURCE
-        } else {
-            metadata_flags::WRITTEN
-        };
-    }
-    Ok(metadata)
+    Ok((shift, &buf[SECTOR_SIZE..SECTOR_SIZE + stripe_count]))
 }
 
 /// Subset of the v0.2.x `Options` YAML config needed to serve a volume. Unknown
@@ -381,6 +446,62 @@ mod tests {
     fn rejects_out_of_range_shift() {
         let buf = v0_2_metadata(MAX_LEGACY_STRIPE_SECTOR_COUNT_SHIFT + 1, &[0, 1]);
         assert!(translate_v0_2_metadata(&buf, 2 * (1 << 11)).is_err());
+    }
+
+    #[test]
+    fn converts_flags_keeping_fetched_and_written() {
+        // Stripes 0..3 are in the source; 3 and 4 are past it, so v0.2.x
+        // created them fetched.
+        let buf = v0_2_metadata(11, &[0u8, 1, 3, 1, 3]);
+        let md = convert_v0_2_metadata(&buf, 5 * (1 << 11), |i| i < 3).expect("convert");
+
+        assert_eq!(md.stripe_sector_count_shift, 11);
+        assert_eq!(md.version_major_u16(), 2);
+        assert_eq!(
+            md.stripe_headers,
+            vec![
+                metadata_flags::HAS_SOURCE,
+                metadata_flags::HAS_SOURCE | metadata_flags::FETCHED,
+                metadata_flags::HAS_SOURCE | metadata_flags::FETCHED | metadata_flags::WRITTEN,
+                0,
+                metadata_flags::WRITTEN,
+            ]
+        );
+    }
+
+    #[test]
+    fn converts_v0_3_no_source_stripes() {
+        // v0.3.x creates stripes past the source as NO_SOURCE (bit 2).
+        let buf = v0_2_metadata(11, &[1u8, 4, 6]);
+        let md = convert_v0_2_metadata(&buf, 3 * (1 << 11), |i| i < 1).expect("convert");
+        assert_eq!(
+            md.stripe_headers,
+            vec![
+                metadata_flags::HAS_SOURCE | metadata_flags::FETCHED,
+                0,
+                metadata_flags::WRITTEN,
+            ]
+        );
+    }
+
+    #[test]
+    fn convert_rejects_no_source_stripe_the_source_has() {
+        let buf = v0_2_metadata(11, &[4u8]);
+        assert!(convert_v0_2_metadata(&buf, 1 << 11, |_| true).is_err());
+    }
+
+    #[test]
+    fn convert_rejects_unfetched_stripe_without_source() {
+        let buf = v0_2_metadata(11, &[0u8, 0]);
+        assert!(convert_v0_2_metadata(&buf, 2 * (1 << 11), |i| i < 1).is_err());
+    }
+
+    #[test]
+    fn convert_rejects_current_format_metadata() {
+        let md = UbiMetadata::new(11, 2, 2);
+        let mut buf = vec![0u8; md.metadata_size()];
+        md.write_to_buf(&mut buf).unwrap();
+        assert!(convert_v0_2_metadata(&buf, 2 * (1 << 11), |_| true).is_err());
     }
 
     #[test]

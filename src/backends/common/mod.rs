@@ -386,6 +386,63 @@ pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Resu
     Ok(())
 }
 
+/// Upgrade a v0.2.x volume in place: read its legacy metadata and write the
+/// equivalent current-format metadata to `config.device.metadata_path`. The
+/// data device and stripe source come from `config`, the volume's new config.
+#[error_context("Failed to convert legacy metadata")]
+pub fn convert_legacy_metadata(config: &v2::Config, legacy_metadata_path: &Path) -> Result<()> {
+    let metadata_path = config.device.metadata_path.as_ref().ok_or_else(|| {
+        crate::ubiblk_error!(InvalidParameter {
+            description: "metadata_path is none".to_string(),
+        })
+    })?;
+    if metadata_path == legacy_metadata_path {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: "metadata_path must differ from the legacy metadata path".to_string(),
+        }));
+    }
+
+    let legacy = std::fs::read(legacy_metadata_path).with_context(|| {
+        format!(
+            "Failed to read legacy metadata {}",
+            legacy_metadata_path.display()
+        )
+    })?;
+
+    let disk_bdev = build_block_device(&config.device.data_path, config, false)
+        .context("Failed to build disk block device")?;
+    let data_sector_count = disk_bdev.sector_count();
+
+    let metadata = match config.stripe_source {
+        None => crate::stripe_server::convert_v0_2_metadata(&legacy, data_sector_count, |_| false)?,
+        Some(_) => {
+            // The stripe size only matters for has_stripe, and has to match the
+            // legacy metadata's, so read the shift before building the source.
+            let shift = *legacy.get(13).ok_or_else(|| {
+                crate::ubiblk_error!(MetadataError {
+                    description: "Legacy metadata too small".to_string(),
+                })
+            })?;
+            let stripe_source =
+                StripeSourceBuilder::new(config.clone(), 1u64 << shift, false).build()?;
+            crate::stripe_server::convert_v0_2_metadata(&legacy, data_sector_count, |stripe_id| {
+                stripe_source.has_stripe(stripe_id)
+            })?
+        }
+    };
+
+    ensure_metadata_file(metadata_path, metadata.metadata_size())?;
+    let metadata_bdev = build_block_device(metadata_path, config, false)
+        .context("Failed to build metadata block device")?;
+    metadata.save_to_bdev(metadata_bdev.as_ref())?;
+    info!(
+        "Converted legacy metadata {} to {}",
+        legacy_metadata_path.display(),
+        metadata_path.display()
+    );
+    Ok(())
+}
+
 #[error_context("Failed to ensure metadata file exists with secure permissions")]
 fn ensure_metadata_file(path: &Path, minimum_size: usize) -> Result<()> {
     let mut created = false;
@@ -903,6 +960,79 @@ source.inline = "test-credentials"
 
         let config = test_config(disk_file.path(), Some(metadata_file.path()), None);
         init_metadata(&config, 11).unwrap();
+    }
+
+    fn write_v0_2_metadata(path: &Path, shift: u8, headers: &[u8]) {
+        let mut buf = vec![0u8; 2 * SECTOR_SIZE];
+        buf[..9].copy_from_slice(b"BDEV_UBI\0");
+        buf[13] = shift;
+        buf[SECTOR_SIZE..SECTOR_SIZE + headers.len()].copy_from_slice(headers);
+        std::fs::write(path, buf).unwrap();
+    }
+
+    #[test]
+    fn convert_legacy_metadata_with_raw_source() {
+        use crate::block_device::metadata_flags::{FETCHED, HAS_SOURCE};
+
+        let dir = tempfile::tempdir().unwrap();
+        let stripe_size = 8 * SECTOR_SIZE;
+        // Four data stripes; the image covers two and a half of them.
+        std::fs::write(dir.path().join("disk"), vec![0; 4 * stripe_size]).unwrap();
+        std::fs::write(dir.path().join("image"), vec![0; 5 * stripe_size / 2]).unwrap();
+        // v0.2.x created stripe 3, past the image, as fetched.
+        write_v0_2_metadata(&dir.path().join("legacy"), 3, &[0, 1, 0, 1]);
+
+        let config = test_config(
+            &dir.path().join("disk"),
+            Some(&dir.path().join("metadata")),
+            Some(StripeSourceConfig::Raw {
+                image_path: dir.path().join("image"),
+                autofetch: false,
+                copy_on_read: false,
+            }),
+        );
+        convert_legacy_metadata(&config, &dir.path().join("legacy")).unwrap();
+
+        let metadata =
+            UbiMetadata::from_bytes(&std::fs::read(dir.path().join("metadata")).unwrap()).unwrap();
+        assert_eq!(metadata.stripe_sector_count_shift, 3);
+        assert_eq!(
+            metadata.stripe_headers,
+            vec![HAS_SOURCE, HAS_SOURCE | FETCHED, HAS_SOURCE, 0]
+        );
+    }
+
+    #[test]
+    fn convert_legacy_metadata_without_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("disk"), vec![0; 2 * 8 * SECTOR_SIZE]).unwrap();
+        write_v0_2_metadata(&dir.path().join("legacy"), 3, &[1, 1]);
+
+        let config = test_config(
+            &dir.path().join("disk"),
+            Some(&dir.path().join("metadata")),
+            None,
+        );
+        convert_legacy_metadata(&config, &dir.path().join("legacy")).unwrap();
+
+        let metadata =
+            UbiMetadata::from_bytes(&std::fs::read(dir.path().join("metadata")).unwrap()).unwrap();
+        assert_eq!(metadata.stripe_headers, vec![0, 0]);
+    }
+
+    #[test]
+    fn convert_legacy_metadata_rejects_same_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("disk"), vec![0; 8 * SECTOR_SIZE]).unwrap();
+        write_v0_2_metadata(&dir.path().join("legacy"), 3, &[1]);
+
+        let config = test_config(
+            &dir.path().join("disk"),
+            Some(&dir.path().join("legacy")),
+            None,
+        );
+        let err = convert_legacy_metadata(&config, &dir.path().join("legacy")).unwrap_err();
+        assert!(err.to_string().contains("must differ"));
     }
 
     #[test]

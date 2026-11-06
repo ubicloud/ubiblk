@@ -93,7 +93,7 @@ mod psk;
 mod session;
 
 pub use client::connect_to_stripe_server;
-pub use legacy::load_legacy_config;
+pub use legacy::{convert_v0_2_metadata, load_legacy_config};
 pub use prepare::prepare_stripe_server;
 pub use psk::{
     parse_psk_credentials, wrap_psk_client_stream, wrap_psk_server_stream, PskCredentials,

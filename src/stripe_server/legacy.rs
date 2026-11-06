@@ -79,7 +79,7 @@ fn is_legacy_v0_2(buf: &[u8]) -> bool {
 }
 
 /// Read the whole metadata device into a buffer.
-fn read_metadata_bytes(bdev: &dyn BlockDevice) -> Result<SharedBuffer> {
+pub fn read_metadata_bytes(bdev: &dyn BlockDevice) -> Result<SharedBuffer> {
     let mut io_channel = bdev.create_channel()?;
     let sector_count = bdev.sector_count();
 

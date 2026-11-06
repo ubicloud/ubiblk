@@ -402,12 +402,14 @@ pub fn convert_legacy_metadata(config: &v2::Config, legacy_metadata_path: &Path)
         }));
     }
 
-    let legacy = std::fs::read(legacy_metadata_path).with_context(|| {
-        format!(
-            "Failed to read legacy metadata {}",
-            legacy_metadata_path.display()
-        )
-    })?;
+    // v0.2.x and v0.3.x write their metadata through the volume's XTS key, so
+    // read it through the same encryption as the data device.
+    let legacy_bdev = build_block_device(legacy_metadata_path, config, true)
+        .context("Failed to build legacy metadata block device")?;
+    let legacy = crate::stripe_server::read_metadata_bytes(legacy_bdev.as_ref())?
+        .borrow()
+        .as_slice()
+        .to_vec();
 
     let disk_bdev = build_block_device(&config.device.data_path, config, false)
         .context("Failed to build disk block device")?;
@@ -1018,6 +1020,71 @@ source.inline = "test-credentials"
         let metadata =
             UbiMetadata::from_bytes(&std::fs::read(dir.path().join("metadata")).unwrap()).unwrap();
         assert_eq!(metadata.stripe_headers, vec![0, 0]);
+    }
+
+    #[test]
+    fn convert_legacy_metadata_reads_encrypted_legacy_metadata() {
+        use crate::block_device::metadata_flags::HAS_SOURCE;
+        use crate::block_device::{shared_buffer, wait_for_completion};
+        use crate::config::v2::secrets::{
+            resolve_secrets, SecretDef, SecretEncoding, SecretRef, SecretSource,
+        };
+        use base64::Engine;
+
+        let dir = tempfile::tempdir().unwrap();
+        let stripe_size = 8 * SECTOR_SIZE;
+        std::fs::write(dir.path().join("disk"), vec![0; 2 * stripe_size]).unwrap();
+        std::fs::write(dir.path().join("image"), vec![0; 2 * stripe_size]).unwrap();
+        std::fs::write(dir.path().join("legacy"), vec![0; 2 * SECTOR_SIZE]).unwrap();
+
+        let mut config = test_config(
+            &dir.path().join("disk"),
+            Some(&dir.path().join("metadata")),
+            Some(StripeSourceConfig::Raw {
+                image_path: dir.path().join("image"),
+                autofetch: false,
+                copy_on_read: false,
+            }),
+        );
+        let xts_key = base64::engine::general_purpose::STANDARD.encode([0x42u8; 64]);
+        let secret_defs = std::collections::HashMap::from([(
+            "xts-key".to_string(),
+            SecretDef {
+                source: SecretSource::Inline(xts_key),
+                encrypted_by: None,
+                encoding: SecretEncoding::Base64,
+            },
+        )]);
+        config.secrets = resolve_secrets(&secret_defs, &config.danger_zone).unwrap();
+        config.encryption = Some(v2::EncryptionSection {
+            xts_key: SecretRef::Ref("xts-key".to_string()),
+        });
+
+        // Write v0.2.x metadata through the XTS key, as v0.2.x does.
+        let legacy_bdev = build_block_device(&dir.path().join("legacy"), &config, false).unwrap();
+        let buf = shared_buffer(2 * SECTOR_SIZE);
+        {
+            let mut b = buf.borrow_mut();
+            let bytes = b.as_mut_slice();
+            bytes[..9].copy_from_slice(b"BDEV_UBI\0");
+            bytes[13] = 3;
+        }
+        let mut ch = legacy_bdev.create_channel().unwrap();
+        ch.add_write(0, 2, buf, 0);
+        ch.submit().unwrap();
+        wait_for_completion(ch.as_mut(), 0, std::time::Duration::from_secs(5)).unwrap();
+        assert_ne!(
+            &std::fs::read(dir.path().join("legacy")).unwrap()[..9],
+            b"BDEV_UBI\0"
+        );
+
+        convert_legacy_metadata(&config, &dir.path().join("legacy")).unwrap();
+
+        let metadata_bdev =
+            build_block_device(&dir.path().join("metadata"), &config, true).unwrap();
+        let converted = crate::stripe_server::read_metadata_bytes(metadata_bdev.as_ref()).unwrap();
+        let metadata = UbiMetadata::from_bytes(converted.borrow().as_slice()).unwrap();
+        assert_eq!(metadata.stripe_headers, vec![HAS_SOURCE, HAS_SOURCE]);
     }
 
     #[test]

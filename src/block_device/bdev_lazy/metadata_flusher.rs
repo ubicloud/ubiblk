@@ -116,22 +116,14 @@ impl MetadataFlusher {
         self.poll_channel();
     }
 
-    fn cleanup_failed_submission(&mut self, stripe_ids: &[usize], return_buffer: bool) {
-        for stripe_id in stripe_ids {
-            if let Some(status) = self.header_updates.remove(stripe_id) {
-                self.failed_stripes.push(status.stripe_id);
-                self.metadata.stripe_headers[status.stripe_id] &= !status.requested_bitmask;
-                if return_buffer {
-                    self.buffer_pool.return_buffer(&status.buffer);
-                }
-                self.sectors_being_updated.remove(&status.sector);
-            }
+    fn submit(&mut self) {
+        if let Err(e) = self.channel.submit() {
+            error!("Failed to submit metadata updates: {e}");
         }
     }
 
     fn poll_channel(&mut self) {
         let mut finished_stripes = Vec::new();
-        let mut newly_flushing = Vec::new();
 
         for (stripe_id, success) in self.channel.poll() {
             let maybe_status = self.header_updates.get_mut(&stripe_id);
@@ -166,7 +158,6 @@ impl MetadataFlusher {
                         self.buffer_pool.return_buffer(&status.buffer);
                         self.channel.add_flush(stripe_id);
                         status.stage = RequestStage::Flushing;
-                        newly_flushing.push(stripe_id);
                     }
                     RequestStage::Flushing => {
                         self.sectors_being_updated.remove(&(status.sector));
@@ -182,23 +173,10 @@ impl MetadataFlusher {
             self.shared_state.set_stripe_header(stripe, header);
         }
 
-        if newly_flushing.is_empty() {
-            return;
-        }
-
-        // submit flushes, if any
-        if let Err(e) = self.channel.submit() {
-            error!("Failed to submit metadata flushes: {e}");
-            // The kernel never received the flush SQEs. Clean up entries
-            // that just transitioned to Flushing to avoid permanently
-            // blocking the affected sectors.
-            self.cleanup_failed_submission(&newly_flushing, false);
-        }
+        self.submit();
     }
 
     fn start_writes(&mut self) {
-        let mut newly_added = Vec::new();
-
         while !self.queued_requests.is_empty() && self.buffer_pool.has_available() {
             let req = *self.queued_requests.front().unwrap();
             let group = UbiMetadata::stripe_id_to_group(req.stripe_id);
@@ -242,21 +220,9 @@ impl MetadataFlusher {
                     sector,
                 },
             );
-            newly_added.push(req.stripe_id);
         }
 
-        if newly_added.is_empty() {
-            return;
-        }
-
-        // submit writes, if any
-        if let Err(e) = self.channel.submit() {
-            error!("Failed to submit metadata writes: {e}");
-            // The kernel never received the SQEs, so no completions will
-            // arrive. Revert all entries we just added to avoid permanently
-            // blocking the affected sectors.
-            self.cleanup_failed_submission(&newly_added, true);
-        }
+        self.submit();
     }
 }
 
@@ -495,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_failure_in_start_writes_allows_retry() {
+    fn test_write_submit_failure_keeps_request_until_completion() {
         let metadata_dev = init_metadata_device();
         let shared_state = {
             let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
@@ -503,27 +469,28 @@ mod tests {
         };
         let mut metadata_flusher =
             MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+        let writes_before = metadata_dev.metrics.read().unwrap().writes;
 
-        // Queue a request and make submit() fail
         metadata_flusher.set_stripe_fetched(5);
         metadata_dev
             .fail_submit
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        metadata_flusher.start_writes();
 
-        // start_writes will add_write then fail on submit
-        metadata_flusher.update();
+        // The write may still run, so its buffer and sector stay reserved.
+        assert!(metadata_flusher.busy());
+        assert_eq!(
+            metadata_flusher.header_updates[&5].stage,
+            RequestStage::Writing
+        );
+        assert!(metadata_flusher.take_failed_stripes().is_empty());
 
-        // Stripe 5 should NOT be marked fetched in shared state
-        assert!(!shared_state.stripe_fetched(5));
-        // Flusher should not be busy (submit failure was cleaned up)
-        assert!(!metadata_flusher.busy());
-
-        // Retry: queue the same request again - should NOT be blocked
-        metadata_flusher.set_stripe_fetched(5);
         wait_for_completion(&mut metadata_flusher);
-
-        // Now it should succeed
         assert!(shared_state.stripe_fetched(5));
+        assert_eq!(
+            metadata_dev.metrics.read().unwrap().writes - writes_before,
+            1
+        );
     }
 
     #[test]
@@ -596,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_failure_in_poll_channel_allows_retry() {
+    fn test_flush_submit_failure_keeps_request_until_completion() {
         let metadata_dev = init_metadata_device();
         let shared_state = {
             let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
@@ -605,27 +572,22 @@ mod tests {
         let mut metadata_flusher =
             MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
 
-        // Queue a request and let the write succeed
         metadata_flusher.set_stripe_fetched(5);
         metadata_flusher.start_writes();
-
-        // Poll should see the write completion and enqueue a flush.
-        // Make submit fail so the flush SQE is never submitted.
         metadata_dev
             .fail_submit
             .store(true, std::sync::atomic::Ordering::SeqCst);
         metadata_flusher.poll_channel();
 
-        // Stripe 5 should NOT be marked fetched (flush never reached kernel)
         assert!(!shared_state.stripe_fetched(5));
-        // Flusher should not be busy (submit failure was cleaned up)
-        assert!(!metadata_flusher.busy());
+        assert!(metadata_flusher.busy());
+        assert_eq!(
+            metadata_flusher.header_updates[&5].stage,
+            RequestStage::Flushing
+        );
 
-        // Retry: queue the same request again - should NOT be blocked
-        metadata_flusher.set_stripe_fetched(5);
         wait_for_completion(&mut metadata_flusher);
-
-        // Now it should succeed
         assert!(shared_state.stripe_fetched(5));
+        assert!(metadata_flusher.take_failed_stripes().is_empty());
     }
 }

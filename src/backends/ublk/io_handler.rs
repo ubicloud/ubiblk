@@ -190,8 +190,6 @@ impl UblkIoHandler {
 
     fn process_pending_requests(&mut self, q: &UblkQueue) {
         while !self.pending_requests.is_empty() || self.io_channel.busy() {
-            let mut queued = false;
-
             while let Some(request) = self.pending_requests.pop_front() {
                 let tag = request.request_id;
                 if let Err(err) = self.enqueue_request(&request) {
@@ -209,24 +207,11 @@ impl UblkIoHandler {
                     continue;
                 }
                 self.inflight_requests[tag] = Some(request);
-                queued = true;
             }
 
-            if queued {
-                if let Err(err) = self.io_channel.submit() {
-                    error!("Failed to submit IO requests: {err}");
-                    for (tag, slot) in self.inflight_requests.iter_mut().enumerate() {
-                        if slot.take().is_some() {
-                            let completion_slice = BufDesc::Slice(self.bufs[tag].as_slice());
-                            let _ = q.complete_io_cmd_unified(
-                                tag as u16,
-                                completion_slice,
-                                Err(UblkIoError::Io.completion()),
-                            );
-                        }
-                    }
-                    return;
-                }
+            // The requests stay in flight, and poll retries the submit.
+            if let Err(err) = self.io_channel.submit() {
+                error!("Failed to submit IO requests: {err}");
             }
 
             for (request_id, success) in self.io_channel.poll() {

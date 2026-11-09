@@ -402,32 +402,23 @@ pub fn convert_legacy_metadata(config: &v2::Config, legacy_metadata_path: &Path)
     // read it through the same encryption as the data device.
     let legacy_bdev = build_block_device(legacy_metadata_path, config, true)
         .context("Failed to build legacy metadata block device")?;
-    let legacy = crate::stripe_server::read_metadata_bytes(legacy_bdev.as_ref())?
-        .borrow()
-        .as_slice()
-        .to_vec();
+    let legacy_buf = crate::stripe_server::read_metadata_bytes(legacy_bdev.as_ref())?;
 
     let disk_bdev = build_block_device(&config.device.data_path, config, false)
         .context("Failed to build disk block device")?;
-    let data_sector_count = disk_bdev.sector_count();
+    let legacy_bytes = legacy_buf.borrow();
+    let legacy = crate::stripe_server::parse_v0_2_metadata(
+        legacy_bytes.as_slice(),
+        disk_bdev.sector_count(),
+    )?;
 
-    let metadata = match config.stripe_source {
-        None => crate::stripe_server::convert_v0_2_metadata(&legacy, data_sector_count, |_| false)?,
-        Some(_) => {
-            // The stripe size only matters for has_stripe, and has to match the
-            // legacy metadata's, so read the shift before building the source.
-            let shift = *legacy.get(13).ok_or_else(|| {
-                crate::ubiblk_error!(MetadataError {
-                    description: "Legacy metadata too small".to_string(),
-                })
-            })?;
-            let stripe_source =
-                StripeSourceBuilder::new(config.clone(), 1u64 << shift, false).build()?;
-            crate::stripe_server::convert_v0_2_metadata(&legacy, data_sector_count, |stripe_id| {
-                stripe_source.has_stripe(stripe_id)
-            })?
-        }
-    };
+    let stripe_source = StripeSourceBuilder::new(
+        config.clone(),
+        1u64 << legacy.stripe_sector_count_shift,
+        false,
+    )
+    .build()?;
+    let metadata = legacy.convert(|stripe_id| stripe_source.has_stripe(stripe_id))?;
 
     ensure_metadata_file(metadata_path, metadata.metadata_size())?;
     let metadata_bdev = build_block_device(metadata_path, config, false)
@@ -1168,6 +1159,26 @@ source.inline = "test-credentials"
             std::fs::read(dir.path().join("disk")).unwrap(),
             vec![7; 8 * SECTOR_SIZE]
         );
+    }
+
+    #[test]
+    fn convert_legacy_metadata_rejects_an_out_of_range_shift_with_a_source() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("disk"), vec![0; 8 * SECTOR_SIZE]).unwrap();
+        std::fs::write(dir.path().join("image"), vec![0; 8 * SECTOR_SIZE]).unwrap();
+        write_v0_2_metadata(&dir.path().join("legacy"), 255, &[0]);
+
+        let config = test_config(
+            &dir.path().join("disk"),
+            Some(&dir.path().join("metadata")),
+            Some(StripeSourceConfig::Raw {
+                image_path: dir.path().join("image"),
+                autofetch: false,
+                copy_on_read: false,
+            }),
+        );
+        let err = convert_legacy_metadata(&config, &dir.path().join("legacy")).unwrap_err();
+        assert!(err.to_string().contains("exceeds maximum"));
     }
 
     #[test]

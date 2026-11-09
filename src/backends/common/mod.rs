@@ -1,7 +1,7 @@
 use std::{
     cmp,
     fs::{File, OpenOptions},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     sync::mpsc::{channel, Receiver, Sender},
 };
@@ -396,11 +396,7 @@ pub fn convert_legacy_metadata(config: &v2::Config, legacy_metadata_path: &Path)
             description: "metadata_path is none".to_string(),
         })
     })?;
-    if metadata_path == legacy_metadata_path {
-        return Err(crate::ubiblk_error!(InvalidParameter {
-            description: "metadata_path must differ from the legacy metadata path".to_string(),
-        }));
-    }
+    ensure_not_an_input(metadata_path, legacy_metadata_path, config)?;
 
     // v0.2.x and v0.3.x write their metadata through the volume's XTS key, so
     // read it through the same encryption as the data device.
@@ -442,6 +438,41 @@ pub fn convert_legacy_metadata(config: &v2::Config, legacy_metadata_path: &Path)
         legacy_metadata_path.display(),
         metadata_path.display()
     );
+    Ok(())
+}
+
+/// Fail if `output` already exists as the same file as the legacy metadata,
+/// the data device or the raw image, whatever path it is reached by.
+fn ensure_not_an_input(
+    output: &Path,
+    legacy_metadata_path: &Path,
+    config: &v2::Config,
+) -> Result<()> {
+    let output_stat = match std::fs::metadata(output) {
+        Ok(stat) => stat,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(crate::ubiblk_error!(IoError { source: e })),
+    };
+
+    let mut inputs = vec![legacy_metadata_path, config.device.data_path.as_path()];
+    if let Some(v2::stripe_source::StripeSourceConfig::Raw { image_path, .. }) =
+        &config.stripe_source
+    {
+        inputs.push(image_path.as_path());
+    }
+    for input in inputs {
+        if let Ok(stat) = std::fs::metadata(input) {
+            if stat.dev() == output_stat.dev() && stat.ino() == output_stat.ino() {
+                return Err(crate::ubiblk_error!(InvalidParameter {
+                    description: format!(
+                        "metadata_path {} is the same file as {}",
+                        output.display(),
+                        input.display()
+                    ),
+                }));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1099,7 +1130,44 @@ source.inline = "test-credentials"
             None,
         );
         let err = convert_legacy_metadata(&config, &dir.path().join("legacy")).unwrap_err();
-        assert!(err.to_string().contains("must differ"));
+        assert!(err.to_string().contains("is the same file as"));
+    }
+
+    #[test]
+    fn convert_legacy_metadata_rejects_a_link_to_the_legacy_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("disk"), vec![0; 8 * SECTOR_SIZE]).unwrap();
+        write_v0_2_metadata(&dir.path().join("legacy"), 3, &[1]);
+        std::fs::hard_link(dir.path().join("legacy"), dir.path().join("metadata")).unwrap();
+        let before = std::fs::read(dir.path().join("legacy")).unwrap();
+
+        let config = test_config(
+            &dir.path().join("disk"),
+            Some(&dir.path().join("metadata")),
+            None,
+        );
+        let err = convert_legacy_metadata(&config, &dir.path().join("legacy")).unwrap_err();
+        assert!(err.to_string().contains("is the same file as"));
+        assert_eq!(std::fs::read(dir.path().join("legacy")).unwrap(), before);
+    }
+
+    #[test]
+    fn convert_legacy_metadata_rejects_the_data_device_as_output() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("disk"), vec![7; 8 * SECTOR_SIZE]).unwrap();
+        write_v0_2_metadata(&dir.path().join("legacy"), 3, &[1]);
+
+        let config = test_config(
+            &dir.path().join("disk"),
+            Some(&dir.path().join("disk")),
+            None,
+        );
+        let err = convert_legacy_metadata(&config, &dir.path().join("legacy")).unwrap_err();
+        assert!(err.to_string().contains("is the same file as"));
+        assert_eq!(
+            std::fs::read(dir.path().join("disk")).unwrap(),
+            vec![7; 8 * SECTOR_SIZE]
+        );
     }
 
     #[test]

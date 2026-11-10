@@ -17,6 +17,9 @@ pub trait IoChannel: Send {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);
     fn add_flush(&mut self, id: usize);
+    /// A failed submit does not drop the added requests: each still gets a
+    /// completion from `poll`, which retries the submit. Callers must keep a
+    /// request's buffer until then.
     fn submit(&mut self) -> Result<()>;
 
     fn poll(&mut self) -> Vec<(usize, bool)>;

@@ -30,6 +30,7 @@ mod tests {
         target_mem: Arc<RwLock<Vec<u8>>>,
         target_metrics: Arc<RwLock<TestDeviceMetrics>>,
         metadata_fail_next: Arc<AtomicBool>,
+        target_fail_submit: Arc<AtomicBool>,
         image_metrics: Option<Arc<RwLock<TestDeviceMetrics>>>,
     }
 
@@ -47,6 +48,7 @@ mod tests {
         let target_dev = TestBlockDevice::new(size);
         let target_mem = target_dev.mem.clone();
         let target_metrics = target_dev.metrics.clone();
+        let target_fail_submit = target_dev.fail_submit.clone();
 
         let metadata_dev = TestBlockDevice::new(METADATA_SIZE);
         let metadata_fail_next = metadata_dev.fail_next.clone();
@@ -108,6 +110,7 @@ mod tests {
                 target_mem,
                 target_metrics,
                 metadata_fail_next,
+                target_fail_submit,
                 image_metrics: Some(image_metrics),
             }
         } else {
@@ -153,6 +156,7 @@ mod tests {
                 target_mem,
                 target_metrics,
                 metadata_fail_next,
+                target_fail_submit,
                 image_metrics: None,
             }
         }
@@ -580,5 +584,32 @@ mod tests {
 
         assert_eq!(results, vec![(1, false)]);
         assert_eq!(target_metrics.read().unwrap().writes, 0);
+    }
+
+    #[test]
+    fn queued_request_completes_after_failed_submit() {
+        let env = setup_env(false, false, b"data");
+        let mut chan = env.lazy.create_channel().unwrap();
+
+        let buf = shared_buffer(SECTOR_SIZE);
+        chan.add_read(0, 1, buf.clone(), 1);
+        chan.submit().unwrap();
+        for _ in 0..1000 {
+            let mut f = env.bgworker.borrow_mut();
+            f.receive_requests(false);
+            f.update();
+            if env.metadata_state.stripe_fetched(0) {
+                break;
+            }
+        }
+        assert!(env.metadata_state.stripe_fetched(0));
+
+        // The read is queued behind the fetch, and its submit to the target
+        // fails. It must not be reported as failed while the read may still
+        // run into its buffer.
+        env.target_fail_submit.store(true, Ordering::SeqCst);
+        let results = drive(&env.bgworker, &mut chan);
+        assert_eq!(results, vec![(1, true)]);
+        assert_eq!(&buf.borrow().as_slice()[..4], b"data");
     }
 }

@@ -234,7 +234,9 @@ impl StripeFetcher {
                 }
             };
 
-            if !success || !self.start_write(buf, stripe_id) {
+            if success {
+                self.start_write(buf, stripe_id);
+            } else {
                 self.fetch_completed(stripe_id, false);
             }
         }
@@ -253,12 +255,8 @@ impl StripeFetcher {
                 }
                 Some(FetchState::Fetching) => {
                     debug!("Stripe {stripe_id} write completed, flushing...");
-                    if self.start_flush(stripe_id) {
-                        self.stripe_states.insert(stripe_id, FetchState::Flushing);
-                    } else {
-                        self.fetch_completed(stripe_id, false);
-                        continue;
-                    }
+                    self.fetch_target_channel.add_flush(stripe_id);
+                    self.stripe_states.insert(stripe_id, FetchState::Flushing);
                 }
                 Some(FetchState::Flushing) => {
                     self.fetch_completed(stripe_id, success);
@@ -268,9 +266,13 @@ impl StripeFetcher {
                 }
             }
         }
+
+        if let Err(e) = self.fetch_target_channel.submit() {
+            error!("Failed to submit fetched stripes: {e:?}");
+        }
     }
 
-    fn start_write(&mut self, buf: SharedBuffer, stripe_id: usize) -> bool {
+    fn start_write(&mut self, buf: SharedBuffer, stripe_id: usize) {
         let stripe_sector_offset = stripe_id as u64 * self.stripe_sector_count;
         let stripe_sector_count = self
             .stripe_sector_count
@@ -282,24 +284,6 @@ impl StripeFetcher {
             buf,
             stripe_id,
         );
-
-        if let Err(e) = self.fetch_target_channel.submit() {
-            error!("Failed to submit write for stripe {stripe_id}: {e:?}");
-            false
-        } else {
-            true
-        }
-    }
-
-    fn start_flush(&mut self, stripe_id: usize) -> bool {
-        self.fetch_target_channel.add_flush(stripe_id);
-
-        if let Err(e) = self.fetch_target_channel.submit() {
-            error!("Failed to submit flush for stripe {stripe_id}: {e:?}");
-            false
-        } else {
-            true
-        }
     }
 
     fn fetch_completed(&mut self, stripe_id: usize, success: bool) {
@@ -339,6 +323,7 @@ mod tests {
     use super::*;
     use crate::block_device::bdev_test::TestBlockDevice;
     use crate::stripe_source::BlockDeviceStripeSource;
+    use std::sync::atomic::Ordering;
 
     struct TestState {
         source_dev: Box<TestBlockDevice>,
@@ -409,6 +394,28 @@ mod tests {
         assert_eq!(target_metrics.reads, 0);
         assert_eq!(target_metrics.writes, 1);
         assert_eq!(target_metrics.flushes, 1);
+    }
+
+    #[test]
+    fn failed_submits_do_not_restart_the_fetch() {
+        let mut state = prep(false);
+        state
+            .source_dev
+            .write(0, &[0xAAu8; SECTOR_SIZE], SECTOR_SIZE);
+        state.source_dev.fail_submit.store(true, Ordering::SeqCst);
+        state.target_dev.fail_submit.store(true, Ordering::SeqCst);
+        state.fetcher.handle_fetch_request(0, false);
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
+
+        assert_eq!(state.source_dev.metrics.read().unwrap().reads, 1);
+        let target_metrics = state.target_dev.metrics.read().unwrap();
+        assert_eq!(target_metrics.writes, 1);
+        assert_eq!(target_metrics.flushes, 1);
+        let mem = state.target_dev.mem.read().unwrap();
+        assert_eq!(&mem[..SECTOR_SIZE], &[0xAAu8; SECTOR_SIZE]);
     }
 
     #[test]

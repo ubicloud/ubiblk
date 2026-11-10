@@ -15,6 +15,7 @@ struct TestIoChannel {
     fail_next: Arc<AtomicBool>,
     fail_submit: Arc<AtomicBool>,
     finished_requests: Vec<(usize, bool)>,
+    unsubmitted_requests: Vec<(usize, bool)>,
     metrics: Arc<RwLock<TestDeviceMetrics>>,
 }
 
@@ -85,20 +86,26 @@ impl IoChannel for TestIoChannel {
             .fail_submit
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            self.finished_requests.clear();
+            self.unsubmitted_requests
+                .append(&mut self.finished_requests);
             return Err(crate::ubiblk_error!(IoError {
                 source: std::io::Error::other("injected submit failure"),
             }));
         }
+        self.finished_requests
+            .splice(0..0, self.unsubmitted_requests.drain(..));
         Ok(())
     }
 
     fn poll(&mut self) -> Vec<(usize, bool)> {
+        if !self.unsubmitted_requests.is_empty() {
+            let _ = self.submit();
+        }
         std::mem::take(&mut self.finished_requests)
     }
 
     fn busy(&self) -> bool {
-        !self.finished_requests.is_empty()
+        !self.finished_requests.is_empty() || !self.unsubmitted_requests.is_empty()
     }
 }
 
@@ -157,6 +164,7 @@ impl BlockDevice for TestBlockDevice {
         Ok(Box::new(TestIoChannel {
             mem: self.mem.clone(),
             finished_requests: Vec::new(),
+            unsubmitted_requests: Vec::new(),
             metrics: self.metrics.clone(),
             fail_next: self.fail_next.clone(),
             fail_submit: self.fail_submit.clone(),
@@ -181,6 +189,22 @@ impl BlockDevice for TestBlockDevice {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    // A failed submit keeps its requests, and poll retries it.
+    fn test_failed_submit_is_retried_by_poll() {
+        let device = TestBlockDevice::new(SECTOR_SIZE as u64);
+        let mut channel = device.create_channel().unwrap();
+        device
+            .fail_submit
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        channel.add_read(0, 1, shared_buffer(SECTOR_SIZE), 1);
+        assert!(channel.submit().is_err());
+        assert!(channel.busy());
+        assert_eq!(channel.poll(), vec![(1, true)]);
+        assert!(!channel.busy());
+    }
 
     #[test]
     // Validate that a basic read operation succeeds on a new channel.

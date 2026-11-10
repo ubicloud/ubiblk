@@ -1,7 +1,7 @@
 use std::{ops::Deref, sync::Mutex, time::Instant};
 
 use crate::{
-    backends::{common::io_tracking::IoTracker, SECTOR_SIZE},
+    backends::common::io_tracking::IoTracker,
     block_device::BlockDevice,
     config::v2,
     utils::block::{features_to_str, VirtioBlockConfig},
@@ -50,15 +50,19 @@ impl UbiBlkBackend {
         let writeback = if config.tuning.write_through { 0 } else { 1 };
 
         let nsectors = block_device.sector_count();
+        // A guest that is told the logical sector size of the disk does not
+        // issue requests the disk cannot take. The topology is in these
+        // blocks, and no part of it can be smaller than one.
+        let blk_size = block_device.logical_sector_size() as u32;
+        let in_blocks = |size: u32| size.max(blk_size) / blk_size;
         let virtio_config = VirtioBlockConfig {
-            capacity: nsectors,           /* The capacity (in SECTOR_SIZE-byte sectors). */
-            blk_size: SECTOR_SIZE as u32, /* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
+            capacity: nsectors, /* The capacity (in SECTOR_SIZE-byte sectors). */
+            blk_size,           /* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
             size_max: config.tuning.seg_size_max, /* The maximum segment size (if VIRTIO_BLK_F_SIZE_MAX) */
             seg_max: config.tuning.seg_count_max, /* The maximum number of segments (if VIRTIO_BLK_F_SEG_MAX) */
-            physical_block_exp: (config.tuning.physical_block_size / SECTOR_SIZE as u32)
-                .trailing_zeros() as u8,
-            min_io_size: (config.tuning.min_io_size / SECTOR_SIZE as u32) as u16,
-            opt_io_size: config.tuning.opt_io_size / SECTOR_SIZE as u32,
+            physical_block_exp: in_blocks(config.tuning.physical_block_size).trailing_zeros() as u8,
+            min_io_size: in_blocks(config.tuning.min_io_size) as u16,
+            opt_io_size: in_blocks(config.tuning.opt_io_size),
             num_queues: config.tuning.num_queues as u16,
             writeback,
             ..Default::default()
@@ -317,6 +321,7 @@ mod tests {
     use std::os::fd::AsRawFd;
 
     use super::*;
+    use crate::backends::SECTOR_SIZE;
     use crate::config::v2::{self, DeviceSection};
     use crate::{
         backends::init_metadata, block_device::bdev_test::TestBlockDevice,
@@ -564,6 +569,30 @@ mod tests {
         assert_eq!(physical_block_exp, 0);
         assert_eq!(min_io_size, 8);
         assert_eq!(opt_io_size, 256);
+    }
+
+    #[test]
+    fn get_config_advertises_the_logical_sector_size_of_the_device() {
+        let mut config = default_config("img".to_string());
+        config.tuning.opt_io_size = 131072;
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let block_device = Box::new(TestBlockDevice::new(4 * 4096).with_logical_sector_size(4096));
+        let backend =
+            UbiBlkBackend::new(&config, mem, block_device, BUFFER_ALIGNMENT, vec![]).unwrap();
+
+        let bytes = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
+        let virtio_config = VirtioBlockConfig::from_slice(&bytes).unwrap();
+        let capacity = virtio_config.capacity;
+        let blk_size = virtio_config.blk_size;
+        let physical_block_exp = virtio_config.physical_block_exp;
+        let min_io_size = virtio_config.min_io_size;
+        let opt_io_size = virtio_config.opt_io_size;
+        // The capacity stays in 512-byte units; the topology is in blocks.
+        assert_eq!(capacity, 32);
+        assert_eq!(blk_size, 4096);
+        assert_eq!(physical_block_exp, 0);
+        assert_eq!(min_io_size, 1);
+        assert_eq!(opt_io_size, 32);
     }
 
     /// queues_per_thread should reflect the number of queues configured.

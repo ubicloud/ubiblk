@@ -73,10 +73,20 @@ fn serve_ublk(backend_env: &BackendEnv, device_symlink: Option<PathBuf>) -> Resu
     let queue_size = config.tuning.queue_size as u16;
     let io_buf_bytes = config.tuning.seg_size_max;
 
+    if !(io_buf_bytes as usize).is_multiple_of(bdev.logical_sector_size()) {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: format!(
+                "seg_size_max {io_buf_bytes} is not a multiple of the {}-byte sector size",
+                bdev.logical_sector_size()
+            ),
+        }));
+    }
+
     let (created_sender, created_receiver) = std::sync::mpsc::channel();
     let device = Device {
         name: device_name,
         size: device_size,
+        logical_sector_size: bdev.logical_sector_size(),
         num_queues,
         queue_size,
         io_buf_bytes,
@@ -140,6 +150,7 @@ fn await_device_creation(
 struct Device {
     name: String,
     size: u64,
+    logical_sector_size: usize,
     num_queues: u16,
     queue_size: u16,
     io_buf_bytes: u32,
@@ -187,10 +198,11 @@ fn run_ublk_device(
     }
 
     let device_size = device.size;
+    let logical_sector_size = device.logical_sector_size;
     let alignment = device.alignment;
     let announce_symlink = device.symlink.clone();
     ctrl.run_target(
-        move |dev| configure_ublk_device(dev, device_size, &device.tuning),
+        move |dev| configure_ublk_device(dev, device_size, logical_sector_size, &device.tuning),
         move |qid, dev| {
             let io_tracker = io_trackers[qid as usize].clone();
             serve_ublk_queue(qid, dev, bdev.clone(), alignment, io_tracker)
@@ -227,20 +239,26 @@ fn handle_ctrlc_shutdown(dev_id: u32, device_symlink: Option<&Path>) {
 fn configure_ublk_device(
     dev: &mut UblkDev,
     device_size: u64,
+    logical_sector_size: usize,
     tuning: &v2::tuning::TuningSection,
 ) -> std::result::Result<(), UblkError> {
     dev.set_default_params(device_size);
-    configure_ublk_topology(&mut dev.tgt.params.basic, tuning);
+    configure_ublk_topology(&mut dev.tgt.params.basic, logical_sector_size, tuning);
     Ok(())
 }
 
 fn configure_ublk_topology(
     params: &mut libublk::sys::ublk_param_basic,
+    logical_sector_size: usize,
     tuning: &v2::tuning::TuningSection,
 ) {
-    params.physical_bs_shift = tuning.physical_block_size.trailing_zeros() as u8;
-    params.io_min_shift = tuning.min_io_size.trailing_zeros() as u8;
-    params.io_opt_shift = tuning.opt_io_size.trailing_zeros() as u8;
+    // No part of the topology can be smaller than a logical block.
+    let logical_bs_shift = logical_sector_size.trailing_zeros() as u8;
+    let shift = |size: u32| (size.trailing_zeros() as u8).max(logical_bs_shift);
+    params.logical_bs_shift = logical_bs_shift;
+    params.physical_bs_shift = shift(tuning.physical_block_size);
+    params.io_min_shift = shift(tuning.min_io_size);
+    params.io_opt_shift = shift(tuning.opt_io_size);
 }
 
 fn announce_ublk_device(ctrl: &UblkCtrl, device_symlink: Option<&Path>) {
@@ -441,7 +459,7 @@ mod tests {
                 attrs: libublk::sys::UBLK_ATTR_VOLATILE_CACHE,
                 ..Default::default()
             };
-            configure_ublk_topology(&mut params, &tuning);
+            configure_ublk_topology(&mut params, 512, &tuning);
             assert_eq!(
                 (
                     params.physical_bs_shift,
@@ -455,6 +473,25 @@ mod tests {
             assert_eq!(params.dev_sectors, 4096);
             assert_eq!(params.attrs, libublk::sys::UBLK_ATTR_VOLATILE_CACHE);
         }
+    }
+
+    #[test]
+    fn io_topology_is_never_finer_than_the_logical_sector_size() {
+        let tuning = v2::tuning::TuningSection {
+            physical_block_size: 512,
+            min_io_size: 4096,
+            opt_io_size: 131072,
+            ..Default::default()
+        };
+        let mut params = libublk::sys::ublk_param_basic {
+            logical_bs_shift: 9,
+            ..Default::default()
+        };
+        configure_ublk_topology(&mut params, 4096, &tuning);
+        assert_eq!(params.logical_bs_shift, 12);
+        assert_eq!(params.physical_bs_shift, 12);
+        assert_eq!(params.io_min_shift, 12);
+        assert_eq!(params.io_opt_shift, 17);
     }
 
     #[test]

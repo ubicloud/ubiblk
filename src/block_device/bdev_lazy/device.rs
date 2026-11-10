@@ -1,4 +1,5 @@
 use crate::{
+    backends::SECTOR_SIZE,
     block_device::{BgWorkerRequest, BlockDevice, IoChannel, SharedBuffer, SharedMetadataState},
     Result, ResultExt,
 };
@@ -35,9 +36,15 @@ struct RWRequest {
     stripe_id_last: usize,
 }
 
+/// The raw image that reads of unfetched stripes are served from.
+struct ImageChannel {
+    channel: Box<dyn IoChannel>,
+    sector_count: u64,
+}
+
 struct LazyIoChannel {
     base: Box<dyn IoChannel>,
-    image: Option<Box<dyn IoChannel>>,
+    image: Option<ImageChannel>,
     queued_rw_requests: VecDeque<RWRequest>,
     finished_requests: Vec<(usize, bool)>,
     bgworker_ch: Sender<BgWorkerRequest>,
@@ -51,7 +58,7 @@ struct LazyIoChannel {
 impl LazyIoChannel {
     fn new(
         base: Box<dyn IoChannel>,
-        image: Option<Box<dyn IoChannel>>,
+        image: Option<ImageChannel>,
         bgworker_ch: Sender<BgWorkerRequest>,
         metadata_state: SharedMetadataState,
         track_written: bool,
@@ -239,8 +246,25 @@ impl IoChannel for LazyIoChannel {
         }
 
         if request.stripe_id_first == request.stripe_id_last {
-            if let Some(image_channel) = &mut self.image {
-                image_channel.add_read(sector_offset, sector_count, buf, id);
+            if let Some(image) = &mut self.image {
+                // The disk can be larger than the image. What lies past the
+                // image's end reads as zeros, as it does once fetched.
+                let image_sectors = image
+                    .sector_count
+                    .saturating_sub(sector_offset)
+                    .min(sector_count as u64) as u32;
+                let past_image =
+                    image_sectors as usize * SECTOR_SIZE..sector_count as usize * SECTOR_SIZE;
+                if let Some(tail) = buf.borrow_mut().as_mut_slice().get_mut(past_image) {
+                    tail.fill(0);
+                }
+                if image_sectors == 0 {
+                    self.finished_requests.push((id, true));
+                } else {
+                    image
+                        .channel
+                        .add_read(sector_offset, image_sectors, buf, id);
+                }
                 return;
             }
         } else {
@@ -319,8 +343,8 @@ impl IoChannel for LazyIoChannel {
     }
 
     fn submit(&mut self) -> Result<()> {
-        if let Some(image_channel) = &mut self.image {
-            image_channel.submit()?;
+        if let Some(image) = &mut self.image {
+            image.channel.submit()?;
         }
         self.base.submit()
     }
@@ -330,8 +354,8 @@ impl IoChannel for LazyIoChannel {
 
         let mut results = std::mem::take(&mut self.finished_requests);
         results.extend(self.base.poll());
-        if let Some(image_channel) = &mut self.image {
-            results.extend(image_channel.poll());
+        if let Some(image) = &mut self.image {
+            results.extend(image.channel.poll());
         }
 
         results
@@ -339,7 +363,10 @@ impl IoChannel for LazyIoChannel {
 
     fn busy(&self) -> bool {
         self.base.busy()
-            || self.image.as_ref().is_some_and(|ch| ch.busy())
+            || self
+                .image
+                .as_ref()
+                .is_some_and(|image| image.channel.busy())
             || !self.queued_rw_requests.is_empty()
     }
 }
@@ -398,7 +425,10 @@ impl BlockDevice for LazyBlockDevice {
     fn create_channel(&self) -> Result<Box<dyn IoChannel>> {
         let base_channel = self.base.create_channel()?;
         let image_channel = if let Some(image) = &self.image {
-            Some(image.create_channel()?)
+            Some(ImageChannel {
+                channel: image.create_channel()?,
+                sector_count: image.sector_count(),
+            })
         } else {
             None
         };

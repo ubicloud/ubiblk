@@ -607,4 +607,44 @@ mod tests {
             "unexpected error: {err}"
         );
     }
+
+    /// With copy-on-read off, an unfetched stripe is read from the image,
+    /// which can end before the stripe does.
+    #[test]
+    fn image_reads_past_the_end_of_the_image_are_zero_filled() {
+        // 8 KiB stripes; the image ends one sector into the second.
+        let image = TestBlockDevice::new(8192 + 512);
+        image.write(0, &[0xAB; 8192 + 512], 8192 + 512);
+        let image_metrics = image.metrics.clone();
+        let metadata_state = SharedMetadataState::new(&UbiMetadata::new(4, 2, 2));
+        let (bgworker_ch, _bgworker_rx) = channel();
+        let lazy = LazyBlockDevice::new(
+            Box::new(TestBlockDevice::new(16384)),
+            Some(Box::new(image)),
+            bgworker_ch,
+            metadata_state,
+            false,
+            false,
+        )
+        .unwrap();
+        let mut chan = lazy.create_channel().unwrap();
+        let buf = shared_buffer(4096);
+
+        // Crosses the end of the image.
+        buf.borrow_mut().as_mut_slice().fill(0xFF);
+        chan.add_read(16, 8, buf.clone(), 1);
+        chan.submit().unwrap();
+        assert_eq!(chan.poll(), vec![(1, true)]);
+        let mut expected = vec![0xAB; 512];
+        expected.extend(vec![0; 4096 - 512]);
+        assert_eq!(buf.borrow().as_slice(), expected.as_slice());
+
+        // Wholly past it.
+        buf.borrow_mut().as_mut_slice().fill(0xFF);
+        chan.add_read(24, 8, buf.clone(), 2);
+        chan.submit().unwrap();
+        assert_eq!(chan.poll(), vec![(2, true)]);
+        assert_eq!(buf.borrow().as_slice(), &[0; 4096]);
+        assert_eq!(image_metrics.read().unwrap().reads, 1);
+    }
 }

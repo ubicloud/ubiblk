@@ -433,13 +433,18 @@ fn ensure_metadata_file(path: &Path, minimum_size: usize) -> Result<()> {
         })?;
     }
 
-    let minimum_size_u64 = minimum_size as u64;
-    if stat_result.len() < minimum_size_u64 {
-        file.set_len(minimum_size_u64).with_context(|| {
+    // The file is opened for direct I/O, which only reaches whole sectors.
+    let sector_size = block_device::sector_size_of(&stat_result)? as u64;
+    let size = stat_result
+        .len()
+        .max(minimum_size as u64)
+        .next_multiple_of(sector_size);
+    if stat_result.len() < size {
+        file.set_len(size).with_context(|| {
             format!(
                 "Failed to resize metadata file {} to {} bytes",
                 path.display(),
-                minimum_size
+                size
             )
         })?;
     }
@@ -594,6 +599,11 @@ mod tests {
         }
     }
 
+    /// `size` rounded up to the sector size of the device under `path`.
+    fn whole_sectors(path: &Path, size: u64) -> u64 {
+        size.next_multiple_of(block_device::detect_sector_size(path).unwrap() as u64)
+    }
+
     #[test]
     fn build_backend_env_no_metadata() {
         let disk_file = tempfile::NamedTempFile::new().unwrap();
@@ -608,13 +618,19 @@ mod tests {
     #[test]
     fn backend_starts_with_fetched_stripes_and_unavailable_source() {
         let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("metadata"), []).unwrap();
         let mut metadata = UbiMetadata::new(3, 2, 2);
         for header in &mut metadata.stripe_headers {
             *header |= block_device::metadata_flags::FETCHED;
         }
-        let mut bytes = vec![0; metadata.metadata_size()];
+        let metadata_size = whole_sectors(
+            &dir.path().join("metadata"),
+            metadata.metadata_size() as u64,
+        );
+        let mut bytes = vec![0; metadata_size as usize];
         metadata.write_to_buf(&mut bytes).unwrap();
         std::fs::write(dir.path().join("metadata"), bytes).unwrap();
+
         std::fs::write(dir.path().join("disk"), vec![0; metadata.stripe_size() * 2]).unwrap();
 
         // Port zero cannot serve either source.
@@ -684,7 +700,7 @@ source.inline = "test-credentials"
         assert_eq!(mode, 0o600);
         assert_eq!(
             std::fs::metadata(&metadata_path).unwrap().len(),
-            SECTOR_SIZE as u64
+            whole_sectors(&metadata_path, SECTOR_SIZE as u64)
         );
     }
 
@@ -705,7 +721,7 @@ source.inline = "test-credentials"
         assert_eq!(mode, 0o600);
         assert_eq!(
             std::fs::metadata(&metadata_path).unwrap().len(),
-            (SECTOR_SIZE * 4) as u64
+            whole_sectors(&metadata_path, (SECTOR_SIZE * 4) as u64)
         );
     }
 
@@ -726,7 +742,7 @@ source.inline = "test-credentials"
         assert_eq!(mode, 0o600);
         assert_eq!(
             std::fs::metadata(&metadata_path).unwrap().len(),
-            (SECTOR_SIZE * 6) as u64
+            whole_sectors(&metadata_path, (SECTOR_SIZE * 6) as u64)
         );
     }
 
@@ -752,7 +768,7 @@ source.inline = "test-credentials"
 
         assert_eq!(
             std::fs::metadata(&metadata_path).unwrap().len(),
-            (SECTOR_SIZE * 3) as u64
+            whole_sectors(&metadata_path, (SECTOR_SIZE * 3) as u64)
         );
     }
 
@@ -1040,7 +1056,7 @@ source.inline = "test-credentials"
         // Size should NOT have been truncated
         assert_eq!(
             std::fs::metadata(&metadata_path).unwrap().len(),
-            (SECTOR_SIZE * 8) as u64
+            whole_sectors(&metadata_path, (SECTOR_SIZE * 8) as u64)
         );
     }
 

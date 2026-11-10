@@ -1,7 +1,6 @@
 use crate::{
     backends::SECTOR_SIZE,
     block_device::{
-        bdev_lazy::metadata::types::{write_sector_with_crc32, STRIPE_HEADERS_PER_SECTOR},
         metadata_flags, BlockDevice, IoChannel, SharedBuffer, SharedMetadataState, UbiMetadata,
     },
     utils::AlignedBufferPool,
@@ -37,6 +36,7 @@ struct HeaderUpdateStatus {
     header: u8,
     /// The specific flag bit(s) added by this request, used to revert on failure.
     requested_bitmask: u8,
+    /// Block this update is written as part of.
     sector: u64,
 }
 
@@ -44,6 +44,13 @@ pub struct MetadataFlusher {
     channel: Box<dyn IoChannel>,
     metadata: Box<UbiMetadata>,
     shared_state: SharedMetadataState,
+    /// Sectors per write. Direct I/O needs whole logical sectors of the
+    /// metadata device, so updates are written a block of that size at a
+    /// time, which may hold several metadata sectors.
+    block_sectors: u64,
+    /// Sector 0 does not change while the flusher runs.
+    header_sector: [u8; SECTOR_SIZE],
+    /// Blocks with an update in flight.
     sectors_being_updated: HashSet<u64>,
     header_updates: HashMap<usize, HeaderUpdateStatus>,
     queued_requests: VecDeque<MetadataFlusherRequest>,
@@ -64,6 +71,17 @@ impl MetadataFlusher {
         let channel = metadata_dev.create_channel()?;
         let metadata = UbiMetadata::load_from_bdev(metadata_dev)?;
 
+        let sector_size = metadata_dev.logical_sector_size();
+        if !sector_size.is_multiple_of(SECTOR_SIZE) {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "Metadata device sector size {sector_size} is not a multiple of {SECTOR_SIZE}"
+                ),
+            }));
+        }
+        let mut header_sector = [0u8; SECTOR_SIZE];
+        metadata.write_header_sector(&mut header_sector)?;
+
         // Validate stripe count
         let source_stripe_count = source_sector_count.div_ceil(metadata.stripe_sector_count());
         if source_stripe_count > metadata.stripe_count() {
@@ -80,9 +98,11 @@ impl MetadataFlusher {
             channel,
             shared_state,
             metadata,
+            block_sectors: (sector_size / SECTOR_SIZE) as u64,
+            header_sector,
             sectors_being_updated: HashSet::new(),
             queued_requests: VecDeque::new(),
-            buffer_pool: AlignedBufferPool::new(4096, MAX_CONCURRENT_CHANGES, SECTOR_SIZE),
+            buffer_pool: AlignedBufferPool::new(4096, MAX_CONCURRENT_CHANGES, sector_size),
             failed_stripes: Vec::new(),
             header_updates: HashMap::new(),
             flush_updates,
@@ -196,15 +216,29 @@ impl MetadataFlusher {
         }
     }
 
+    /// Render every metadata sector of block `sector`.
+    fn render_sector(&self, sector: u64, buf: &mut [u8]) {
+        let first = sector * self.block_sectors;
+        let (sectors, _) = buf.as_chunks_mut::<SECTOR_SIZE>();
+        for (i, out) in sectors.iter_mut().enumerate() {
+            match first + i as u64 {
+                0 => out.copy_from_slice(&self.header_sector),
+                n => self
+                    .metadata
+                    .write_stripe_header_sector((n - 1) as usize, out),
+            }
+        }
+    }
+
     fn start_writes(&mut self) {
         let mut newly_added = Vec::new();
 
         while !self.queued_requests.is_empty() && self.buffer_pool.has_available() {
             let req = *self.queued_requests.front().unwrap();
-            let group = UbiMetadata::stripe_id_to_group(req.stripe_id);
-            let sector = UbiMetadata::stripe_id_to_sector(req.stripe_id);
+            let sector = UbiMetadata::stripe_id_to_sector(req.stripe_id) / self.block_sectors;
             if self.sectors_being_updated.contains(&sector) {
-                // Updates to each sector should be serialized
+                // Updates to each block should be serialized, or a write would
+                // undo an earlier one to a metadata sector sharing the block.
                 break;
             }
             self.queued_requests.pop_front();
@@ -222,14 +256,14 @@ impl MetadataFlusher {
             let buf = self.buffer_pool.get_buffer().unwrap();
             self.metadata.stripe_headers[req.stripe_id] |= requested_bitmask;
 
-            let headers_start = group * STRIPE_HEADERS_PER_SECTOR;
-            let headers_end =
-                (headers_start + STRIPE_HEADERS_PER_SECTOR).min(self.metadata.stripe_headers.len());
-            let headers = &self.metadata.stripe_headers[headers_start..headers_end];
-            write_sector_with_crc32(buf.borrow_mut().as_mut_slice(), headers);
+            self.render_sector(sector, buf.borrow_mut().as_mut_slice());
 
-            self.channel
-                .add_write(sector, 1, buf.clone(), req.stripe_id);
+            self.channel.add_write(
+                sector * self.block_sectors,
+                self.block_sectors as u32,
+                buf.clone(),
+                req.stripe_id,
+            );
             self.sectors_being_updated.insert(sector);
             self.header_updates.insert(
                 req.stripe_id,
@@ -627,5 +661,73 @@ mod tests {
 
         // Now it should succeed
         assert!(shared_state.stripe_fetched(5));
+    }
+
+    fn flusher_with_4k_sectors(stripe_count: usize) -> (MetadataFlusher, TestBlockDevice) {
+        let metadata_dev = TestBlockDevice::new(2 * 4096).with_logical_sector_size(4096);
+        UbiMetadata::new(11, stripe_count, stripe_count)
+            .save_to_bdev(&metadata_dev)
+            .unwrap();
+        let shared_state =
+            SharedMetadataState::new(&UbiMetadata::load_from_bdev(&metadata_dev).unwrap());
+        let flusher = MetadataFlusher::new(&metadata_dev, 0, shared_state, true).unwrap();
+        (flusher, metadata_dev)
+    }
+
+    /// The block holding the first stripe headers also holds the metadata
+    /// header, which a whole-block write has to reproduce.
+    #[test]
+    fn whole_sector_writes_preserve_the_metadata_header() {
+        let (mut flusher, metadata_dev) = flusher_with_4k_sectors(16);
+        let writes_before = metadata_dev.metrics.read().unwrap().writes;
+
+        flusher.set_stripe_fetched(5);
+        flusher.set_stripe_written(7);
+        wait_for_completion(&mut flusher);
+        assert!(flusher.take_failed_stripes().is_empty());
+
+        let reloaded = UbiMetadata::load_from_bdev(&metadata_dev).unwrap();
+        assert_eq!(reloaded.stripe_sector_count_shift, 11);
+        assert_eq!(reloaded.stripe_count(), 16);
+        assert_eq!(reloaded.stripe_headers[5] & metadata_flags::FETCHED, 1);
+        assert_ne!(reloaded.stripe_headers[7] & metadata_flags::WRITTEN, 0);
+        assert_eq!(reloaded.stripe_headers[6] & metadata_flags::FETCHED, 0);
+        // Both stripes share a block, so the updates are serialized.
+        assert_eq!(
+            metadata_dev.metrics.read().unwrap().writes,
+            writes_before + 2
+        );
+    }
+
+    /// Updates to different metadata sectors of one block must not undo each
+    /// other, and sectors past the stripe headers stay zero.
+    #[test]
+    fn whole_sector_writes_keep_every_metadata_sector_of_the_device_sector() {
+        use crate::block_device::bdev_lazy::metadata::types::STRIPE_HEADERS_PER_SECTOR;
+
+        // Three metadata sectors of stripe headers: sectors 1..=3 in block 0,
+        // nothing in block 1.
+        let (mut flusher, metadata_dev) = flusher_with_4k_sectors(1200);
+        let stripes = [
+            10,
+            STRIPE_HEADERS_PER_SECTOR + 10,
+            2 * STRIPE_HEADERS_PER_SECTOR + 10,
+        ];
+        for stripe in stripes {
+            flusher.set_stripe_fetched(stripe);
+        }
+        wait_for_completion(&mut flusher);
+        assert!(flusher.take_failed_stripes().is_empty());
+
+        let reloaded = UbiMetadata::load_from_bdev(&metadata_dev).unwrap();
+        for (stripe, header) in reloaded.stripe_headers.iter().enumerate() {
+            assert_eq!(
+                header & metadata_flags::FETCHED != 0,
+                stripes.contains(&stripe),
+                "stripe {stripe}"
+            );
+        }
+        let mem = metadata_dev.mem.read().unwrap();
+        assert!(mem[4 * SECTOR_SIZE..].iter().all(|&b| b == 0));
     }
 }

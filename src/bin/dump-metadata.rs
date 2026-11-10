@@ -161,6 +161,11 @@ fn run() -> Result<()> {
     println!("source: {source_info}");
     println!("metadata version: {metadata_version}");
     println!("stripe size: {stripe_size} bytes");
+    if metadata.sector_size_shift == 0 {
+        println!("sector size: not recorded (512 bytes)");
+    } else {
+        println!("sector size: {} bytes", metadata.sector_size());
+    }
     println!("fetched stripes: {}", format_list(&fetched));
     println!("written stripes: {}", format_list(&written));
     println!("has-source stripes: {}", format_list(&has_source));

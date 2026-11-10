@@ -14,6 +14,9 @@ pub const METADATA_VERSION_MINOR: u16 = 0;
 pub const CRC32_SIZE: usize = 4;
 pub const STRIPE_HEADERS_PER_SECTOR: usize = SECTOR_SIZE - CRC32_SIZE; // 508
 pub const STRIPE_COUNT_OFFSET: usize = UBI_MAGIC_SIZE + 2 + 2 + 1;
+const SECTOR_SIZE_SHIFT_OFFSET: usize = STRIPE_COUNT_OFFSET + 4;
+/// Sector sizes from 512 to 4096 bytes.
+const SECTOR_SIZE_SHIFTS: std::ops::RangeInclusive<u8> = 9..=12;
 const MAX_STRIPE_SECTOR_COUNT_SHIFT: u8 = 17; // Max stripe size of 2^17 sectors = 64 MiB
 
 /// Flags used in stripe headers within UbiMetadata
@@ -38,6 +41,11 @@ pub struct UbiMetadata {
     pub version_minor: [u8; 2],
 
     pub stripe_sector_count_shift: u8,
+
+    /// log2 of the sector size of the data device the metadata was created
+    /// for. Zero in metadata written before this was recorded, which was
+    /// always for 512-byte sectors.
+    pub sector_size_shift: u8,
 
     // bit 0: fetched or not
     // bit 1: written or not
@@ -78,9 +86,10 @@ impl UbiMetadata {
     //    [11.12]    version_minor: u16 LE (0)
     //    [13]       stripe_sector_count_shift: u8
     //    [14..17]   stripe_count: u32 LE (new field)
-    //    [18..507]  padding
+    //    [18]       sector_size_shift: u8 (0 if not recorded)
+    //    [19..507]  padding
     //    [508..511] CRC32 LE over bytes [0..507]
-    pub const HEADER_SIZE: usize = UBI_MAGIC_SIZE + 2 + 2 + 1 + 4; // 18
+    pub const HEADER_SIZE: usize = UBI_MAGIC_SIZE + 2 + 2 + 1 + 4 + 1; // 19
 
     /// Number of metadata sectors needed for stripe headers (excluding the
     /// header sector 0).
@@ -110,6 +119,34 @@ impl UbiMetadata {
 
     pub fn stripe_count(&self) -> u64 {
         self.stripe_headers.len() as u64
+    }
+
+    /// Sector size of the data device the metadata was created for.
+    pub fn sector_size(&self) -> usize {
+        match self.sector_size_shift {
+            0 => SECTOR_SIZE,
+            shift => 1 << shift,
+        }
+    }
+
+    /// Record the sector size of the data device.
+    pub fn with_sector_size(mut self: Box<Self>, sector_size: usize) -> Result<Box<Self>> {
+        let shift = sector_size.trailing_zeros() as u8;
+        if !sector_size.is_power_of_two() || !SECTOR_SIZE_SHIFTS.contains(&shift) {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!("Unsupported sector size {sector_size}"),
+            }));
+        }
+        if self.stripe_size() < sector_size {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "Stripe size {} is smaller than the {sector_size}-byte sector size",
+                    self.stripe_size()
+                ),
+            }));
+        }
+        self.sector_size_shift = shift;
+        Ok(self)
     }
 
     pub fn version_major_u16(&self) -> u16 {
@@ -153,6 +190,7 @@ impl UbiMetadata {
             version_major: METADATA_VERSION_MAJOR.to_le_bytes(),
             version_minor: METADATA_VERSION_MINOR.to_le_bytes(),
             stripe_sector_count_shift,
+            sector_size_shift: 0,
             stripe_headers: headers,
         })
     }
@@ -180,6 +218,7 @@ impl UbiMetadata {
             version_major: METADATA_VERSION_MAJOR.to_le_bytes(),
             version_minor: METADATA_VERSION_MINOR.to_le_bytes(),
             stripe_sector_count_shift,
+            sector_size_shift: 0,
             stripe_headers: headers,
         })
     }
@@ -248,6 +287,15 @@ impl UbiMetadata {
             }));
         }
 
+        let sector_size_shift = buf[SECTOR_SIZE_SHIFT_OFFSET];
+        if sector_size_shift != 0 && !SECTOR_SIZE_SHIFTS.contains(&sector_size_shift) {
+            return Err(crate::ubiblk_error!(MetadataError {
+                description: format!(
+                    "Metadata sector size shift {sector_size_shift} is not supported"
+                ),
+            }));
+        }
+
         // Read stripe count from header (u32 LE at offset 14)
         let stripe_count = u32::from_le_bytes([
             buf[STRIPE_COUNT_OFFSET],
@@ -294,6 +342,7 @@ impl UbiMetadata {
             version_major,
             version_minor,
             stripe_sector_count_shift,
+            sector_size_shift,
             stripe_headers: all_headers,
         }))
     }
@@ -338,6 +387,7 @@ impl UbiMetadata {
             })?
             .to_le_bytes();
         header[STRIPE_COUNT_OFFSET..STRIPE_COUNT_OFFSET + 4].copy_from_slice(&stripe_count_bytes);
+        header[SECTOR_SIZE_SHIFT_OFFSET] = self.sector_size_shift;
 
         write_sector_with_crc32(sector_buf, &header);
         Ok(())
@@ -397,6 +447,67 @@ mod tests {
 
         for i in 0..STRIPES {
             assert_eq!(loaded_metadata.stripe_header(i), metadata.stripe_header(i));
+        }
+    }
+
+    fn serialize(metadata: &UbiMetadata) -> Vec<u8> {
+        let mut buf = vec![0u8; metadata.metadata_size()];
+        metadata.write_to_buf(&mut buf).unwrap();
+        buf
+    }
+
+    #[test]
+    fn sector_size_round_trips() {
+        for (sector_size, shift) in [(512, 9), (4096, 12)] {
+            let metadata = UbiMetadata::new(11, 4, 0)
+                .with_sector_size(sector_size)
+                .unwrap();
+            let buf = serialize(&metadata);
+            assert_eq!(buf[18], shift);
+
+            let loaded = UbiMetadata::from_bytes(&buf).unwrap();
+            assert_eq!(loaded.sector_size_shift, shift);
+            assert_eq!(loaded.sector_size(), sector_size);
+        }
+    }
+
+    /// Metadata written before the sector size was recorded has zero padding
+    /// where it is now stored, and was always for 512-byte sectors.
+    #[test]
+    fn metadata_without_a_sector_size_is_for_512_byte_sectors() {
+        let buf = serialize(&UbiMetadata::new(11, 4, 0));
+        assert!(buf[18..508].iter().all(|&b| b == 0));
+
+        let loaded = UbiMetadata::from_bytes(&buf).unwrap();
+        assert_eq!(loaded.sector_size_shift, 0);
+        assert_eq!(loaded.sector_size(), 512);
+    }
+
+    #[test]
+    fn unsupported_sector_sizes_are_rejected() {
+        for sector_size in [0, 256, 1000, 8192] {
+            let result = UbiMetadata::new(11, 4, 0).with_sector_size(sector_size);
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported sector size"));
+        }
+        // 2^2 * 512 bytes per stripe.
+        let result = UbiMetadata::new(2, 4, 0).with_sector_size(4096);
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("smaller than the 4096-byte sector size"));
+
+        for shift in [5, 13] {
+            let mut buf = serialize(&UbiMetadata::new(11, 4, 0));
+            let mut header = buf[..SECTOR_SIZE - CRC32_SIZE].to_vec();
+            header[18] = shift;
+            write_sector_with_crc32(&mut buf[..SECTOR_SIZE], &header);
+            assert!(UbiMetadata::from_bytes(&buf)
+                .unwrap_err()
+                .to_string()
+                .contains("sector size shift"));
         }
     }
 

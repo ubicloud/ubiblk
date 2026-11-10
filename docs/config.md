@@ -93,12 +93,18 @@ write_through = false
 | `write_through` | boolean | false | — | Enable write-through mode. Writes are durable when they complete, unless [crash-unsafe optimizations](#crash-unsafe-optimizations) are enabled |
 
 The I/O topology settings apply to both the vhost-user and ublk backends.
-Logical sectors remain 512 bytes. The 4 KiB defaults suit backing devices with
-4 KiB physical sectors, including 512e disks; ubiblk does not detect the backing
-device's topology. For a device with 512-byte physical sectors, all three values
-can be set to 512. Minimum and optimal sizes must be multiples of the preceding
-size, which the power-of-two and ordering requirements enforce. The minimum
-size limit comes from virtio's 16-bit count of logical blocks.
+The 4 KiB defaults suit backing devices with 4 KiB physical sectors, including
+512e disks; ubiblk does not detect the backing device's physical topology. For
+a device with 512-byte physical sectors, all three values can be set to 512.
+Minimum and optimal sizes must be multiples of the preceding size, which the
+power-of-two and ordering requirements enforce. The minimum size limit comes
+from virtio's 16-bit count of logical blocks.
+
+The logical sector size is not configurable. It is the logical sector size of
+the device that holds `data_path`, detected when the disk is opened: 512 bytes
+on most drives, 4096 bytes on drives formatted with 4 KiB logical sectors. It
+is advertised as the logical block size, and topology values smaller than it
+are raised to it. See [Sector size](../README.md#sector-size).
 
 These values advertise alignment and preferred I/O sizes to the guest or host
 kernel. They do not resize or coalesce requests and do not change ubiblk's

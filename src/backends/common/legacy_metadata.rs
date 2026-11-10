@@ -38,7 +38,9 @@ pub fn convert_legacy_metadata(config: &v2::Config, legacy_metadata_path: &Path)
         false,
     )
     .build()?;
-    let metadata = legacy.convert(|stripe_id| stripe_source.has_stripe(stripe_id))?;
+    let metadata = legacy
+        .convert(|stripe_id| stripe_source.has_stripe(stripe_id))?
+        .with_sector_size(disk_bdev.logical_sector_size())?;
 
     ensure_metadata_file(metadata_path, metadata.metadata_size())?;
     let metadata_bdev = build_block_device(metadata_path, config, false)

@@ -12,6 +12,17 @@ pub struct BlockDeviceStripeSource {
 
 impl BlockDeviceStripeSource {
     pub fn new(device: Box<dyn BlockDevice>, stripe_sector_count: u64) -> Result<Self> {
+        // Stripes are read whole, so they have to be whole sectors.
+        let stripe_size = stripe_sector_count * STRIPE_SECTOR_SIZE as u64;
+        let sector_size = device.logical_sector_size() as u64;
+        if !stripe_size.is_multiple_of(sector_size) {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "Stripe size {stripe_size} is not a multiple of the source's \
+                     {sector_size}-byte sector size"
+                ),
+            }));
+        }
         Ok(Self {
             channel: device.create_channel()?,
             stripe_sector_count,
@@ -104,5 +115,18 @@ mod tests {
 
         let err = source.request(2, buffer).unwrap_err();
         assert!(matches!(err, UbiblkError::InvalidParameter { .. }));
+    }
+
+    #[test]
+    fn a_stripe_has_to_be_whole_sectors_of_the_source() {
+        let device = || Box::new(TestBlockDevice::new(8192).with_logical_sector_size(4096));
+        assert!(BlockDeviceStripeSource::new(device(), 8).is_ok());
+
+        let err = BlockDeviceStripeSource::new(device(), 4).err().unwrap();
+        assert!(
+            err.to_string()
+                .contains("Stripe size 2048 is not a multiple of the source's 4096-byte"),
+            "unexpected error: {err}"
+        );
     }
 }

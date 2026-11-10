@@ -28,6 +28,13 @@ pub trait BlockDevice: Send + Sync {
     fn sector_count(&self) -> u64;
     fn clone(&self) -> Box<dyn BlockDevice>;
 
+    /// Logical sector size of the storage behind the device. Requests are
+    /// counted in `SECTOR_SIZE` units whatever this is, but have to be
+    /// aligned to it.
+    fn logical_sector_size(&self) -> usize {
+        crate::backends::SECTOR_SIZE
+    }
+
     fn stripe_count(&self, stripe_sector_count: u64) -> usize {
         self.sector_count().div_ceil(stripe_sector_count) as usize
     }
@@ -45,6 +52,7 @@ mod bdev_null;
 mod bdev_sync;
 mod bdev_uring;
 pub mod bgworker;
+mod sector_size;
 mod wait_for_completion;
 
 #[cfg(test)]
@@ -66,4 +74,5 @@ pub use bdev_null::NullBlockDevice;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;
 pub use bgworker::{BgWorker, BgWorkerRequest};
+pub use sector_size::{detect_sector_size, sector_size_of};
 pub use wait_for_completion::wait_for_completion;

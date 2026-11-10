@@ -402,6 +402,10 @@ impl BlockDevice for LazyBlockDevice {
         self.base.sector_count()
     }
 
+    fn logical_sector_size(&self) -> usize {
+        self.base.logical_sector_size()
+    }
+
     fn clone(&self) -> Box<dyn BlockDevice> {
         Box::new(LazyBlockDevice {
             base: self.base.clone(),

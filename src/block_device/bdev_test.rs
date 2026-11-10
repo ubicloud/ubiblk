@@ -104,6 +104,7 @@ impl IoChannel for TestIoChannel {
 
 pub struct TestBlockDevice {
     sector_count: u64,
+    logical_sector_size: usize,
     pub mem: Arc<RwLock<Vec<u8>>>,
     pub metrics: Arc<RwLock<TestDeviceMetrics>>,
     pub fail_next: Arc<AtomicBool>,
@@ -122,6 +123,7 @@ impl TestBlockDevice {
         let fail_submit = Arc::new(AtomicBool::new(false));
         TestBlockDevice {
             sector_count,
+            logical_sector_size: SECTOR_SIZE,
             mem,
             metrics: Arc::new(RwLock::new(TestDeviceMetrics {
                 reads: 0,
@@ -131,6 +133,12 @@ impl TestBlockDevice {
             fail_next,
             fail_submit,
         }
+    }
+
+    /// A device that reports `logical_sector_size`. Nothing is enforced.
+    pub fn with_logical_sector_size(mut self, logical_sector_size: usize) -> Self {
+        self.logical_sector_size = logical_sector_size;
+        self
     }
 
     pub fn read(&self, offset: usize, buf: &mut [u8], len: usize) {
@@ -167,9 +175,14 @@ impl BlockDevice for TestBlockDevice {
         self.sector_count
     }
 
+    fn logical_sector_size(&self) -> usize {
+        self.logical_sector_size
+    }
+
     fn clone(&self) -> Box<dyn BlockDevice> {
         Box::new(TestBlockDevice {
             sector_count: self.sector_count,
+            logical_sector_size: self.logical_sector_size,
             mem: self.mem.clone(),
             metrics: self.metrics.clone(),
             fail_next: self.fail_next.clone(),

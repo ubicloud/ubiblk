@@ -100,6 +100,10 @@ impl BlockDevice for CryptBlockDevice {
         self.base.sector_count()
     }
 
+    fn logical_sector_size(&self) -> usize {
+        self.base.logical_sector_size()
+    }
+
     fn clone(&self) -> Box<dyn BlockDevice> {
         Box::new(CryptBlockDevice {
             base: self.base.clone(),
@@ -245,5 +249,13 @@ mod tests {
         clone_channel.submit().unwrap();
         assert_eq!(clone_channel.poll(), vec![(2, true)]);
         assert_eq!(&read_buf.borrow().as_slice()[0..5], b"Hello");
+    }
+
+    #[test]
+    fn reports_the_logical_sector_size_of_its_base() {
+        let base = TestBlockDevice::new(4096).with_logical_sector_size(4096);
+        let crypt_bdev = CryptBlockDevice::new(Box::new(base), vec![7; 32], vec![9; 32]).unwrap();
+        assert_eq!(crypt_bdev.logical_sector_size(), 4096);
+        assert_eq!(crypt_bdev.clone().logical_sector_size(), 4096);
     }
 }

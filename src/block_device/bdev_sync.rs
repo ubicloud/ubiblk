@@ -103,6 +103,7 @@ impl IoChannel for SyncIoChannel {
 pub struct SyncBlockDevice {
     path: PathBuf,
     sector_count: u64,
+    logical_sector_size: usize,
     readonly: bool,
     direct_io: bool,
     sync: bool,
@@ -118,10 +119,15 @@ impl BlockDevice for SyncBlockDevice {
         self.sector_count
     }
 
+    fn logical_sector_size(&self) -> usize {
+        self.logical_sector_size
+    }
+
     fn clone(&self) -> Box<dyn BlockDevice> {
         Box::new(SyncBlockDevice {
             path: self.path.clone(),
             sector_count: self.sector_count,
+            logical_sector_size: self.logical_sector_size,
             readonly: self.readonly,
             direct_io: self.direct_io,
             sync: self.sync,
@@ -134,19 +140,28 @@ impl SyncBlockDevice {
         match std::fs::metadata(&path) {
             Ok(metadata) => {
                 let size = metadata.len();
-                if size % SECTOR_SIZE as u64 != 0 {
+                // Only direct I/O is bound to the sector size of the disk.
+                let logical_sector_size = if direct_io {
+                    super::detect_sector_size(&path)?
+                } else {
+                    SECTOR_SIZE
+                };
+                if size % logical_sector_size as u64 != 0 {
                     error!(
-                        "File {} size is not a multiple of sector size",
+                        "File {} size {size} is not a multiple of sector size {logical_sector_size}",
                         path.display()
                     );
                     return Err(crate::ubiblk_error!(InvalidParameter {
-                        description: "File size is not a multiple of sector size".to_string(),
+                        description: format!(
+                            "File size {size} is not a multiple of sector size {logical_sector_size}"
+                        ),
                     }));
                 }
                 let sector_count = size / SECTOR_SIZE as u64;
                 Ok(Box::new(SyncBlockDevice {
                     path,
                     sector_count,
+                    logical_sector_size,
                     readonly,
                     direct_io,
                     sync,
@@ -331,21 +346,22 @@ mod tests {
         let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_owned();
         let device = SyncBlockDevice::new(path.clone(), false, true, false)?;
+        let sectors = (device.logical_sector_size() / SECTOR_SIZE) as u32;
         let mut chan = device.create_channel()?;
 
-        let pattern = vec![0xACu8; SECTOR_SIZE];
-        let write_buf = shared_buffer(SECTOR_SIZE);
+        let pattern = vec![0xACu8; sectors as usize * SECTOR_SIZE];
+        let write_buf = shared_buffer(sectors as usize * SECTOR_SIZE);
         write_buf
             .borrow_mut()
             .as_mut_slice()
             .copy_from_slice(&pattern);
-        chan.add_write(0, 1, write_buf.clone(), 1);
+        chan.add_write(0, sectors, write_buf.clone(), 1);
         chan.submit()?;
         let result = chan.poll();
         assert_eq!(result, vec![(1, true)]);
 
-        let read_buf = shared_buffer(SECTOR_SIZE);
-        chan.add_read(0, 1, read_buf.clone(), 2);
+        let read_buf = shared_buffer(sectors as usize * SECTOR_SIZE);
+        chan.add_read(0, sectors, read_buf.clone(), 2);
         chan.submit()?;
         let result = chan.poll();
         assert_eq!(result, vec![(2, true)]);
@@ -377,19 +393,20 @@ mod tests {
         let tmpfile = NamedTempFile::new()?;
         let path = tmpfile.path().to_path_buf();
         let device = SyncBlockDevice::new(path.clone(), false, true, true)?;
+        let sectors = (device.logical_sector_size() / SECTOR_SIZE) as u32;
         let device_clone = device.clone();
         assert_eq!(device.sector_count(), device_clone.sector_count());
 
         // Write to the clone & read from the original to verify they access the
         // same file.
         let mut chan_clone = device_clone.create_channel()?;
-        let pattern = vec![0xDEu8; SECTOR_SIZE];
-        let write_buf = shared_buffer(SECTOR_SIZE);
+        let pattern = vec![0xDEu8; sectors as usize * SECTOR_SIZE];
+        let write_buf = shared_buffer(sectors as usize * SECTOR_SIZE);
         write_buf
             .borrow_mut()
             .as_mut_slice()
             .copy_from_slice(&pattern);
-        chan_clone.add_write(0, 1, write_buf.clone(), 1);
+        chan_clone.add_write(0, sectors, write_buf.clone(), 1);
         chan_clone.submit()?;
         assert_eq!(chan_clone.poll(), vec![(1, true)]);
         chan_clone.add_flush(0);
@@ -397,8 +414,8 @@ mod tests {
         assert_eq!(chan_clone.poll(), vec![(0, true)]);
 
         let mut chan = device.create_channel()?;
-        let read_buf = shared_buffer(SECTOR_SIZE);
-        chan.add_read(0, 1, read_buf.clone(), 2);
+        let read_buf = shared_buffer(sectors as usize * SECTOR_SIZE);
+        chan.add_read(0, sectors, read_buf.clone(), 2);
         chan.submit()?;
         assert_eq!(chan.poll(), vec![(2, true)]);
         assert_eq!(read_buf.borrow().as_slice(), pattern.as_slice());

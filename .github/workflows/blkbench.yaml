@@ -1,7 +1,8 @@
 name: blkbench
 
 # Runs blkbench (https://github.com/ubicloud/blkbench) data-integrity
-# verification against ubiblk's vhost-user backend.
+# verification against ubiblk's vhost-user backend, once over a device with
+# 512-byte logical sectors and once over one with 4096-byte logical sectors.
 on:
   push:
     branches:
@@ -11,10 +12,19 @@ on:
 
 env:
   ISA_L_CRYPTO_VERSION: "v2.25.0"
+  # Mount point of the filesystem the test volumes live on.
+  WORK_ROOT: /mnt/blkbench
 
 jobs:
   blkbench:
+    name: blkbench (${{ matrix.sector_size }}-byte sectors)
     runs-on: ubicloud-standard-4
+    strategy:
+      fail-fast: false
+      matrix:
+        sector_size: [512, 4096]
+    env:
+      SECTOR_SIZE: ${{ matrix.sector_size }}
 
     steps:
       - name: Checkout source
@@ -64,30 +74,48 @@ jobs:
         run: make -C blkbench-src -j"$(nproc)" LDFLAGS="-Wl,-rpath,/usr/local/lib/x86_64-linux-gnu"
 
       - name: Build ubiblk
-        run: cargo build --bin vhost-backend --bin init-metadata
+        run: cargo build --bin vhost-backend --bin init-metadata --bin dump-metadata
+
+      # ubiblk takes the sector size from the block device its files are on,
+      # so give the volumes a loop device with the sector size under test.
+      - name: Create a filesystem on a loop device with ${{ matrix.sector_size }}-byte sectors
+        run: |
+          set -euo pipefail
+          truncate -s 8G "$RUNNER_TEMP/blkbench.img"
+          loop=$(sudo losetup --find --show --sector-size "$SECTOR_SIZE" "$RUNNER_TEMP/blkbench.img")
+          actual=$(sudo blockdev --getss "$loop")
+          if [ "$actual" != "$SECTOR_SIZE" ]; then
+            echo "error: $loop has $actual-byte logical sectors, expected $SECTOR_SIZE" >&2
+            exit 1
+          fi
+          sudo mkfs.ext4 -q "$loop"
+          sudo mkdir -p "$WORK_ROOT"
+          sudo mount "$loop" "$WORK_ROOT"
+          sudo chown "$(id -u):$(id -g)" "$WORK_ROOT"
+          lsblk -o NAME,LOG-SEC,PHY-SEC,SIZE,MOUNTPOINT "$loop"
 
       - name: Verify
         run: |
           set -euo pipefail
           export PATH="$PWD/target/debug:$PWD/blkbench-src:$PATH"
-          work="$PWD/target/tests/blkbench"
+          work="$WORK_ROOT/blkbench"
           rm -rf "$work"
-          scripts/blkbench-run "$work/verify-flush" --rw verify-flush --bs 4k
-          scripts/blkbench-run "$work/verify-pipeline" --rw verify-pipeline --bs 4k
-          scripts/blkbench-run --write-through "$work/write-through" \
-            --rw verify-flush --bs 4k
+          run() { scripts/blkbench-run --sector-size "$SECTOR_SIZE" "$@"; }
+          run "$work/verify-flush" --rw verify-flush --bs 4k
+          run "$work/verify-pipeline" --rw verify-pipeline --bs 4k
+          run --write-through "$work/write-through" --rw verify-flush --bs 4k
 
       # 64k writes replace whole 64K stripes, skipping their fetch.
       - name: Verify crash-unsafe copy-on-write
         run: |
           set -euo pipefail
           export PATH="$PWD/target/debug:$PWD/blkbench-src:$PATH"
-          work="$PWD/target/tests/blkbench-unsafe"
+          work="$WORK_ROOT/blkbench-unsafe"
           rm -rf "$work" && mkdir -p "$work"
           head -c 256M /dev/urandom > "$work/base.raw"
           run() {
-            scripts/blkbench-run --base "$work/base.raw" --stripe-size 64K \
-              --crash-unsafe "$@"
+            scripts/blkbench-run --sector-size "$SECTOR_SIZE" \
+              --base "$work/base.raw" --stripe-size 64K --crash-unsafe "$@"
           }
           run "$work/flush-4k" --rw verify-flush --bs 4k
           run "$work/flush-64k" --rw verify-flush --bs 64k --verify-sectors 1:4
@@ -98,12 +126,12 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$PWD/target/debug:$PWD/blkbench-src:$PATH"
-          work="$PWD/target/tests/blkbench-unsafe-wt"
+          work="$WORK_ROOT/blkbench-unsafe-wt"
           rm -rf "$work" && mkdir -p "$work"
           head -c 256M /dev/urandom > "$work/base.raw"
           run() {
-            scripts/blkbench-run --base "$work/base.raw" --stripe-size 64K \
-              --crash-unsafe --write-through "$@"
+            scripts/blkbench-run --sector-size "$SECTOR_SIZE" \
+              --base "$work/base.raw" --stripe-size 64K --crash-unsafe --write-through "$@"
           }
           run "$work/flush-4k" --rw verify-flush --bs 4k
           run "$work/flush-64k" --rw verify-flush --bs 64k --verify-sectors 1:4
@@ -113,7 +141,7 @@ jobs:
       - name: Dump vhost-backend log
         if: ${{ always() }}
         run: |
-          for log in target/tests/blkbench*/*/vhost-backend.log; do
+          for log in "$WORK_ROOT"/blkbench*/*/vhost-backend.log; do
             [ -f "$log" ] || continue
             echo "== $log"
             cat "$log"

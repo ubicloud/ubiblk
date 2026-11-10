@@ -1,12 +1,16 @@
 #!/bin/bash
 # Runs blkbench against a fresh 4-queue ubiblk device. Needs sudo to read the
 # open flags of the backend, which is not dumpable.
+#
+# --sector-size SIZE asserts that ubiblk detects SIZE as the logical sector
+# size of the device DIR is on, records it and advertises it.
 
 set -euo pipefail
 
 init_args=()
 crash_unsafe=false
 write_through=false
+sector_size=
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base | --stripe-size)
@@ -22,6 +26,10 @@ while [[ $# -gt 0 ]]; do
       crash_unsafe=true
       shift
       ;;
+    --sector-size)
+      sector_size=$2
+      shift 2
+      ;;
     *)
       break
       ;;
@@ -29,7 +37,7 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 [--base IMAGE] [--stripe-size SIZE] [--write-through]" \
-    "[--crash-unsafe] DIR BLKBENCH_ARGS..." >&2
+    "[--crash-unsafe] [--sector-size SIZE] DIR BLKBENCH_ARGS..." >&2
   exit 2
 fi
 dir=$1
@@ -45,14 +53,30 @@ echo "== $dir/config.toml"
 cat "$dir/config.toml"
 
 cd "$dir"
+if [ -n "$sector_size" ]; then
+  recorded=$(dump-metadata --config config.toml | sed -n 's/^sector size: //p')
+  if [ "$recorded" != "$sector_size bytes" ]; then
+    echo "error: metadata records sector size '$recorded', expected $sector_size bytes" >&2
+    exit 1
+  fi
+fi
+
 rm -f vhost.sock
-RUST_LOG=warn vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
+# The backend logs the virtio config it advertises at info level.
+RUST_LOG=warn,ubiblk::backends::vhost::backend=info \
+  vhost-backend --config config.toml >>vhost-backend.log 2>&1 &
 pid=$!
 trap 'kill -9 "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
 
 for _ in $(seq 1 50); do [ -S vhost.sock ] && break; sleep 0.1; done
 if [ ! -S vhost.sock ]; then
   echo "error: vhost-backend did not create vhost.sock" >&2
+  exit 1
+fi
+
+if [ -n "$sector_size" ] &&
+  ! grep "virtio_config:" vhost-backend.log | grep -q "blk_size: $sector_size,"; then
+  echo "error: vhost-backend does not advertise a block size of $sector_size" >&2
   exit 1
 fi
 

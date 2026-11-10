@@ -95,7 +95,7 @@ mod tests {
     use crate::config::v2::stripe_source::StripeSourceConfig;
 
     fn write_v0_2_metadata(path: &Path, shift: u8, headers: &[u8]) {
-        let mut buf = vec![0u8; 2 * SECTOR_SIZE];
+        let mut buf = vec![0u8; 8 * SECTOR_SIZE];
         buf[..9].copy_from_slice(b"BDEV_UBI\0");
         buf[13] = shift;
         buf[SECTOR_SIZE..SECTOR_SIZE + headers.len()].copy_from_slice(headers);
@@ -107,12 +107,12 @@ mod tests {
         use crate::block_device::metadata_flags::{FETCHED, HAS_SOURCE};
 
         let dir = tempfile::tempdir().unwrap();
-        let stripe_size = 8 * SECTOR_SIZE;
+        let stripe_size = 16 * SECTOR_SIZE;
         // Four data stripes; the image covers two and a half of them.
         std::fs::write(dir.path().join("disk"), vec![0; 4 * stripe_size]).unwrap();
         std::fs::write(dir.path().join("image"), vec![0; 5 * stripe_size / 2]).unwrap();
         // v0.2.x created stripe 3, past the image, as fetched.
-        write_v0_2_metadata(&dir.path().join("legacy"), 3, &[0, 1, 0, 1]);
+        write_v0_2_metadata(&dir.path().join("legacy"), 4, &[0, 1, 0, 1]);
 
         let config = test_config(
             &dir.path().join("disk"),
@@ -127,7 +127,7 @@ mod tests {
 
         let metadata =
             UbiMetadata::from_bytes(&std::fs::read(dir.path().join("metadata")).unwrap()).unwrap();
-        assert_eq!(metadata.stripe_sector_count_shift, 3);
+        assert_eq!(metadata.stripe_sector_count_shift, 4);
         assert_eq!(
             metadata.stripe_headers,
             vec![HAS_SOURCE, HAS_SOURCE | FETCHED, HAS_SOURCE, 0]
@@ -165,7 +165,7 @@ mod tests {
         let stripe_size = 8 * SECTOR_SIZE;
         std::fs::write(dir.path().join("disk"), vec![0; 2 * stripe_size]).unwrap();
         std::fs::write(dir.path().join("image"), vec![0; 2 * stripe_size]).unwrap();
-        std::fs::write(dir.path().join("legacy"), vec![0; 2 * SECTOR_SIZE]).unwrap();
+        std::fs::write(dir.path().join("legacy"), vec![0; 8 * SECTOR_SIZE]).unwrap();
 
         let mut config = test_config(
             &dir.path().join("disk"),
@@ -192,7 +192,7 @@ mod tests {
 
         // Write v0.2.x metadata through the XTS key, as v0.2.x does.
         let legacy_bdev = build_block_device(&dir.path().join("legacy"), &config, false).unwrap();
-        let buf = shared_buffer(2 * SECTOR_SIZE);
+        let buf = shared_buffer(8 * SECTOR_SIZE);
         {
             let mut b = buf.borrow_mut();
             let bytes = b.as_mut_slice();
@@ -200,7 +200,7 @@ mod tests {
             bytes[13] = 3;
         }
         let mut ch = legacy_bdev.create_channel().unwrap();
-        ch.add_write(0, 2, buf, 0);
+        ch.add_write(0, 8, buf, 0);
         ch.submit().unwrap();
         wait_for_completion(ch.as_mut(), 0, std::time::Duration::from_secs(5)).unwrap();
         assert_ne!(

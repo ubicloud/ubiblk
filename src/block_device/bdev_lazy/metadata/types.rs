@@ -2,6 +2,10 @@ use ubiblk_macros::error_context;
 
 use crate::{backends::SECTOR_SIZE, stripe_source::StripeSource, Result};
 
+/// Unit of `stripe_sector_count_shift`. Stripes, archives and the remote
+/// stripe protocol are sized in these whatever sector size a device uses.
+pub const STRIPE_SECTOR_SIZE: usize = 512;
+
 pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
 pub const METADATA_VERSION_MAJOR: u16 = 2;
@@ -106,7 +110,7 @@ impl UbiMetadata {
     }
 
     pub fn stripe_size(&self) -> usize {
-        (self.stripe_sector_count() as usize) * SECTOR_SIZE
+        (self.stripe_sector_count() as usize) * STRIPE_SECTOR_SIZE
     }
 
     pub fn stripe_count(&self) -> u64 {

@@ -325,13 +325,13 @@ impl StripeSource for RemoteStripeSource {
 mod tests {
     use super::*;
     use crate::{
-        backends::SECTOR_SIZE,
+        block_device::STRIPE_SECTOR_SIZE,
         block_device::{shared_buffer, UbiMetadata},
     };
 
     const STRIPE_SECTOR_COUNT_SHIFT: u8 = 4;
     const STRIPE_SECTORS: usize = 1 << STRIPE_SECTOR_COUNT_SHIFT;
-    const STRIPE_SIZE: usize = STRIPE_SECTORS * SECTOR_SIZE;
+    const STRIPE_SIZE: usize = STRIPE_SECTORS * STRIPE_SECTOR_SIZE;
     const TOTAL_STRIPES: usize = 16;
 
     struct MockRemoteStripeProvider {

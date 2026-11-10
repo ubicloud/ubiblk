@@ -240,7 +240,7 @@ mod tests {
     use std::io::{Cursor, Read, Write};
     use std::{os::unix::net::UnixStream, sync::Arc, thread};
 
-    use crate::backends::SECTOR_SIZE;
+    use crate::block_device::STRIPE_SECTOR_SIZE;
     use crate::block_device::{
         bdev_test::TestBlockDevice, metadata_flags, BlockDevice, UbiMetadata,
     };
@@ -313,7 +313,7 @@ mod tests {
         let stripe_count = 2;
         let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
-            (stripe_count as u64) * SECTOR_SIZE as u64,
+            (stripe_count as u64) * STRIPE_SECTOR_SIZE as u64,
         ));
 
         let fetched_metadata =
@@ -340,10 +340,10 @@ mod tests {
         let stripe_count = 2;
         let metadata = test_metadata(stripe_count, 0, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
-            (stripe_count as u64) * SECTOR_SIZE as u64,
+            (stripe_count as u64) * STRIPE_SECTOR_SIZE as u64,
         ));
 
-        let pattern = (0..SECTOR_SIZE)
+        let pattern = (0..STRIPE_SECTOR_SIZE)
             .map(|idx| (idx % (u8::MAX as usize + 1)) as u8)
             .collect::<Vec<_>>();
         stripe_device.write(0, &pattern, pattern.len());
@@ -364,13 +364,13 @@ mod tests {
         let stripe_count = 2;
         let metadata = test_metadata(stripe_count, stripe_count, &[1], &[]);
         let stripe_device = Arc::new(TestBlockDevice::new(
-            (stripe_count as u64) * SECTOR_SIZE as u64,
+            (stripe_count as u64) * STRIPE_SECTOR_SIZE as u64,
         ));
 
-        let pattern = (0..SECTOR_SIZE)
+        let pattern = (0..STRIPE_SECTOR_SIZE)
             .map(|idx| (idx % (u8::MAX as usize + 1)) as u8)
             .collect::<Vec<_>>();
-        stripe_device.write(SECTOR_SIZE, &pattern, pattern.len());
+        stripe_device.write(STRIPE_SECTOR_SIZE, &pattern, pattern.len());
 
         let stripe_data = run_client_with_server(metadata, stripe_device, None, |client| {
             client
@@ -389,7 +389,7 @@ mod tests {
         let image_device_stripe_count: usize = 2;
         let metadata = test_metadata(device_stripe_count, image_device_stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
-            (device_stripe_count as u64) * SECTOR_SIZE as u64,
+            (device_stripe_count as u64) * STRIPE_SECTOR_SIZE as u64,
         ));
 
         let err = run_client_with_server(metadata.clone(), stripe_device.clone(), None, |client| {
@@ -424,7 +424,7 @@ mod tests {
         let stripe_count = 2;
         let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
-            (stripe_count as u64) * SECTOR_SIZE as u64,
+            (stripe_count as u64) * STRIPE_SECTOR_SIZE as u64,
         ));
 
         let err = run_client_with_server(metadata, stripe_device, None, |client| {
@@ -447,7 +447,7 @@ mod tests {
         let stripe_count = 1;
         let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
-            (stripe_count as u64) * SECTOR_SIZE as u64,
+            (stripe_count as u64) * STRIPE_SECTOR_SIZE as u64,
         ));
 
         let status = run_client_with_server(metadata, stripe_device, None, |client| {
@@ -464,7 +464,7 @@ mod tests {
         let stripe_count = 1;
         let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
-            (stripe_count as u64) * SECTOR_SIZE as u64,
+            (stripe_count as u64) * STRIPE_SECTOR_SIZE as u64,
         ));
 
         run_client_with_server(metadata, stripe_device, None, |client| {
@@ -542,7 +542,7 @@ mod tests {
         let stripe_count = 1;
         let metadata = test_metadata(stripe_count, stripe_count, &[], &[0]);
         let stripe_device = Arc::new(TestBlockDevice::new(
-            (stripe_count as u64) * SECTOR_SIZE as u64,
+            (stripe_count as u64) * STRIPE_SECTOR_SIZE as u64,
         ));
 
         let psk = PskCredentials::new(
@@ -588,7 +588,7 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let stripe_count = 4usize;
-        let stripe_size = SECTOR_SIZE; // stripe_sector_count_shift = 0 -> one sector
+        let stripe_size = STRIPE_SECTOR_SIZE; // stripe_sector_count_shift = 0 -> one sector
 
         // Source holds pattern A; the overlay holds a different pattern B. Every
         // stripe has a source and is NOT fetched, so it must be served from the

@@ -5,8 +5,8 @@ use log::{debug, error, info, warn};
 use super::super::*;
 
 use crate::{
-    backends::SECTOR_SIZE,
     block_device::SharedMetadataState,
+    block_device::STRIPE_SECTOR_SIZE,
     stripe_source::{BlockDeviceStripeSource, StripeSource},
     utils::aligned_buffer_pool::AlignedBufferPool,
     Result,
@@ -57,7 +57,7 @@ impl StripeFetcher {
         let fetch_target_channel = target_dev.create_channel()?;
 
         let stripe_size_u64 = stripe_sector_count
-            .checked_mul(SECTOR_SIZE as u64)
+            .checked_mul(STRIPE_SECTOR_SIZE as u64)
             .ok_or_else(|| {
                 crate::ubiblk_error!(InvalidParameter {
                     description: "stripe size too large".to_string(),
@@ -376,7 +376,7 @@ mod tests {
             &*target_dev,
             stripe_sector_count,
             shared_metadata_state.clone(),
-            SECTOR_SIZE,
+            STRIPE_SECTOR_SIZE,
             autofetch,
             flush_fetches,
         )
@@ -416,7 +416,7 @@ mod tests {
         let mut state = prep_with(false, false);
         state
             .source_dev
-            .write(0, &[0xAAu8; SECTOR_SIZE], SECTOR_SIZE);
+            .write(0, &[0xAAu8; STRIPE_SECTOR_SIZE], STRIPE_SECTOR_SIZE);
         state.fetcher.handle_fetch_request(0, false);
         for _ in 0..10 {
             state.fetcher.update();
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(target_metrics.writes, 1);
         assert_eq!(target_metrics.flushes, 0);
         let mem = state.target_dev.mem.read().unwrap();
-        assert_eq!(&mem[..SECTOR_SIZE], &[0xAAu8; SECTOR_SIZE]);
+        assert_eq!(&mem[..STRIPE_SECTOR_SIZE], &[0xAAu8; STRIPE_SECTOR_SIZE]);
     }
 
     #[test]
@@ -461,15 +461,19 @@ mod tests {
     fn a_partial_final_source_stripe_lands_zero_padded() {
         let shift = 3u8;
         let stripe_sectors = 1u64 << shift;
-        let stripe_len = stripe_sectors as usize * SECTOR_SIZE;
+        let stripe_len = stripe_sectors as usize * STRIPE_SECTOR_SIZE;
         let full = MAX_CONCURRENT_FETCHES;
 
         let source_dev = Box::new(TestBlockDevice::new(
-            (full * stripe_len) as u64 + SECTOR_SIZE as u64,
+            (full * stripe_len) as u64 + STRIPE_SECTOR_SIZE as u64,
         ));
         let target_dev = Box::new(TestBlockDevice::new(((full + 1) * stripe_len) as u64));
         source_dev.write(0, &vec![0xAAu8; full * stripe_len], full * stripe_len);
-        source_dev.write(full * stripe_len, &[0xBBu8; SECTOR_SIZE], SECTOR_SIZE);
+        source_dev.write(
+            full * stripe_len,
+            &[0xBBu8; STRIPE_SECTOR_SIZE],
+            STRIPE_SECTOR_SIZE,
+        );
 
         let stripe_source =
             Box::new(BlockDeviceStripeSource::new(source_dev.clone(), stripe_sectors).unwrap());
@@ -483,7 +487,7 @@ mod tests {
             &*target_dev,
             stripe_sectors,
             SharedMetadataState::new(&metadata),
-            SECTOR_SIZE,
+            STRIPE_SECTOR_SIZE,
             false,
             true,
         )
@@ -496,8 +500,8 @@ mod tests {
             }
         }
 
-        let mut expected = vec![0xBBu8; SECTOR_SIZE];
-        expected.extend(vec![0u8; stripe_len - SECTOR_SIZE]);
+        let mut expected = vec![0xBBu8; STRIPE_SECTOR_SIZE];
+        expected.extend(vec![0u8; stripe_len - STRIPE_SECTOR_SIZE]);
         let mem = target_dev.mem.read().unwrap();
         assert_eq!(&mem[full * stripe_len..], expected.as_slice());
     }

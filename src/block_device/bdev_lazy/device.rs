@@ -367,6 +367,22 @@ impl LazyBlockDevice {
         track_written: bool,
         skip_whole_stripe_fetch: bool,
     ) -> Result<Box<Self>> {
+        // Guest requests are aligned to the base's sectors and are passed to
+        // the image as they are.
+        let (base_sector_size, image_sector_size) = (
+            base.logical_sector_size(),
+            image.as_ref().map_or(base.logical_sector_size(), |image| {
+                image.logical_sector_size()
+            }),
+        );
+        if !base_sector_size.is_multiple_of(image_sector_size) {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "Image has {image_sector_size}-byte sectors, larger than the disk's \
+                     {base_sector_size}-byte sectors"
+                ),
+            }));
+        }
         Ok(Box::new(LazyBlockDevice {
             base,
             image,

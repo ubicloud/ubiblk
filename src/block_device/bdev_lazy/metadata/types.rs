@@ -53,7 +53,7 @@ fn compute_sector_crc32(data: &[u8]) -> [u8; CRC32_SIZE] {
 
 /// Write a single metadata sector into `sector_buf`. `contents` is the data
 /// without the CRC32 and must be at most 508 bytes.
-pub(crate) fn write_sector_with_crc32(sector_buf: &mut [u8], contents: &[u8]) {
+fn write_sector_with_crc32(sector_buf: &mut [u8], contents: &[u8]) {
     debug_assert!(sector_buf.len().is_multiple_of(SECTOR_SIZE));
     debug_assert!(contents.len() <= SECTOR_SIZE - CRC32_SIZE);
 
@@ -98,11 +98,6 @@ impl UbiMetadata {
     /// Which metadata sector (1-based) contains the given stripe_id.
     pub fn stripe_id_to_sector(stripe_id: usize) -> u64 {
         (stripe_id / STRIPE_HEADERS_PER_SECTOR + 1) as u64
-    }
-
-    /// Which group index (0-based) contains the given stripe_id.
-    pub fn stripe_id_to_group(stripe_id: usize) -> usize {
-        stripe_id / STRIPE_HEADERS_PER_SECTOR
     }
 
     pub fn stripe_sector_count(&self) -> u64 {
@@ -313,7 +308,21 @@ impl UbiMetadata {
             }));
         }
 
-        // Write header sector (sector 0)
+        self.write_header_sector(&mut buf[..SECTOR_SIZE])?;
+
+        for group in 0..self.stripe_header_sector_count() {
+            let sector_start = SECTOR_SIZE + group * SECTOR_SIZE;
+            assert!(sector_start + SECTOR_SIZE <= buf.len());
+            self.write_stripe_header_sector(
+                group,
+                &mut buf[sector_start..sector_start + SECTOR_SIZE],
+            );
+        }
+        Ok(())
+    }
+
+    /// Render metadata sector 0 into `sector_buf`.
+    pub(crate) fn write_header_sector(&self, sector_buf: &mut [u8]) -> Result<()> {
         let mut header = [0u8; Self::HEADER_SIZE];
         header[..UBI_MAGIC_SIZE].copy_from_slice(&self.magic);
         header[UBI_MAGIC_SIZE..UBI_MAGIC_SIZE + 2].copy_from_slice(&self.version_major);
@@ -330,20 +339,20 @@ impl UbiMetadata {
             .to_le_bytes();
         header[STRIPE_COUNT_OFFSET..STRIPE_COUNT_OFFSET + 4].copy_from_slice(&stripe_count_bytes);
 
-        write_sector_with_crc32(&mut buf[..SECTOR_SIZE], &header);
-
-        // Write stripe header sectors with CRC32
-        let num_sectors = self.stripe_header_sector_count();
-        for group in 0..num_sectors {
-            let start = group * STRIPE_HEADERS_PER_SECTOR;
-            let end = (start + STRIPE_HEADERS_PER_SECTOR).min(self.stripe_headers.len());
-            let headers = &self.stripe_headers[start..end];
-
-            let sector_start = SECTOR_SIZE + group * SECTOR_SIZE;
-            assert!(sector_start + SECTOR_SIZE <= buf.len());
-            write_sector_with_crc32(&mut buf[sector_start..sector_start + SECTOR_SIZE], headers);
-        }
+        write_sector_with_crc32(sector_buf, &header);
         Ok(())
+    }
+
+    /// Render the metadata sector holding stripe header group `group` into
+    /// `sector_buf`. Sectors past the last group are zero, as on disk.
+    pub(crate) fn write_stripe_header_sector(&self, group: usize, sector_buf: &mut [u8]) {
+        let start = group * STRIPE_HEADERS_PER_SECTOR;
+        if start >= self.stripe_headers.len() {
+            sector_buf.fill(0);
+            return;
+        }
+        let end = (start + STRIPE_HEADERS_PER_SECTOR).min(self.stripe_headers.len());
+        write_sector_with_crc32(sector_buf, &self.stripe_headers[start..end]);
     }
 
     pub fn has_fetched_all_stripes(&self) -> bool {
@@ -356,7 +365,6 @@ impl UbiMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::SECTOR_SIZE;
 
     #[test]
     fn test_ubi_metadata_serialization() {

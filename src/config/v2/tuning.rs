@@ -23,7 +23,7 @@ pub struct TuningSection {
     pub seg_size_max: u32,
     #[serde(default = "default_seg_count_max")]
     pub seg_count_max: u32,
-    /// Advertised physical block size in bytes; logical sectors remain 512 bytes.
+    /// Advertised physical block size in bytes.
     #[serde(default = "default_io_size")]
     pub physical_block_size: u32,
     /// Advertised minimum efficient I/O size in bytes.

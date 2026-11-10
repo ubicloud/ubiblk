@@ -588,7 +588,8 @@ mod tests {
         use tempfile::NamedTempFile;
 
         let stripe_count = 4usize;
-        let stripe_size = STRIPE_SECTOR_SIZE; // stripe_sector_count_shift = 0 -> one sector
+        // Whole sectors of the files' device, whatever its sector size.
+        let stripe_size = 8 * STRIPE_SECTOR_SIZE; // stripe_sector_count_shift = 3
 
         // Source holds pattern A; the overlay holds a different pattern B. Every
         // stripe has a source and is NOT fetched, so it must be served from the
@@ -602,7 +603,7 @@ mod tests {
         source_file.as_file().write_all(&pattern_a)?;
         overlay_file.as_file().write_all(&pattern_b)?;
 
-        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(0, stripe_count, stripe_count));
+        let metadata: Arc<UbiMetadata> = Arc::from(UbiMetadata::new(3, stripe_count, stripe_count));
 
         let config = v2::Config {
             device: DeviceSection {

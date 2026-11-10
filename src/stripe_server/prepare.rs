@@ -76,13 +76,13 @@ pub fn prepare_stripe_server(config: &v2::Config) -> Result<Arc<StripeServer>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::backends::SECTOR_SIZE;
+    use crate::block_device::STRIPE_SECTOR_SIZE;
 
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    const STRIPE_SIZE: u64 = (1 << DEFAULT_STRIPE_SECTOR_COUNT_SHIFT) * SECTOR_SIZE as u64;
+    const STRIPE_SIZE: u64 = (1 << DEFAULT_STRIPE_SECTOR_COUNT_SHIFT) * STRIPE_SECTOR_SIZE as u64;
 
     fn config(path: String, metadata_path: Option<String>, track_written: bool) -> v2::Config {
         v2::Config {

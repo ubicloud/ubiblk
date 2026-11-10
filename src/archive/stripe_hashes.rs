@@ -9,7 +9,7 @@ use ubiblk_macros::error_context;
 
 use crate::archive::{compute_hmac_tag, verify_hmac_tag};
 use crate::ResultExt;
-use crate::{backends::SECTOR_SIZE, crypt::XtsBlockCipher, Result};
+use crate::{block_device::STRIPE_SECTOR_SIZE, crypt::XtsBlockCipher, Result};
 
 pub type StripeContentMap = HashMap<usize, StripeContentSpecifier>;
 
@@ -56,7 +56,7 @@ pub fn serialize_stripe_mapping(
     let map_bytes = cbor_to_vec(&btree_map, "stripe mapping")?;
     let (mut padded, plaintext_len) = pad_to_sector(&map_bytes);
     if let Some(mut cipher) = cipher {
-        let sector_count = padded.len() / SECTOR_SIZE;
+        let sector_count = padded.len() / STRIPE_SECTOR_SIZE;
         cipher.encrypt(&mut padded, XTS_SECTOR_START, sector_count as u64);
     }
     let hmac_tag = compute_hmac_tag(
@@ -100,7 +100,7 @@ pub fn deserialize_stripe_mapping(
         }));
     }
 
-    if !ciphertext.len().is_multiple_of(SECTOR_SIZE) {
+    if !ciphertext.len().is_multiple_of(STRIPE_SECTOR_SIZE) {
         return Err(crate::ubiblk_error!(ArchiveError {
             description: "stripe-mapping ciphertext is not sector-aligned".to_string(),
         }));
@@ -114,7 +114,7 @@ pub fn deserialize_stripe_mapping(
     // decrypt
     let mut decrypted = ciphertext;
     if let Some(mut cipher) = cipher {
-        let sector_count = decrypted.len() / SECTOR_SIZE;
+        let sector_count = decrypted.len() / STRIPE_SECTOR_SIZE;
         cipher.decrypt(&mut decrypted, XTS_SECTOR_START, sector_count as u64);
     }
 
@@ -161,7 +161,7 @@ fn cbor_from_slice<T: DeserializeOwned>(bytes: &[u8], context: &str) -> Result<T
 
 fn pad_to_sector(bytes: &[u8]) -> (Vec<u8>, u64) {
     let len = bytes.len();
-    let pad_len = (SECTOR_SIZE - (len % SECTOR_SIZE)) % SECTOR_SIZE;
+    let pad_len = (STRIPE_SECTOR_SIZE - (len % STRIPE_SECTOR_SIZE)) % STRIPE_SECTOR_SIZE;
     let mut padded = Vec::with_capacity(len + pad_len);
     padded.extend_from_slice(bytes);
     if pad_len > 0 {

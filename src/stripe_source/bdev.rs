@@ -1,4 +1,4 @@
-use crate::backends::SECTOR_SIZE;
+use crate::block_device::STRIPE_SECTOR_SIZE;
 use crate::block_device::{BlockDevice, IoChannel, SharedBuffer};
 use crate::Result;
 
@@ -37,7 +37,7 @@ impl StripeSource for BlockDeviceStripeSource {
         // not have would otherwise be the previous stripe's bytes.
         {
             let mut buf = buffer.borrow_mut();
-            let read_len = (stripe_sector_count as usize * SECTOR_SIZE).min(buf.len());
+            let read_len = (stripe_sector_count as usize * STRIPE_SECTOR_SIZE).min(buf.len());
             buf.as_mut_slice()[read_len..].fill(0);
         }
 
@@ -78,29 +78,29 @@ mod tests {
     #[test]
     fn a_stripe_the_source_only_partly_holds_reads_back_zero_padded() {
         let stripe_sectors = 4u64;
-        let device = Box::new(TestBlockDevice::new(6 * SECTOR_SIZE as u64));
+        let device = Box::new(TestBlockDevice::new(6 * STRIPE_SECTOR_SIZE as u64));
         device.write(
-            4 * SECTOR_SIZE,
-            &vec![0xBBu8; 2 * SECTOR_SIZE],
-            2 * SECTOR_SIZE,
+            4 * STRIPE_SECTOR_SIZE,
+            &vec![0xBBu8; 2 * STRIPE_SECTOR_SIZE],
+            2 * STRIPE_SECTOR_SIZE,
         );
         let mut source = BlockDeviceStripeSource::new(device, stripe_sectors).unwrap();
 
-        let buffer = shared_buffer(stripe_sectors as usize * SECTOR_SIZE);
+        let buffer = shared_buffer(stripe_sectors as usize * STRIPE_SECTOR_SIZE);
         buffer.borrow_mut().as_mut_slice().fill(0xAA);
         source.request(1, buffer.clone()).unwrap();
         assert_eq!(source.poll(), vec![(1, true)]);
 
-        let mut expected = vec![0xBBu8; 2 * SECTOR_SIZE];
-        expected.extend(vec![0u8; 2 * SECTOR_SIZE]);
+        let mut expected = vec![0xBBu8; 2 * STRIPE_SECTOR_SIZE];
+        expected.extend(vec![0u8; 2 * STRIPE_SECTOR_SIZE]);
         assert_eq!(buffer.borrow().as_slice(), expected.as_slice());
     }
 
     #[test]
     fn test_request_beyond_end_errors() {
-        let device = Box::new(TestBlockDevice::new(8 * SECTOR_SIZE as u64));
+        let device = Box::new(TestBlockDevice::new(8 * STRIPE_SECTOR_SIZE as u64));
         let mut source = BlockDeviceStripeSource::new(device, 4).unwrap();
-        let buffer = shared_buffer(SECTOR_SIZE);
+        let buffer = shared_buffer(STRIPE_SECTOR_SIZE);
 
         let err = source.request(2, buffer).unwrap_err();
         assert!(matches!(err, UbiblkError::InvalidParameter { .. }));

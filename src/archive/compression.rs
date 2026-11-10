@@ -1,6 +1,6 @@
 use ubiblk_macros::error_context;
 
-use crate::backends::SECTOR_SIZE;
+use crate::block_device::STRIPE_SECTOR_SIZE;
 
 use super::*;
 
@@ -8,7 +8,7 @@ impl ArchiveCompressionAlgorithm {
     #[error_context("Failed to compress data")]
     pub fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
         assert!(
-            data.len().is_multiple_of(SECTOR_SIZE),
+            data.len().is_multiple_of(STRIPE_SECTOR_SIZE),
             "Data length must be a multiple of sector size"
         );
         match self {
@@ -40,12 +40,12 @@ impl ArchiveCompressionAlgorithm {
 }
 
 fn ensure_sector_aligned(decompressed: Vec<u8>) -> Result<Vec<u8>> {
-    if !decompressed.len().is_multiple_of(SECTOR_SIZE) {
+    if !decompressed.len().is_multiple_of(STRIPE_SECTOR_SIZE) {
         return Err(crate::ubiblk_error!(ArchiveError {
             description: format!(
                 "Decompressed data size {} is not a multiple of sector size {}",
                 decompressed.len(),
-                SECTOR_SIZE
+                STRIPE_SECTOR_SIZE
             ),
         }));
     }
@@ -59,7 +59,8 @@ fn with_size_header_and_padding(mut compressed: Vec<u8>) -> Result<Vec<u8>> {
         })
     })?;
     compressed.splice(0..0, size.to_le_bytes());
-    let padding = (SECTOR_SIZE - (compressed.len() % SECTOR_SIZE)) % SECTOR_SIZE;
+    let padding =
+        (STRIPE_SECTOR_SIZE - (compressed.len() % STRIPE_SECTOR_SIZE)) % STRIPE_SECTOR_SIZE;
     let new_len = compressed.len() + padding;
     compressed.resize(new_len, 0);
     Ok(compressed)
@@ -92,7 +93,7 @@ mod tests {
     #[test]
     fn test_none_compression() {
         let algorithm = ArchiveCompressionAlgorithm::None;
-        let data = vec![0xAAu8; SECTOR_SIZE * 5];
+        let data = vec![0xAAu8; STRIPE_SECTOR_SIZE * 5];
         let compressed = algorithm.compress(&data).unwrap();
         assert_eq!(compressed, data);
         let decompressed = algorithm.decompress(&compressed).unwrap();
@@ -102,9 +103,9 @@ mod tests {
     #[test]
     fn test_zstd_compression_level_1() {
         let algorithm = ArchiveCompressionAlgorithm::Zstd { level: 1 };
-        let data = vec![0xBBu8; SECTOR_SIZE * 6];
+        let data = vec![0xBBu8; STRIPE_SECTOR_SIZE * 6];
         let compressed = algorithm.compress(&data).unwrap();
-        assert!(compressed.len().is_multiple_of(SECTOR_SIZE));
+        assert!(compressed.len().is_multiple_of(STRIPE_SECTOR_SIZE));
         let decompressed = algorithm.decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
     }
@@ -151,7 +152,7 @@ mod tests {
     #[should_panic(expected = "Data length must be a multiple of sector size")]
     fn test_panics_on_non_sector_size_data() {
         let algorithm = ArchiveCompressionAlgorithm::None;
-        let data = vec![0xFFu8; SECTOR_SIZE * 10 + 1]; // Not a multiple of sector size
+        let data = vec![0xFFu8; STRIPE_SECTOR_SIZE * 10 + 1]; // Not a multiple of sector size
         let _ = algorithm.compress(&data);
     }
 
@@ -163,8 +164,8 @@ mod tests {
         assert_eq!(&result[4..1004], &data[..]);
         assert_eq!(
             &result[1004..],
-            &[0u8; SECTOR_SIZE - (1004 % SECTOR_SIZE)][..]
+            &[0u8; STRIPE_SECTOR_SIZE - (1004 % STRIPE_SECTOR_SIZE)][..]
         );
-        assert!(result.len().is_multiple_of(SECTOR_SIZE));
+        assert!(result.len().is_multiple_of(STRIPE_SECTOR_SIZE));
     }
 }

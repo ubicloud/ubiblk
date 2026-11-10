@@ -7,7 +7,7 @@ use log::info;
 use ubiblk_macros::error_context;
 
 use crate::{
-    backends::SECTOR_SIZE,
+    block_device::STRIPE_SECTOR_SIZE,
     block_device::{shared_buffer, SharedBuffer},
     config::v2::ExportArchiveConfig,
     stripe_source::{ArchiveStripeSource, StripeSource, StripeSourceBuilder},
@@ -24,7 +24,7 @@ pub fn export_archive(config: &ExportArchiveConfig, target: &Path) -> Result<()>
 
     let sector_count = source.sector_count();
     let stripe_sector_count = source.stripe_sector_count();
-    let total_bytes = sector_count * SECTOR_SIZE as u64;
+    let total_bytes = sector_count * STRIPE_SECTOR_SIZE as u64;
     info!(
         "exporting archive: {} sectors, {} bytes",
         sector_count, total_bytes
@@ -37,7 +37,7 @@ pub fn export_archive(config: &ExportArchiveConfig, target: &Path) -> Result<()>
     }
 
     let stripe_count = sector_count.div_ceil(stripe_sector_count) as usize;
-    let stripe_size = stripe_sector_count as usize * SECTOR_SIZE;
+    let stripe_size = stripe_sector_count as usize * STRIPE_SECTOR_SIZE;
 
     let mut file = File::create(target).map_err(|e| crate::ubiblk_error!(IoError { source: e }))?;
 
@@ -104,7 +104,7 @@ mod tests {
     use super::*;
     use crate::{
         archive::{ArchiveCompressionAlgorithm, MemStore, StripeArchiver},
-        backends::SECTOR_SIZE,
+        block_device::STRIPE_SECTOR_SIZE,
         block_device::{
             bdev_test::TestBlockDevice, metadata_flags, shared_buffer, BlockDevice, UbiMetadata,
         },
@@ -127,12 +127,12 @@ mod tests {
     #[test]
     fn an_archive_of_a_device_ending_mid_stripe_rounds_up() {
         let kek = KeyEncryptionCipher::default();
-        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * STRIPE_SECTOR_SIZE;
         let bdev = Box::new(TestBlockDevice::new(
-            2 * stripe_len as u64 - SECTOR_SIZE as u64,
+            2 * stripe_len as u64 - STRIPE_SECTOR_SIZE as u64,
         ));
         bdev.write(0, &vec![0xAAu8; stripe_len], stripe_len);
-        let tail = vec![0xBBu8; stripe_len - SECTOR_SIZE];
+        let tail = vec![0xBBu8; stripe_len - STRIPE_SECTOR_SIZE];
         bdev.write(stripe_len, &tail, tail.len());
 
         let mut metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, 2, 0);
@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(completions, vec![(1, true)]);
 
         let mut expected = tail.clone();
-        expected.extend(vec![0u8; SECTOR_SIZE]);
+        expected.extend(vec![0u8; STRIPE_SECTOR_SIZE]);
         assert_eq!(buffer.borrow().as_slice(), expected.as_slice());
     }
 
@@ -184,31 +184,34 @@ mod tests {
             metadata.stripe_headers[stripe_id] |= metadata_flags::WRITTEN;
         }
 
-        let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * SECTOR_SIZE) as u64;
+        let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * STRIPE_SECTOR_SIZE) as u64;
         let disk_bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(bdev_size));
 
-        let image_bdev_size = STRIPE_SECTOR_COUNT * (image_stripe_count * SECTOR_SIZE) as u64;
+        let image_bdev_size =
+            STRIPE_SECTOR_COUNT * (image_stripe_count * STRIPE_SECTOR_SIZE) as u64;
         let image_bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(image_bdev_size));
 
         // Fill image with known data
         for stripe_id in 0..image_stripe_count {
             for sector in 0..STRIPE_SECTOR_COUNT {
-                let offset = (stripe_id as u64 * STRIPE_SECTOR_COUNT + sector) * SECTOR_SIZE as u64;
+                let offset =
+                    (stripe_id as u64 * STRIPE_SECTOR_COUNT + sector) * STRIPE_SECTOR_SIZE as u64;
                 let byte = ((stripe_id + sector as usize) % 256) as u8;
-                let buf = vec![byte; SECTOR_SIZE];
+                let buf = vec![byte; STRIPE_SECTOR_SIZE];
                 let mut mem = image_bdev.mem.write().unwrap();
-                mem[offset as usize..offset as usize + SECTOR_SIZE].copy_from_slice(&buf);
+                mem[offset as usize..offset as usize + STRIPE_SECTOR_SIZE].copy_from_slice(&buf);
             }
         }
 
         // Fill disk with different data for written stripes
         for stripe_id in 0..bdev_stripe_count {
             for sector in 0..STRIPE_SECTOR_COUNT {
-                let offset = (stripe_id as u64 * STRIPE_SECTOR_COUNT + sector) * SECTOR_SIZE as u64;
+                let offset =
+                    (stripe_id as u64 * STRIPE_SECTOR_COUNT + sector) * STRIPE_SECTOR_SIZE as u64;
                 let byte = ((3 + stripe_id + sector as usize) % 256) as u8;
-                let buf = vec![byte; SECTOR_SIZE];
+                let buf = vec![byte; STRIPE_SECTOR_SIZE];
                 let mut mem = disk_bdev.mem.write().unwrap();
-                mem[offset as usize..offset as usize + SECTOR_SIZE].copy_from_slice(&buf);
+                mem[offset as usize..offset as usize + STRIPE_SECTOR_SIZE].copy_from_slice(&buf);
             }
         }
 
@@ -236,9 +239,9 @@ mod tests {
         let sector_count = source.sector_count();
         let stripe_sector_count = source.stripe_sector_count();
         let stripe_count = sector_count.div_ceil(stripe_sector_count) as usize;
-        let stripe_size = stripe_sector_count as usize * SECTOR_SIZE;
+        let stripe_size = stripe_sector_count as usize * STRIPE_SECTOR_SIZE;
 
-        let mut exported = vec![0u8; sector_count as usize * SECTOR_SIZE];
+        let mut exported = vec![0u8; sector_count as usize * STRIPE_SECTOR_SIZE];
         let mut next_submit = 0usize;
         let mut written = 0usize;
         let mut in_flight: HashMap<usize, SharedBuffer> = HashMap::new();
@@ -271,9 +274,10 @@ mod tests {
         // Verify: written stripes should have disk data, others have image data
         for stripe_id in 0..bdev_stripe_count {
             for sector in 0..STRIPE_SECTOR_COUNT {
-                let offset = (stripe_id as u64 * STRIPE_SECTOR_COUNT + sector) * SECTOR_SIZE as u64;
+                let offset =
+                    (stripe_id as u64 * STRIPE_SECTOR_COUNT + sector) * STRIPE_SECTOR_SIZE as u64;
                 let expected = ((3 + stripe_id + sector as usize) % 256) as u8;
-                for b in &exported[offset as usize..offset as usize + SECTOR_SIZE] {
+                for b in &exported[offset as usize..offset as usize + STRIPE_SECTOR_SIZE] {
                     assert_eq!(
                         *b, expected,
                         "mismatch at stripe {stripe_id}, sector {sector}"

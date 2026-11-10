@@ -9,7 +9,7 @@ use crate::{
         ArchiveMetadata, StripeContentMap, StripeContentSpecifier, ARCHIVE_FORMAT_VERSION,
         DEFAULT_ARCHIVE_TIMEOUT,
     },
-    backends::SECTOR_SIZE,
+    block_device::STRIPE_SECTOR_SIZE,
     block_device::{metadata_flags, BlockDevice, IoChannel, SharedBuffer, UbiMetadata},
     crypt::XtsBlockCipher,
     error::ResultExt,
@@ -65,7 +65,7 @@ impl StripeArchiver {
         let buffer_pool = AlignedBufferPool::new(
             BUFFER_ALIGNMENT,
             concurrency,
-            metadata.stripe_sector_count() as usize * SECTOR_SIZE,
+            metadata.stripe_sector_count() as usize * STRIPE_SECTOR_SIZE,
         );
         Ok(Self {
             stripe_source,
@@ -197,7 +197,7 @@ impl StripeArchiver {
                     .stripe_sector_count()
                     .min(self.device_sector_count.saturating_sub(offset)) as u32;
             // Pooled buffers come back with the last stripe's bytes in them.
-            buffer.borrow_mut().as_mut_slice()[sectors as usize * SECTOR_SIZE..].fill(0);
+            buffer.borrow_mut().as_mut_slice()[sectors as usize * STRIPE_SECTOR_SIZE..].fill(0);
             self.io_channel.add_read(offset, sectors, buffer, stripe_id);
             self.io_channel.submit()?;
         } else {
@@ -227,10 +227,10 @@ impl StripeArchiver {
     fn maybe_encrypt(&mut self, stripe_id: usize, buffer: &mut [u8]) {
         let sector_offset = self.stripe_offset(stripe_id);
         assert!(
-            buffer.len().is_multiple_of(SECTOR_SIZE),
+            buffer.len().is_multiple_of(STRIPE_SECTOR_SIZE),
             "Buffer length must be a multiple of sector size"
         );
-        let sector_count = buffer.len() as u64 / SECTOR_SIZE as u64;
+        let sector_count = buffer.len() as u64 / STRIPE_SECTOR_SIZE as u64;
         if let Some(block_cipher) = self.block_cipher.as_mut() {
             block_cipher.encrypt(buffer, sector_offset, sector_count);
         }
@@ -411,7 +411,7 @@ mod tests {
         encrypted: bool,
         fail_stripe_fetches: Vec<usize>,
     ) -> (StripeArchiver, Box<MemStore>) {
-        let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * SECTOR_SIZE) as u64;
+        let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * STRIPE_SECTOR_SIZE) as u64;
         let metadata = UbiMetadata::new(
             STRIPE_SECTOR_COUNT_SHIFT,
             bdev_stripe_count,
@@ -428,8 +428,8 @@ mod tests {
             } else {
                 (stripe_id % 3) as u8
             };
-            let buf = [byte; STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE];
-            let len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+            let buf = [byte; STRIPE_SECTOR_COUNT as usize * STRIPE_SECTOR_SIZE];
+            let len = STRIPE_SECTOR_COUNT as usize * STRIPE_SECTOR_SIZE;
             let offset = stripe_id * len;
             bdev.write(offset, buf.as_slice(), len);
         }
@@ -477,12 +477,12 @@ mod tests {
 
     #[test]
     fn archives_a_final_stripe_the_device_only_partly_holds() {
-        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * STRIPE_SECTOR_SIZE;
         let bdev = Box::new(TestBlockDevice::new(
-            2 * stripe_len as u64 - SECTOR_SIZE as u64,
+            2 * stripe_len as u64 - STRIPE_SECTOR_SIZE as u64,
         ));
         bdev.write(0, &vec![0xAAu8; stripe_len], stripe_len);
-        let tail = vec![0xBBu8; stripe_len - SECTOR_SIZE];
+        let tail = vec![0xBBu8; stripe_len - STRIPE_SECTOR_SIZE];
         bdev.write(stripe_len, &tail, tail.len());
 
         let mut metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, 2, 0);
@@ -509,19 +509,19 @@ mod tests {
         let key = archiver.object_key(expect_hash(&archiver.stripe_hashes, 1));
         let archived = store.get_object(&key, Duration::from_secs(5)).unwrap();
         let mut expected = tail.clone();
-        expected.extend(vec![0u8; SECTOR_SIZE]);
+        expected.extend(vec![0u8; STRIPE_SECTOR_SIZE]);
         assert_eq!(archived, expected);
     }
 
     #[test]
     fn archives_a_final_stripe_the_image_only_partly_holds() {
-        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * STRIPE_SECTOR_SIZE;
         let bdev = Box::new(TestBlockDevice::new(2 * stripe_len as u64));
         let image = Box::new(TestBlockDevice::new(
-            2 * stripe_len as u64 - SECTOR_SIZE as u64,
+            2 * stripe_len as u64 - STRIPE_SECTOR_SIZE as u64,
         ));
         image.write(0, &vec![0xAAu8; stripe_len], stripe_len);
-        let tail = vec![0xBBu8; stripe_len - SECTOR_SIZE];
+        let tail = vec![0xBBu8; stripe_len - STRIPE_SECTOR_SIZE];
         image.write(stripe_len, &tail, tail.len());
 
         let metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, 2, 2);
@@ -544,7 +544,7 @@ mod tests {
         let key = archiver.object_key(expect_hash(&archiver.stripe_hashes, 1));
         let archived = store.get_object(&key, Duration::from_secs(5)).unwrap();
         let mut expected = tail.clone();
-        expected.extend(vec![0u8; SECTOR_SIZE]);
+        expected.extend(vec![0u8; STRIPE_SECTOR_SIZE]);
         assert_eq!(archived, expected);
     }
 
@@ -660,9 +660,9 @@ mod tests {
             auth_data: Some(b"ubiblk_test_hmac".to_vec()),
         };
         let metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, 2, 0);
-        let bdev_size = STRIPE_SECTOR_COUNT * (2 * SECTOR_SIZE) as u64;
+        let bdev_size = STRIPE_SECTOR_COUNT * (2 * STRIPE_SECTOR_SIZE) as u64;
         let bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(bdev_size));
-        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * STRIPE_SECTOR_SIZE;
         bdev.write(0, vec![0xAA; stripe_len].as_slice(), stripe_len);
 
         let stripe_source =
@@ -716,10 +716,10 @@ mod tests {
     #[test]
     fn test_zero_stripe_skips_upload() {
         let bdev_stripe_count = 4;
-        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * STRIPE_SECTOR_SIZE;
         let stripe_id = 1;
         let metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, bdev_stripe_count, 0);
-        let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * SECTOR_SIZE) as u64;
+        let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * STRIPE_SECTOR_SIZE) as u64;
         let bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(bdev_size));
         let stripe_source =
             BlockDeviceStripeSource::new(bdev.clone(), STRIPE_SECTOR_COUNT).unwrap();
@@ -785,9 +785,9 @@ mod tests {
     #[test]
     fn test_archive_all_fails_when_all_selected_stripes_are_zero() {
         let bdev_stripe_count = 4;
-        let stripe_len = STRIPE_SECTOR_COUNT as usize * SECTOR_SIZE;
+        let stripe_len = STRIPE_SECTOR_COUNT as usize * STRIPE_SECTOR_SIZE;
         let metadata = UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, bdev_stripe_count, 0);
-        let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * SECTOR_SIZE) as u64;
+        let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * STRIPE_SECTOR_SIZE) as u64;
         let bdev: Box<TestBlockDevice> = Box::new(TestBlockDevice::new(bdev_size));
         let stripe_source =
             BlockDeviceStripeSource::new(bdev.clone(), STRIPE_SECTOR_COUNT).unwrap();

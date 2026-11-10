@@ -256,7 +256,7 @@ impl StripeSourceBuilder {
 mod tests {
     use super::*;
     use crate::archive::{ArchiveCompressionAlgorithm, StripeArchiver};
-    use crate::backends::SECTOR_SIZE;
+    use crate::block_device::STRIPE_SECTOR_SIZE;
     use crate::block_device::{
         bdev_test::TestBlockDevice, metadata_flags, shared_buffer, UbiMetadata,
     };
@@ -336,7 +336,7 @@ mod tests {
     fn test_build_archive_checks_stripe_sector_count() {
         let dir = tempdir().unwrap();
         let stripe_sectors = 8;
-        let stripe_size = stripe_sectors as usize * SECTOR_SIZE;
+        let stripe_size = stripe_sectors as usize * STRIPE_SECTOR_SIZE;
         let device = TestBlockDevice::new(stripe_size as u64);
         let data = vec![0xAB; stripe_size];
         device.write(0, &data, data.len());

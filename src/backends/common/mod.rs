@@ -147,6 +147,16 @@ impl BackendEnv {
         alignment: usize,
     ) -> Result<Self> {
         let metadata = UbiMetadata::load_from_bdev(metadata_device.as_ref())?;
+        if metadata.sector_size() != disk_device.logical_sector_size() {
+            return Err(crate::ubiblk_error!(MetadataError {
+                description: format!(
+                    "Metadata was initialized for {}-byte sectors, but {} has {}-byte sectors",
+                    metadata.sector_size(),
+                    config.device.data_path.display(),
+                    disk_device.logical_sector_size()
+                ),
+            }));
+        }
         let shared_state = SharedMetadataState::new(&metadata);
         let status_reporter = StatusReporter::new(shared_state.clone(), disk_device.sector_count());
 
@@ -379,7 +389,8 @@ pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Resu
             base_stripe_count,
             stripe_source.as_ref(),
         )
-    };
+    }
+    .with_sector_size(disk_bdev.logical_sector_size())?;
 
     ensure_metadata_file(metadata_path, metadata.metadata_size())?;
 
@@ -619,7 +630,10 @@ mod tests {
     fn backend_starts_with_fetched_stripes_and_unavailable_source() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("metadata"), []).unwrap();
-        let mut metadata = UbiMetadata::new(3, 2, 2);
+        let sector_size = block_device::detect_sector_size(&dir.path().join("metadata")).unwrap();
+        let mut metadata = UbiMetadata::new(3, 2, 2)
+            .with_sector_size(sector_size)
+            .unwrap();
         for header in &mut metadata.stripe_headers {
             *header |= block_device::metadata_flags::FETCHED;
         }
@@ -922,6 +936,149 @@ source.inline = "test-credentials"
 
         let config = test_config(disk_file.path(), Some(metadata_file.path()), None);
         init_metadata(&config, 11).unwrap();
+    }
+
+    /// Reads and writes through the whole stack over real files, in sectors
+    /// of whatever size their device has.
+    #[test]
+    fn backend_serves_io_in_the_sectors_of_the_disk() {
+        use crate::block_device::{shared_buffer, wait_for_completion};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (disk, image, metadata) = (
+            dir.path().join("disk"),
+            dir.path().join("image"),
+            dir.path().join("metadata"),
+        );
+        let stripe_size = 1024 * 1024;
+        let image_bytes: Vec<u8> = (0..2 * stripe_size).map(|i| (i / 4096) as u8).collect();
+        std::fs::write(&image, &image_bytes).unwrap();
+        std::fs::write(&disk, vec![0; 4 * stripe_size]).unwrap();
+
+        let config = test_config(
+            &disk,
+            Some(&metadata),
+            Some(StripeSourceConfig::Raw {
+                image_path: image,
+                autofetch: false,
+                copy_on_read: true,
+            }),
+        );
+        init_metadata(&config, 11).unwrap();
+
+        let mut env = BackendEnv::build(&config).unwrap();
+        env.run_bgworker_thread().unwrap();
+        let bdev = env.bdev();
+        let sector_size = bdev.logical_sector_size();
+        let sectors = (sector_size / SECTOR_SIZE) as u32;
+        assert_eq!(bdev.sector_count(), (4 * stripe_size / SECTOR_SIZE) as u64);
+        let mut channel = bdev.create_channel().unwrap();
+        let timeout = Duration::from_secs(10);
+
+        // The last sector of stripe 1 comes from the image.
+        let sector = ((2 * stripe_size - sector_size) / SECTOR_SIZE) as u64;
+        let buf = shared_buffer(sector_size);
+        channel.add_read(sector, sectors, buf.clone(), 1);
+        channel.submit().unwrap();
+        wait_for_completion(channel.as_mut(), 1, timeout).unwrap();
+        assert_eq!(
+            buf.borrow().as_slice(),
+            &image_bytes[2 * stripe_size - sector_size..]
+        );
+
+        // Overwrite it and the first sector of stripe 2, past the image.
+        let buf = shared_buffer(2 * sector_size);
+        buf.borrow_mut().as_mut_slice().fill(0x5a);
+        channel.add_write(sector, 2 * sectors, buf.clone(), 2);
+        channel.submit().unwrap();
+        wait_for_completion(channel.as_mut(), 2, timeout).unwrap();
+        channel.add_flush(3);
+        channel.submit().unwrap();
+        wait_for_completion(channel.as_mut(), 3, timeout).unwrap();
+        drop(channel);
+        drop(env);
+
+        let mut expected = vec![0; 4 * stripe_size];
+        expected[stripe_size..2 * stripe_size].copy_from_slice(&image_bytes[stripe_size..]);
+        expected[2 * stripe_size - sector_size..2 * stripe_size + sector_size].fill(0x5a);
+        assert!(std::fs::read(&disk).unwrap() == expected);
+
+        let stored = UbiMetadata::from_bytes(&std::fs::read(&metadata).unwrap()).unwrap();
+        let fetched = block_device::metadata_flags::FETCHED;
+        assert_eq!(stored.sector_size(), sector_size);
+        assert_eq!(stored.stripe_headers[0] & fetched, 0);
+        assert_ne!(stored.stripe_headers[1] & fetched, 0);
+    }
+
+    #[test]
+    fn init_metadata_records_the_sector_size_of_the_disk() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+        let metadata_file = tempfile::NamedTempFile::new().unwrap();
+
+        let config = test_config(disk_file.path(), Some(metadata_file.path()), None);
+        init_metadata(&config, 11).unwrap();
+
+        let disk = build_block_device(disk_file.path(), &config, false).unwrap();
+        let metadata =
+            UbiMetadata::from_bytes(&std::fs::read(metadata_file.path()).unwrap()).unwrap();
+        assert_ne!(metadata.sector_size_shift, 0);
+        assert_eq!(metadata.sector_size(), disk.logical_sector_size());
+        BackendEnv::build(&config).unwrap();
+    }
+
+    #[test]
+    fn backend_refuses_metadata_for_another_sector_size() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+        let metadata_file = tempfile::NamedTempFile::new().unwrap();
+
+        let config = test_config(disk_file.path(), Some(metadata_file.path()), None);
+        init_metadata(&config, 11).unwrap();
+
+        let mut bytes = std::fs::read(metadata_file.path()).unwrap();
+        let metadata = UbiMetadata::from_bytes(&bytes).unwrap();
+        let other_sector_size = if metadata.sector_size() == 512 {
+            4096
+        } else {
+            512
+        };
+        metadata
+            .with_sector_size(other_sector_size)
+            .unwrap()
+            .write_to_buf(&mut bytes)
+            .unwrap();
+        std::fs::write(metadata_file.path(), bytes).unwrap();
+
+        let err = BackendEnv::build(&config).err().unwrap().to_string();
+        assert!(
+            err.contains(&format!(
+                "Metadata was initialized for {other_sector_size}-byte sectors"
+            )),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Metadata that predates the recorded sector size is for 512 bytes.
+    #[test]
+    fn metadata_without_a_sector_size_only_fits_512_byte_sectors() {
+        let build = |sector_size: usize| {
+            let config = test_config(Path::new("disk"), Some(Path::new("metadata")), None);
+            let disk = TestBlockDevice::new(1024 * 1024).with_logical_sector_size(sector_size);
+            let metadata_dev = TestBlockDevice::new(1024 * 1024);
+            let metadata = UbiMetadata::new(11, 1, 0);
+            assert_eq!(metadata.sector_size_shift, 0);
+            metadata.save_to_bdev(&metadata_dev).unwrap();
+            BackendEnv::build_with_bgworker(Box::new(disk), Box::new(metadata_dev), &config, 4096)
+        };
+
+        assert!(build(512).is_ok());
+        let err = build(4096).err().unwrap().to_string();
+        assert!(
+            err.contains("Metadata was initialized for 512-byte sectors"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

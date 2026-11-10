@@ -141,8 +141,8 @@ $ echo '{"command": "status"}' | nc -U -q 0 /path/to/rpc.sock | jq .
 
 When a stripe source and `metadata_path` are provided, the backend copies data
 from the stripe source to the base device in units called *stripes*. The size of a
-stripe is `2^stripe-sector-count-shift` sectors and the status of every stripe
-is recorded in the metadata file.
+stripe is `2^stripe-sector-count-shift` 512-byte sectors and the status of every
+stripe is recorded in the metadata file.
 
 If a write operation is issued to a stripe that has not been fetched yet, the
 backend will first copy the stripe from the stripe source to the base device and
@@ -167,6 +167,31 @@ a small portion of the device. Autofetch can also be switched on later for a
 running backend with the `start_autofetch` RPC command; see
 [docs/rpc.md](docs/rpc.md).
 
+### Sector size
+
+The disk has the logical sector size of the device that holds `data_path`: 512
+bytes, or 4096 bytes on a drive formatted with 4 KiB logical sectors. It is
+detected when the disk is opened, from the block device the file is on (a file
+that is not on a local block device, such as one on a network filesystem, has
+512-byte sectors), and is the logical block size the guest sees. `metadata_path` and a raw image may be on
+devices with other sector sizes, as long as the image's is not larger than the
+disk's. With the ublk backend, `seg_size_max` must be a multiple of the sector
+size.
+
+`init-metadata` records the sector size in the metadata, and the backend
+refuses to start if the disk no longer has it, as it would after moving the
+files to a drive with a different sector size: the guest's partition table and
+filesystems depend on it. Metadata created by versions that did not record it
+is for 512-byte sectors.
+
+Stripe sizes do not depend on the sector size. `stripe-sector-count-shift`
+always counts 512-byte units, so the default of 11 is 1 MiB, and the archive
+format and the remote stripe protocol are the same whatever the sector size.
+Neither records the sector size, so restore or fetch a volume onto a disk with
+the sector size it was written with. A stripe cannot be smaller than a sector,
+and the sizes of the disk and of a raw image must be multiples of the sector
+size of their device.
+
 ## init-metadata
 
 Initialises the metadata file required when running the backend in lazy stripe
@@ -182,7 +207,7 @@ init-metadata --config <CONFIG_TOML> [--stripe-sector-count-shift <SHIFT>]
 | Flag | Short | Required | Description |
 |------|-------|----------|-------------|
 | `--config` | `-f` | yes | Path to the backend configuration file |
-| `--stripe-sector-count-shift` | `-s` | no | Stripe size as a power of two sectors (default: 11) |
+| `--stripe-sector-count-shift` | `-s` | no | Stripe size as a power of two 512-byte sectors (default: 11) |
 
 ## Developer Tools
 

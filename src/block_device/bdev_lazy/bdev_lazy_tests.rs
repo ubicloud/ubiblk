@@ -581,4 +581,30 @@ mod tests {
         assert_eq!(results, vec![(1, false)]);
         assert_eq!(target_metrics.read().unwrap().writes, 0);
     }
+
+    #[test]
+    fn an_image_with_larger_sectors_than_the_disk_is_rejected() {
+        let build = |disk_sector_size: usize, image_sector_size: usize| {
+            let metadata_state = SharedMetadataState::new(&UbiMetadata::new(4, 1, 1));
+            let (bgworker_ch, _bgworker_rx) = channel();
+            LazyBlockDevice::new(
+                Box::new(TestBlockDevice::new(8192).with_logical_sector_size(disk_sector_size)),
+                Some(Box::new(
+                    TestBlockDevice::new(8192).with_logical_sector_size(image_sector_size),
+                )),
+                bgworker_ch,
+                metadata_state,
+                false,
+                false,
+            )
+        };
+
+        assert!(build(4096, 512).is_ok());
+        assert!(build(4096, 4096).is_ok());
+        let err = build(512, 4096).err().unwrap().to_string();
+        assert!(
+            err.contains("Image has 4096-byte sectors"),
+            "unexpected error: {err}"
+        );
+    }
 }

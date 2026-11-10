@@ -3,7 +3,7 @@ use std::{os::unix::fs::MetadataExt, path::Path};
 use log::info;
 use ubiblk_macros::error_context;
 
-use super::{build_block_device, ensure_metadata_file};
+use super::{build_block_device, ensure_metadata_file, SECTOR_SIZE};
 use crate::{config::v2, stripe_source::StripeSourceBuilder, Result, ResultExt};
 
 /// Upgrade a v0.2.x volume in place: read its legacy metadata and write the
@@ -38,9 +38,11 @@ pub fn convert_legacy_metadata(config: &v2::Config, legacy_metadata_path: &Path)
         false,
     )
     .build()?;
+    // Legacy volumes always had 512-byte sectors, whatever disk the data is
+    // on now. Recording that makes the backend refuse any other disk.
     let metadata = legacy
         .convert(|stripe_id| stripe_source.has_stripe(stripe_id))?
-        .with_sector_size(disk_bdev.logical_sector_size())?;
+        .with_sector_size(SECTOR_SIZE)?;
 
     ensure_metadata_file(metadata_path, metadata.metadata_size())?;
     let metadata_bdev = build_block_device(metadata_path, config, false)
@@ -92,7 +94,7 @@ fn ensure_not_an_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::common::{tests::test_config, SECTOR_SIZE};
+    use crate::backends::common::tests::test_config;
     use crate::block_device::UbiMetadata;
     use crate::config::v2::stripe_source::StripeSourceConfig;
 
@@ -130,6 +132,8 @@ mod tests {
         let metadata =
             UbiMetadata::from_bytes(&std::fs::read(dir.path().join("metadata")).unwrap()).unwrap();
         assert_eq!(metadata.stripe_sector_count_shift, 4);
+        // Not the sector size of the disk the files are on now.
+        assert_eq!(metadata.sector_size_shift, 9);
         assert_eq!(
             metadata.stripe_headers,
             vec![HAS_SOURCE, HAS_SOURCE | FETCHED, HAS_SOURCE, 0]

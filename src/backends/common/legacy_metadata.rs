@@ -206,7 +206,8 @@ mod tests {
             bytes[13] = 3;
         }
         let mut ch = legacy_bdev.create_channel().unwrap();
-        ch.add_write(0, 8, buf, 0);
+        // The kernel reads the buffer until the write completes.
+        ch.add_write(0, 8, buf.clone(), 0);
         ch.submit().unwrap();
         wait_for_completion(ch.as_mut(), 0, std::time::Duration::from_secs(5)).unwrap();
         assert_ne!(

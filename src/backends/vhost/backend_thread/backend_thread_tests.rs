@@ -192,6 +192,7 @@ mod tests {
             gm,
             io_channel,
             device.sector_count(),
+            device.logical_sector_size(),
             &config,
             BUFFER_ALIGNMENT,
             IoTracker::new(64),
@@ -223,6 +224,7 @@ mod tests {
             gm,
             io_channel,
             lazy.sector_count(),
+            lazy.logical_sector_size(),
             &config,
             BUFFER_ALIGNMENT,
             IoTracker::new(64),
@@ -998,5 +1000,65 @@ mod tests {
         assert_eq!(status_val, VIRTIO_BLK_S_IOERR as u8);
         let metrics = device.metrics.read().unwrap();
         assert_eq!(metrics.reads, 0);
+    }
+
+    #[test]
+    fn requests_smaller_than_a_4096_byte_sector_are_rejected() {
+        const BLOCK: usize = 4096;
+        let (gm, mem) = setup_mem();
+        let mut config = default_config("img");
+        config.tuning.seg_size_max = BLOCK as u32;
+        let device = TestBlockDevice::new(4 * BLOCK as u64).with_logical_sector_size(BLOCK);
+        let pattern: Vec<u8> = (0..4 * BLOCK).map(|i| (i / SECTOR_SIZE) as u8).collect();
+        device.write(0, &pattern, pattern.len());
+        let mut thread = UbiBlkBackendThread::new(
+            gm,
+            device.create_channel().unwrap(),
+            device.sector_count(),
+            device.logical_sector_size(),
+            &config,
+            BUFFER_ALIGNMENT,
+            IoTracker::new(64),
+        )
+        .unwrap();
+        let mut run = |request_type, sector, len: usize, flags| {
+            let queue = MockSplitQueue::new(&mem, 16);
+            let vring = setup_vring_with_queue(&mem, 16, &queue);
+            let addrs = setup_queue_request(
+                &mem,
+                &queue,
+                0x1000,
+                request_type,
+                sector,
+                len as u32,
+                flags,
+            );
+            mem.write_slice(&vec![0xee; len], addrs.data).unwrap();
+            assert!(thread.process_queue(&mut vring.get_mut()));
+            mem.read_obj::<u8>(addrs.status).unwrap()
+        };
+
+        // One 512-byte sector inside the second block, by itself or with
+        // the 3.5 KiB after it.
+        for len in [SECTOR_SIZE, BLOCK] {
+            assert_eq!(run(VIRTIO_BLK_T_OUT, 9, len, 0), VIRTIO_BLK_S_IOERR as u8);
+            assert_eq!(
+                run(VIRTIO_BLK_T_IN, 9, len, VRING_DESC_F_WRITE as u16),
+                VIRTIO_BLK_S_IOERR as u8
+            );
+        }
+        let metrics = device.metrics.read().unwrap();
+        assert_eq!((metrics.reads, metrics.writes), (0, 0));
+        drop(metrics);
+        let mut stored = vec![0; 4 * BLOCK];
+        device.read(0, &mut stored, 4 * BLOCK);
+        assert!(stored == pattern);
+
+        // A whole block is served.
+        assert_eq!(run(VIRTIO_BLK_T_OUT, 8, BLOCK, 0), VIRTIO_BLK_S_OK as u8);
+        device.read(0, &mut stored, 4 * BLOCK);
+        assert!(stored[BLOCK..2 * BLOCK].iter().all(|&b| b == 0xee));
+        assert!(stored[..BLOCK] == pattern[..BLOCK]);
+        assert!(stored[2 * BLOCK..] == pattern[2 * BLOCK..]);
     }
 }

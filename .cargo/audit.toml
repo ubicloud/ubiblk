@@ -25,4 +25,16 @@ ignore = [
   # (<3.2.0) is incompatible with libublk's requirement above.
   # https://rustsec.org/advisories/RUSTSEC-2025-0167.html
   "RUSTSEC-2025-0167",
+  # Checked on 2026-11-18 against chrono 0.4.45, cbor-diag 0.1.12,
+  # aws-smithy-protocol-test 0.64.0 and aws-smithy-http-client 1.5.3.
+  # Dependency path: ubiblk (dev) -> aws-smithy-mocks -> aws-smithy-http-client
+  # feature test-util -> aws-smithy-protocol-test -> cbor-diag -> chrono
+  # (cargo tree -i chrono -e all). chrono is unmaintained. Maintenance-status
+  # warning, not an exploitable vulnerability. It is only in test builds:
+  # cargo tree -i chrono -e normal finds no path, so release binaries do not
+  # contain it. The latest aws-smithy-protocol-test and cbor-diag still
+  # require chrono, so no dependency update removes it. Recheck when either
+  # drops chrono or aws-smithy-mocks stops enabling test-util.
+  # https://rustsec.org/advisories/RUSTSEC-2026-0543
+  "RUSTSEC-2026-0543",
 ]

@@ -22,6 +22,9 @@ archive --config <CONFIG_TOML> --target-config <TARGET_CONFIG_TOML> [options]
 | `--stats` | — | no | Optional path to write archive stats JSON |
 
 The ubiblk config (`--config`) must include a `metadata_path` in `[device]`.
+Archive only volumes with a persistent stripe map. A volume run with
+`allow_disposable_volume_optimizations` can produce a stale or incomplete archive
+even after a clean shutdown. See [Disposable volume optimizations](config.md#disposable-volume-optimizations).
 
 **Examples:**
 ```bash

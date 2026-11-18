@@ -106,7 +106,7 @@ jobs:
           run --write-through "$work/write-through" --rw verify-flush --bs 4k
 
       # 64k writes replace whole 64K stripes, skipping their fetch.
-      - name: Verify crash-unsafe copy-on-write
+      - name: Verify disposable volume copy-on-write
         run: |
           set -euo pipefail
           export PATH="$PWD/target/debug:$PWD/blkbench-src:$PATH"
@@ -115,14 +115,14 @@ jobs:
           head -c 256M /dev/urandom > "$work/base.raw"
           run() {
             scripts/blkbench-run --sector-size "$SECTOR_SIZE" \
-              --base "$work/base.raw" --stripe-size 64K --crash-unsafe "$@"
+              --base "$work/base.raw" --stripe-size 64K --disposable-volume "$@"
           }
           run "$work/flush-4k" --rw verify-flush --bs 4k
           run "$work/flush-64k" --rw verify-flush --bs 64k --verify-sectors 1:4
           run "$work/pipeline-4k" --rw verify-pipeline --bs 4k
           run "$work/pipeline-64k" --rw verify-pipeline --bs 64k
 
-      - name: Verify crash-unsafe copy-on-write with write-through
+      - name: Verify disposable volume copy-on-write with write-through
         run: |
           set -euo pipefail
           export PATH="$PWD/target/debug:$PWD/blkbench-src:$PATH"
@@ -131,7 +131,7 @@ jobs:
           head -c 256M /dev/urandom > "$work/base.raw"
           run() {
             scripts/blkbench-run --sector-size "$SECTOR_SIZE" \
-              --base "$work/base.raw" --stripe-size 64K --crash-unsafe --write-through "$@"
+              --base "$work/base.raw" --stripe-size 64K --disposable-volume --write-through "$@"
           }
           run "$work/flush-4k" --rw verify-flush --bs 4k
           run "$work/flush-64k" --rw verify-flush --bs 64k --verify-sectors 1:4

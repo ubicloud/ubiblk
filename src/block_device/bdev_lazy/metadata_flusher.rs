@@ -59,7 +59,7 @@ pub struct MetadataFlusher {
     /// Flush each update before publishing it. Without the flush, a crash can
     /// lose updates that the shared state already reflects.
     flush_updates: bool,
-    /// Persist stripe state to the metadata device. When false (crash-unsafe),
+    /// Persist stripe state to the metadata device. When false (disposable volume),
     /// the map is kept in the shared state only and never written to disk: a
     /// single-use volume is never resumed, so the on-disk copy buys nothing and
     /// its per-stripe block write is pure amplification.
@@ -410,7 +410,7 @@ mod tests {
             let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
             SharedMetadataState::new(&metadata)
         };
-        // persist = false: the crash-unsafe path.
+        // persist = false: the disposable volume path.
         let mut metadata_flusher =
             MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), false, false)
                 .unwrap();

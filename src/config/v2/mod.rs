@@ -77,16 +77,15 @@ pub struct DangerZone {
     pub allow_unencrypted_connection: bool,
     #[serde(default)]
     pub allow_env_secrets: bool,
-    /// Enable optimizations that leave the disk's contents undefined after a
-    /// crash of ubiblk or the host, such as skipping the source fetch for
-    /// stripes a write replaces entirely.
+    /// Optimize volumes that will be discarded when the backend exits. Stripe
+    /// map updates are lost even on a clean shutdown.
     #[serde(default)]
-    pub allow_crash_unsafe_optimizations: bool,
+    pub allow_disposable_volume_optimizations: bool,
 }
 
 impl DangerZone {
-    pub fn crash_unsafe_optimizations(&self) -> bool {
-        self.enabled && self.allow_crash_unsafe_optimizations
+    pub fn disposable_volume_optimizations(&self) -> bool {
+        self.enabled && self.allow_disposable_volume_optimizations
     }
 
     /// Returns the names of `allow_*` flags that are set to `true` but ignored
@@ -111,8 +110,8 @@ impl DangerZone {
         if self.allow_env_secrets {
             flags.push("allow_env_secrets");
         }
-        if self.allow_crash_unsafe_optimizations {
-            flags.push("allow_crash_unsafe_optimizations");
+        if self.allow_disposable_volume_optimizations {
+            flags.push("allow_disposable_volume_optimizations");
         }
         flags
     }
@@ -200,7 +199,7 @@ mod tests {
             allow_secret_over_regular_file: true,
             allow_unencrypted_connection: true,
             allow_env_secrets: true,
-            allow_crash_unsafe_optimizations: true,
+            allow_disposable_volume_optimizations: true,
         };
         let flags = dz.ignored_flags();
         assert_eq!(flags.len(), 6);
@@ -209,6 +208,6 @@ mod tests {
         assert!(flags.contains(&"allow_secret_over_regular_file"));
         assert!(flags.contains(&"allow_unencrypted_connection"));
         assert!(flags.contains(&"allow_env_secrets"));
-        assert!(flags.contains(&"allow_crash_unsafe_optimizations"));
+        assert!(flags.contains(&"allow_disposable_volume_optimizations"));
     }
 }

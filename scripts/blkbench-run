@@ -8,7 +8,7 @@
 set -euo pipefail
 
 init_args=()
-crash_unsafe=false
+disposable_volume=false
 write_through=false
 sector_size=
 while [[ $# -gt 0 ]]; do
@@ -22,8 +22,8 @@ while [[ $# -gt 0 ]]; do
       write_through=true
       shift
       ;;
-    --crash-unsafe)
-      crash_unsafe=true
+    --disposable-volume)
+      disposable_volume=true
       shift
       ;;
     --sector-size)
@@ -37,7 +37,7 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ $# -lt 1 ]]; then
   echo "usage: $0 [--base IMAGE] [--stripe-size SIZE] [--write-through]" \
-    "[--crash-unsafe] [--sector-size SIZE] DIR BLKBENCH_ARGS..." >&2
+    "[--disposable-volume] [--sector-size SIZE] DIR BLKBENCH_ARGS..." >&2
   exit 2
 fi
 dir=$1
@@ -45,9 +45,9 @@ shift
 
 python3 "$(dirname "$0")/ubiblk-init" --size 256M --dir "$dir" \
   --num-queues 4 --queue-size 256 --force "${init_args[@]}"
-if $crash_unsafe; then
-  sed -i 's/^\[danger_zone\]$/&\nallow_crash_unsafe_optimizations = true/' "$dir/config.toml"
-  grep -q '^allow_crash_unsafe_optimizations = true$' "$dir/config.toml"
+if $disposable_volume; then
+  sed -i 's/^\[danger_zone\]$/&\nallow_disposable_volume_optimizations = true/' "$dir/config.toml"
+  grep -q '^allow_disposable_volume_optimizations = true$' "$dir/config.toml"
 fi
 echo "== $dir/config.toml"
 cat "$dir/config.toml"
@@ -80,13 +80,13 @@ if [ -n "$sector_size" ] &&
   exit 1
 fi
 
-if $crash_unsafe && ! grep -q "Crash-unsafe optimizations are enabled" vhost-backend.log; then
-  echo "error: crash-unsafe optimizations are not enabled" >&2
+if $disposable_volume && ! grep -q "Disposable volume optimizations are enabled" vhost-backend.log; then
+  echo "error: disposable volume optimizations are not enabled" >&2
   exit 1
 fi
 
 expect_sync=false
-if $write_through && ! $crash_unsafe; then
+if $write_through && ! $disposable_volume; then
   expect_sync=true
 fi
 disk=$(realpath disk.raw)

@@ -148,9 +148,14 @@ mod tests {
         let mut metadata =
             UbiMetadata::new(DEFAULT_STRIPE_SECTOR_COUNT_SHIFT, stripe_count as usize, 0);
 
-        for i in 0..stripe_count as usize {
+        for (i, header) in metadata
+            .stripe_headers
+            .iter_mut()
+            .enumerate()
+            .take(stripe_count as usize)
+        {
             if i % 3 == 0 || i % 5 == 0 {
-                metadata.stripe_headers[i] |= metadata_flags::WRITTEN;
+                *header |= metadata_flags::WRITTEN;
             }
         }
 
@@ -195,8 +200,8 @@ mod tests {
         );
         assert_eq!(metadata.stripe_headers[2], metadata_flags::HAS_SOURCE);
         // No-source stripes are marked written.
-        for i in 3..6 {
-            assert_eq!(metadata.stripe_headers[i], metadata_flags::WRITTEN);
+        for header in &metadata.stripe_headers[3..6] {
+            assert_eq!(*header, metadata_flags::WRITTEN);
         }
     }
 
@@ -216,8 +221,8 @@ mod tests {
             image_stripe_count,
         );
         // The source stripes are already fetched (their data is in the overlay).
-        for i in 0..image_stripe_count {
-            metadata.stripe_headers[i] |= metadata_flags::FETCHED;
+        for header in metadata.stripe_headers.iter_mut().take(image_stripe_count) {
+            *header |= metadata_flags::FETCHED;
         }
         // One no-source stripe carries a real WRITTEN bit; the rest are 0 (an
         // untracked write is indistinguishable from a hole).

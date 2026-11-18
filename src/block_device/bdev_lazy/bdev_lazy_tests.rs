@@ -392,42 +392,56 @@ mod tests {
         assert_eq!(results, vec![(flush_id, true)]);
     }
 
-    /// Verify that on multi-stripe reads, we fetch stripes regardless of
-    /// whether copy-on-read is enabled or not.
+    /// Without copy-on-read, a read across unfetched stripes is served from
+    /// the image in one request, like a single-stripe one, copying nothing
+    /// into the target.
     #[test]
     fn test_copy_on_read_false_multistripe() {
         let env = setup_env(true, false, b"image_read");
         let mut chan = env.lazy.create_channel().unwrap();
 
         let read_buf: SharedBuffer = shared_buffer(SECTOR_SIZE * 4);
-        chan.add_read(STRIPE_SECTORS - 2, 4, read_buf.clone(), 1);
-        chan.submit().unwrap();
-        let results = drive(&env.bgworker, &mut chan);
-        assert_eq!(results, vec![(1, true)]);
-
-        {
-            let image_metrics = env.image_metrics.as_ref().unwrap().read().unwrap();
-            let target_metrics = env.target_metrics.read().unwrap();
-            assert_eq!(image_metrics.reads, 2);
-            assert_eq!(image_metrics.writes, 0);
-            assert_eq!(target_metrics.reads, 1);
-            assert_eq!(target_metrics.writes, 2);
+        for id in 1..=2 {
+            chan.add_read(STRIPE_SECTORS - 2, 4, read_buf.clone(), id);
+            chan.submit().unwrap();
+            assert_eq!(drive(&env.bgworker, &mut chan), vec![(id, true)]);
         }
 
-        // 2nd read should be served from target device
-        chan.add_read(STRIPE_SECTORS - 2, 4, read_buf.clone(), 2);
-        chan.submit().unwrap();
-        let results = drive(&env.bgworker, &mut chan);
-        assert_eq!(results, vec![(2, true)]);
+        let image_metrics = env.image_metrics.as_ref().unwrap().read().unwrap();
+        let target_metrics = env.target_metrics.read().unwrap();
+        assert_eq!(image_metrics.reads, 2);
+        assert_eq!((target_metrics.reads, target_metrics.writes), (0, 0));
+        assert!(!env.metadata_state.stripe_fetched(0));
+        assert!(!env.metadata_state.stripe_fetched(1));
+    }
 
-        {
-            let image_metrics = env.image_metrics.as_ref().unwrap().read().unwrap();
-            let target_metrics = env.target_metrics.read().unwrap();
-            assert_eq!(image_metrics.reads, 2);
-            assert_eq!(image_metrics.writes, 0);
-            assert_eq!(target_metrics.reads, 2);
-            assert_eq!(target_metrics.writes, 2);
-        }
+    /// A read that includes a fetched stripe fetches the rest, so the whole
+    /// read comes from the target.
+    #[test]
+    fn reads_over_mixed_stripes_fetch_the_unfetched_ones() {
+        let env = setup_env_with(true, false, true, b"image_read", DEV_SIZE);
+        let mut chan = env.lazy.create_channel().unwrap();
+        write_pattern(&mut chan, STRIPE_SECTORS, STRIPE_SECTORS, 1);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert_eq!(image_reads(&env), 0);
+
+        let sectors = 2 * STRIPE_SECTORS + 1;
+        let buf = shared_buffer(sectors as usize * SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice().fill(0xFF);
+        chan.add_read(0, sectors as u32, buf.clone(), 2);
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(2, true)]);
+
+        let stripe = STRIPE_SECTORS as usize * SECTOR_SIZE;
+        let data = buf.borrow();
+        let data = data.as_slice();
+        assert_eq!(&data[..10], b"image_read");
+        assert!(data[10..stripe].iter().all(|&b| b == 0));
+        assert!(data[stripe..2 * stripe].iter().all(|&b| b == 0x5a));
+        assert!(data[2 * stripe..].iter().all(|&b| b == 0));
+        assert_eq!(image_reads(&env), 2);
+        assert!(env.metadata_state.stripe_fetched(0));
+        assert!(env.metadata_state.stripe_fetched(2));
     }
 
     /// Verify that stripes are marked written when tracking is enabled.
@@ -510,6 +524,25 @@ mod tests {
         let results = drive(&env.bgworker, &mut chan);
 
         assert_eq!(results, vec![(2, false)]);
+    }
+
+    /// A read over an unfetched stripe and a failed one reports the failure
+    /// instead of being served from the image.
+    #[test]
+    fn reads_over_an_unfetched_and_a_failed_stripe_fail() {
+        let env = setup_env(true, false, b"image_read");
+        let mut chan = env.lazy.create_channel().unwrap();
+        env.metadata_state.set_stripe_failed(1);
+
+        let sectors = STRIPE_SECTORS + 1;
+        chan.add_read(
+            0,
+            sectors as u32,
+            shared_buffer(sectors as usize * SECTOR_SIZE),
+            1,
+        );
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, false)]);
     }
 
     #[test]

@@ -180,8 +180,8 @@ mod tests {
             bdev_stripe_count,
             image_stripe_count,
         );
-        for stripe_id in 0..bdev_stripe_count {
-            metadata.stripe_headers[stripe_id] |= metadata_flags::WRITTEN;
+        for header in metadata.stripe_headers.iter_mut().take(bdev_stripe_count) {
+            *header |= metadata_flags::WRITTEN;
         }
 
         let bdev_size = STRIPE_SECTOR_COUNT * (bdev_stripe_count * STRIPE_SECTOR_SIZE) as u64;

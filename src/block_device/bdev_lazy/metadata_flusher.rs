@@ -59,6 +59,11 @@ pub struct MetadataFlusher {
     /// Flush each update before publishing it. Without the flush, a crash can
     /// lose updates that the shared state already reflects.
     flush_updates: bool,
+    /// Persist stripe state to the metadata device. When false (crash-unsafe),
+    /// the map is kept in the shared state only and never written to disk: a
+    /// single-use volume is never resumed, so the on-disk copy buys nothing and
+    /// its per-stripe block write is pure amplification.
+    persist: bool,
 }
 
 impl MetadataFlusher {
@@ -67,6 +72,7 @@ impl MetadataFlusher {
         source_sector_count: u64,
         shared_state: SharedMetadataState,
         flush_updates: bool,
+        persist: bool,
     ) -> Result<Self> {
         let channel = metadata_dev.create_channel()?;
         let metadata = UbiMetadata::load_from_bdev(metadata_dev)?;
@@ -106,6 +112,7 @@ impl MetadataFlusher {
             failed_stripes: Vec::new(),
             header_updates: HashMap::new(),
             flush_updates,
+            persist,
         })
     }
 
@@ -118,6 +125,12 @@ impl MetadataFlusher {
     }
 
     pub fn set_stripe_fetched(&mut self, stripe_id: usize) {
+        if !self.persist {
+            self.metadata.stripe_headers[stripe_id] |= metadata_flags::FETCHED;
+            self.shared_state
+                .set_stripe_header(stripe_id, metadata_flags::FETCHED);
+            return;
+        }
         self.queued_requests.push_back(MetadataFlusherRequest {
             stripe_id,
             kind: MetadataFlusherRequestKind::SetFetched,
@@ -125,6 +138,12 @@ impl MetadataFlusher {
     }
 
     pub fn set_stripe_written(&mut self, stripe_id: usize) {
+        if !self.persist {
+            self.metadata.stripe_headers[stripe_id] |= metadata_flags::WRITTEN;
+            self.shared_state
+                .set_stripe_header(stripe_id, metadata_flags::WRITTEN);
+            return;
+        }
         self.queued_requests.push_back(MetadataFlusherRequest {
             stripe_id,
             kind: MetadataFlusherRequestKind::SetWritten,
@@ -322,7 +341,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true, true)
+                .unwrap();
 
         metadata_flusher.set_stripe_fetched(5);
         metadata_flusher.set_stripe_fetched(6);
@@ -357,7 +377,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), false).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), false, true)
+                .unwrap();
         let writes_before = metadata_dev.metrics.read().unwrap().writes;
         let flushes_before = metadata_dev.flushes();
 
@@ -383,6 +404,40 @@ mod tests {
     }
 
     #[test]
+    fn test_metadata_flusher_without_persistence() {
+        let metadata_dev = init_metadata_device();
+        let shared_state = {
+            let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+            SharedMetadataState::new(&metadata)
+        };
+        // persist = false: the crash-unsafe path.
+        let mut metadata_flusher =
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), false, false)
+                .unwrap();
+        let writes_before = metadata_dev.metrics.read().unwrap().writes;
+        let flushes_before = metadata_dev.flushes();
+
+        metadata_flusher.set_stripe_fetched(5);
+        metadata_flusher.set_stripe_fetched(6);
+        metadata_flusher.set_stripe_written(6);
+
+        // The shared state reflects the updates immediately, with no queued work.
+        assert!(shared_state.stripe_fetched(5));
+        assert!(shared_state.stripe_fetched(6));
+        assert!(shared_state.stripe_written(6));
+        assert!(!metadata_flusher.busy());
+
+        // Not a single write or flush reached the metadata device.
+        assert_eq!(metadata_dev.metrics.read().unwrap().writes, writes_before);
+        assert_eq!(metadata_dev.flushes(), flushes_before);
+
+        // Nothing was persisted: a fresh load still sees the stripes unset.
+        let metadata = UbiMetadata::load_from_bdev(&metadata_dev).expect("load metadata");
+        assert_eq!(metadata.stripe_headers[5] & metadata_flags::FETCHED, 0);
+        assert_eq!(metadata.stripe_headers[6] & metadata_flags::FETCHED, 0);
+    }
+
+    #[test]
     fn test_source_stripe_count_too_large() {
         let metadata_dev = init_metadata_device();
         let shared_state = {
@@ -390,7 +445,7 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 1024 * 1024 * 1024, shared_state, true);
+            MetadataFlusher::new(&metadata_dev, 1024 * 1024 * 1024, shared_state, true, true);
         assert!(metadata_flusher.is_err());
     }
 
@@ -402,7 +457,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true, true)
+                .unwrap();
 
         // Stripes 0-7 are in sector 1
         for stripe_id in 0..8 {
@@ -437,7 +493,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true, true)
+                .unwrap();
 
         // Queue a fetched request and inject a write failure
         metadata_flusher.set_stripe_fetched(5);
@@ -469,7 +526,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true, true)
+                .unwrap();
 
         // First, successfully set stripe 5 as fetched
         metadata_flusher.set_stripe_fetched(5);
@@ -503,7 +561,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true, true)
+                .unwrap();
         let (start_writes, start_flushes) = {
             let metrics = metadata_dev.metrics.read().unwrap();
             (metrics.writes, metrics.flushes)
@@ -536,7 +595,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true, true)
+                .unwrap();
 
         // Queue a request and make submit() fail
         metadata_flusher.set_stripe_fetched(5);
@@ -571,7 +631,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true, true)
+                .unwrap();
 
         // Queue a request and let the write complete normally
         metadata_flusher.set_stripe_fetched(5);
@@ -604,7 +665,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true, true)
+                .unwrap();
 
         // Queue a request and let the write complete normally
         metadata_flusher.set_stripe_fetched(5);
@@ -637,7 +699,8 @@ mod tests {
             SharedMetadataState::new(&metadata)
         };
         let mut metadata_flusher =
-            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true).unwrap();
+            MetadataFlusher::new(&metadata_dev, 8 * 1024, shared_state.clone(), true, true)
+                .unwrap();
 
         // Queue a request and let the write succeed
         metadata_flusher.set_stripe_fetched(5);
@@ -670,7 +733,7 @@ mod tests {
             .unwrap();
         let shared_state =
             SharedMetadataState::new(&UbiMetadata::load_from_bdev(&metadata_dev).unwrap());
-        let flusher = MetadataFlusher::new(&metadata_dev, 0, shared_state, true).unwrap();
+        let flusher = MetadataFlusher::new(&metadata_dev, 0, shared_state, true, true).unwrap();
         (flusher, metadata_dev)
     }
 

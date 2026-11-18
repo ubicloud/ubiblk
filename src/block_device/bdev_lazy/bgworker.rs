@@ -28,6 +28,7 @@ impl LazyTask {
             source_sector_count,
             metadata_state.clone(),
             !crash_unsafe_optimizations,
+            !crash_unsafe_optimizations,
         )?;
         let stripe_fetcher = StripeFetcher::new(
             stripe_source,

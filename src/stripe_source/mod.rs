@@ -12,6 +12,11 @@ pub trait StripeSource {
     fn sector_count(&self) -> u64;
     /// Does the stripe source have the given stripe?
     fn has_stripe(&self, stripe_id: usize) -> bool;
+    /// The sector size the source's data was laid out with, when the source
+    /// records one. A guest's partition offsets are counted in it.
+    fn sector_size(&self) -> Option<usize> {
+        None
+    }
 }
 
 mod archive;

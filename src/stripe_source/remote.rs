@@ -24,6 +24,7 @@ type FetchOutcome = (usize, Result<Vec<u8>>);
 struct MetadataFingerprint {
     stripe_sector_count: u64,
     stripe_count: usize,
+    sector_size: usize,
 }
 
 impl MetadataFingerprint {
@@ -31,6 +32,7 @@ impl MetadataFingerprint {
         Self {
             stripe_sector_count: metadata.stripe_sector_count(),
             stripe_count: metadata.stripe_headers.len(),
+            sector_size: metadata.sector_size(),
         }
     }
 }
@@ -136,6 +138,7 @@ fn fetch_with_reconnect(
 /// which makes the workers' `recv` return and the threads exit on their own.
 pub struct RemoteStripeSource {
     source_sector_count: u64,
+    sector_size: usize,
     remote_headers: Vec<u8>,
     request_tx: Sender<usize>,
     result_rx: Receiver<FetchOutcome>,
@@ -194,10 +197,7 @@ impl RemoteStripeSource {
             })?;
 
         let connection_count = clients.len();
-        let expected_fingerprint = MetadataFingerprint {
-            stripe_sector_count: remote_stripe_sector_count,
-            stripe_count: remote_headers.len(),
-        };
+        let expected_fingerprint = MetadataFingerprint::of(metadata);
         let (request_tx, request_rx) = unbounded::<usize>();
         let (result_tx, result_rx) = unbounded::<FetchOutcome>();
 
@@ -226,6 +226,7 @@ impl RemoteStripeSource {
 
         Ok(Self {
             source_sector_count,
+            sector_size: expected_fingerprint.sector_size,
             remote_headers,
             request_tx,
             result_rx,
@@ -318,6 +319,10 @@ impl StripeSource for RemoteStripeSource {
         let exists_on_remote_base_image =
             self.remote_headers[stripe_id] & metadata_flags::HAS_SOURCE != 0;
         written_on_remote || exists_on_remote_base_image
+    }
+
+    fn sector_size(&self) -> Option<usize> {
+        Some(self.sector_size)
     }
 }
 

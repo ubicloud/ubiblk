@@ -74,5 +74,5 @@ pub use bdev_null::NullBlockDevice;
 pub use bdev_sync::SyncBlockDevice;
 pub use bdev_uring::UringBlockDevice;
 pub use bgworker::{BgWorker, BgWorkerRequest};
-pub use sector_size::{detect_sector_size, sector_size_of};
+pub use sector_size::{detect_sector_size, detect_size, sector_size_of};
 pub use wait_for_completion::wait_for_completion;

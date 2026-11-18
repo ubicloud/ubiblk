@@ -1,6 +1,9 @@
 use std::{
     fs::Metadata,
-    os::unix::fs::{FileTypeExt, MetadataExt},
+    os::{
+        fd::AsRawFd,
+        unix::fs::{FileTypeExt, MetadataExt},
+    },
     path::Path,
 };
 
@@ -10,6 +13,26 @@ use crate::{backends::SECTOR_SIZE, utils::aligned_buffer::BUFFER_ALIGNMENT, Resu
 /// a block device, or of the device under a regular file.
 pub fn detect_sector_size(path: &Path) -> Result<usize> {
     sector_size_of(&std::fs::metadata(path)?)
+}
+
+nix::ioctl_read!(blkgetsize64, 0x12, 114, u64);
+
+/// The size in bytes of a regular file or block device. The size stat reports
+/// for a block device is zero.
+pub fn detect_size(path: &Path, metadata: &Metadata) -> Result<u64> {
+    if !metadata.file_type().is_block_device() {
+        return Ok(metadata.len());
+    }
+    let file = std::fs::File::open(path)?;
+    let mut size = 0u64;
+    // SAFETY: the fd is open for the duration of the call and BLKGETSIZE64
+    // writes a single u64 to `size`.
+    unsafe { blkgetsize64(file.as_raw_fd(), &mut size) }.map_err(|e| {
+        crate::ubiblk_error!(IoError {
+            source: std::io::Error::from(e),
+        })
+    })?;
+    Ok(size)
 }
 
 /// As `detect_sector_size`, for a file that is already open.
@@ -78,6 +101,14 @@ mod tests {
             detect_sector_size(Path::new("/proc/self/status")).unwrap(),
             SECTOR_SIZE
         );
+    }
+
+    #[test]
+    fn the_size_of_a_regular_file_is_its_length() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(3 * 4096).unwrap();
+        let metadata = file.as_file().metadata().unwrap();
+        assert_eq!(detect_size(file.path(), &metadata).unwrap(), 3 * 4096);
     }
 
     #[test]

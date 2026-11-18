@@ -140,6 +140,70 @@ mod tests {
         );
     }
 
+    struct LoopDevice(std::path::PathBuf);
+
+    impl LoopDevice {
+        fn attach_read_only(file: &Path) -> Self {
+            let output = std::process::Command::new("losetup")
+                .args(["--find", "--show", "--read-only"])
+                .arg(file)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            Self(String::from_utf8(output.stdout).unwrap().trim().into())
+        }
+    }
+
+    impl Drop for LoopDevice {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("losetup")
+                .arg("--detach")
+                .arg(&self.0)
+                .status();
+        }
+    }
+
+    #[test]
+    #[ignore = "attaches a loop device, which needs root"]
+    fn convert_legacy_metadata_on_a_block_device() {
+        use crate::block_device::metadata_flags::{FETCHED, HAS_SOURCE};
+        use crate::config::v2::tuning::IoEngine;
+
+        let dir = tempfile::tempdir().unwrap();
+        let stripe_size = 16 * SECTOR_SIZE;
+        std::fs::write(dir.path().join("disk"), vec![0; 4 * stripe_size]).unwrap();
+        std::fs::write(dir.path().join("image"), vec![0; 5 * stripe_size / 2]).unwrap();
+        write_v0_2_metadata(&dir.path().join("legacy"), 4, &[0, 1, 0, 1]);
+        let loop_device = LoopDevice::attach_read_only(&dir.path().join("disk"));
+
+        for engine in [IoEngine::IoUring, IoEngine::Sync] {
+            for data_path in [dir.path().join("disk"), loop_device.0.clone()] {
+                let metadata_path = dir.path().join("metadata");
+                let _ = std::fs::remove_file(&metadata_path);
+                let mut config = test_config(
+                    &data_path,
+                    Some(&metadata_path),
+                    Some(StripeSourceConfig::Raw {
+                        image_path: dir.path().join("image"),
+                        autofetch: false,
+                        copy_on_read: false,
+                    }),
+                );
+                config.tuning.io_engine = engine.clone();
+                convert_legacy_metadata(&config, &dir.path().join("legacy")).unwrap();
+
+                let metadata =
+                    UbiMetadata::from_bytes(&std::fs::read(&metadata_path).unwrap()).unwrap();
+                assert_eq!(
+                    metadata.stripe_headers,
+                    vec![HAS_SOURCE, HAS_SOURCE | FETCHED, HAS_SOURCE, 0],
+                    "{engine:?} on {}",
+                    data_path.display()
+                );
+            }
+        }
+    }
+
     #[test]
     fn convert_legacy_metadata_without_source() {
         let dir = tempfile::tempdir().unwrap();

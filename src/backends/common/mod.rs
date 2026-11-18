@@ -36,7 +36,7 @@ struct BgWorkerConfig {
     metadata_dev: Box<dyn BlockDevice>,
     alignment: usize,
     autofetch: bool,
-    crash_unsafe_optimizations: bool,
+    disposable_volume_optimizations: bool,
     shared_state: SharedMetadataState,
     receiver: Receiver<BgWorkerRequest>,
 }
@@ -184,7 +184,7 @@ impl BackendEnv {
                 .stripe_source
                 .as_ref()
                 .is_some_and(|stripe_source| stripe_source.autofetch()),
-            crash_unsafe_optimizations: config.danger_zone.crash_unsafe_optimizations(),
+            disposable_volume_optimizations: config.danger_zone.disposable_volume_optimizations(),
             shared_state,
             receiver: bgworker_receiver,
         };
@@ -229,11 +229,10 @@ impl BackendEnv {
             build_raw_image_device(config)?
         };
 
-        let skip_whole_stripe_fetch = config.danger_zone.crash_unsafe_optimizations();
+        let skip_whole_stripe_fetch = config.danger_zone.disposable_volume_optimizations();
         if skip_whole_stripe_fetch {
             warn!(
-                "Crash-unsafe optimizations are enabled; the disk's contents are undefined after \
-                 a crash"
+                "Disposable volume optimizations are enabled. Discard this volume when the backend exits, even after a clean shutdown."
             );
         }
 
@@ -290,7 +289,7 @@ impl BackendEnv {
             metadata_dev,
             alignment,
             autofetch,
-            crash_unsafe_optimizations,
+            disposable_volume_optimizations,
             shared_state,
             receiver,
         } = config;
@@ -309,7 +308,7 @@ impl BackendEnv {
             &*metadata_dev,
             alignment,
             autofetch,
-            crash_unsafe_optimizations,
+            disposable_volume_optimizations,
             shared_state,
         )?;
         let mut worker = BgWorker::new(receiver);
@@ -525,10 +524,9 @@ pub fn build_raw_image_device(config: &v2::Config) -> Result<Option<Box<dyn Bloc
     }
 }
 
-/// O_SYNC only adds durability across crashes, which crash-unsafe
-/// optimizations give up.
+/// Disposable volumes only need writes to be visible during this backend run.
 fn sync_io(config: &v2::Config) -> bool {
-    config.tuning.write_through && !config.danger_zone.crash_unsafe_optimizations()
+    config.tuning.write_through && !config.danger_zone.disposable_volume_optimizations()
 }
 
 pub fn build_block_device(
@@ -603,7 +601,7 @@ mod tests {
                 allow_secret_over_regular_file: true,
                 allow_unencrypted_connection: true,
                 allow_env_secrets: false,
-                allow_crash_unsafe_optimizations: false,
+                allow_disposable_volume_optimizations: false,
             },
             stripe_source,
             secrets: std::collections::HashMap::new(),
@@ -808,7 +806,7 @@ source.inline = "test-credentials"
                 metadata_dev: Box::new(metadata_dev),
                 alignment: 4096,
                 autofetch: false,
-                crash_unsafe_optimizations: false,
+                disposable_volume_optimizations: false,
                 shared_state,
                 receiver,
             },
@@ -1173,7 +1171,7 @@ source.inline = "test-credentials"
             allow_secret_over_regular_file: true,
             allow_unencrypted_connection: true,
             allow_env_secrets: false,
-            allow_crash_unsafe_optimizations: false,
+            allow_disposable_volume_optimizations: false,
         };
         let secrets = resolve_secrets(&secret_defs, &danger_zone).unwrap();
 
@@ -1293,7 +1291,7 @@ source.inline = "test-credentials"
     }
 
     #[test]
-    fn crash_unsafe_optimizations_drop_o_sync() {
+    fn disposable_volume_optimizations_drop_o_sync() {
         let disk_file = tempfile::NamedTempFile::new().unwrap();
         disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
         let disk_path = disk_file.path().canonicalize().unwrap();
@@ -1322,7 +1320,7 @@ source.inline = "test-credentials"
         config.tuning.write_through = true;
         assert_eq!(open_flags(&config) & libc::O_SYNC, libc::O_SYNC);
 
-        config.danger_zone.allow_crash_unsafe_optimizations = true;
+        config.danger_zone.allow_disposable_volume_optimizations = true;
         let flags = open_flags(&config);
         assert_eq!(flags & libc::O_SYNC, 0);
         assert_ne!(flags & libc::O_DIRECT, 0);

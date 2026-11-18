@@ -90,7 +90,7 @@ write_through = false
 | `poll_timeout_us` | integer | 1000 | 0–10000000 | Poll timeout in microseconds |
 | `cpus` | list of integers | none | — | CPU pinning (length must match `num_queues`) |
 | `io_engine` | string | `"io_uring"` | `"io_uring"`, `"sync"` | I/O engine |
-| `write_through` | boolean | false | — | Enable write-through mode. Writes are durable when they complete, unless [crash-unsafe optimizations](#crash-unsafe-optimizations) are enabled |
+| `write_through` | boolean | false | — | Enable write-through mode. Writes are durable when they complete, unless [disposable volume optimizations](#disposable-volume-optimizations) are enabled |
 
 The I/O topology settings apply to both the vhost-user and ublk backends.
 The 4 KiB defaults suit backing devices with 4 KiB physical sectors, including
@@ -142,7 +142,7 @@ allow_inline_plaintext_secrets = true
 allow_secret_over_regular_file = true
 allow_unencrypted_connection = true
 allow_env_secrets = true
-allow_crash_unsafe_optimizations = true
+allow_disposable_volume_optimizations = true
 ```
 
 | Flag | Default | Effect when enabled |
@@ -153,7 +153,7 @@ allow_crash_unsafe_optimizations = true
 | `allow_secret_over_regular_file` | false | Allow reading `source.file` secrets from regular files (not just pipes) |
 | `allow_unencrypted_connection` | false | Allow remote connections without PSK |
 | `allow_env_secrets` | false | Allow `source.env` secrets (environment variables persist in `/proc/PID/environ`) |
-| `allow_crash_unsafe_optimizations` | false | Enable optimizations that leave the disk's contents undefined after a crash of ubiblk or the host; see [Crash-unsafe optimizations](#crash-unsafe-optimizations) |
+| `allow_disposable_volume_optimizations` | false | Use this disk for a single backend run. Discard it on exit. See [Disposable volume optimizations](#disposable-volume-optimizations) |
 
 ## Secrets
 
@@ -344,66 +344,47 @@ secret.ref = "psk-secret"
 PSK is required unless `danger_zone.allow_unencrypted_connection` is enabled.
 The PSK secret must be at least 16 bytes.
 
-### Crash-unsafe optimizations
+### Disposable volume optimizations
 
-`danger_zone.allow_crash_unsafe_optimizations` enables optimizations that keep
-the disk consistent while ubiblk runs but not across a crash of ubiblk or the
-host. After such a crash the disk's contents are undefined, so only enable it
-for disks that are discarded rather than reused after a crash, for example the
-disks of ephemeral VMs.
+Enable `danger_zone.allow_disposable_volume_optimizations` only for volumes
+you discard when the backend exits, including after a clean shutdown. The
+backend keeps changes to the lazy stripe map in RAM. Even a guest flush leaves
+the on-disk map stale. Reopening, archiving, or serving the volume through a
+remote stripe server can therefore return old source data or omit guest writes.
 
-It enables the following optimizations.
+This flag replaces `allow_crash_unsafe_optimizations`. Remove the old key when
+upgrading. Enable the new flag only if the volume has a single-use lifetime.
 
-#### Unflushed metadata updates
+#### In-memory stripe metadata
 
-When a stripe is fetched or first written, its flag in the metadata is updated
-with a one-sector write followed by a flush. With crash-unsafe optimizations,
-the flush is skipped, so each update costs one write instead of a write and a
-cache flush. While ubiblk runs, the update is visible as soon as the write
-completes. After a crash, updates can be lost, so a stripe can be fetched again
-over data the guest wrote.
+With the default settings, fetching a stripe or marking it written updates the
+metadata device and flushes the change. On a disposable volume, both operations
+update the in-memory map immediately and issue no metadata I/O.
 
 #### Unflushed stripe fetches
 
-A fetch writes the stripe's source data to the disk and flushes the disk before
-marking the stripe fetched. With crash-unsafe optimizations, the flush is
-skipped. The stripe is still marked fetched only after its write completes, so
-while ubiblk runs, the guest's own I/O to the stripe always sees the fetched
-data. After a crash, the metadata can mark a stripe fetched whose data never
-reached the disk.
+A fetch normally writes the source data to the disk and flushes it before
+marking the stripe fetched. On a disposable volume, the backend marks the
+stripe fetched as soon as the write completes and skips the flush.
 
 #### Write-through without O_SYNC
 
-With `tuning.write_through`, the guest is told the disk has no volatile write
-cache, so it never sends flushes, and ubiblk opens the disk and metadata files
-with `O_SYNC` so that each write is durable when it completes. With
-crash-unsafe optimizations, the files are opened without `O_SYNC`. Writes still
-use `O_DIRECT` and are visible as soon as they complete, but the filesystem
-holding the files no longer commits its journal for each write, for example to
-allocate the blocks of a sparse file. After a crash, recent writes can be lost
-even though the guest never had to flush them.
+With `tuning.write_through`, the guest sees a disk with no volatile write
+cache. On a disposable volume, ubiblk opens the disk and metadata files without
+`O_SYNC`. Writes still use direct I/O, while the host filesystem can defer
+journal commits for operations such as allocating blocks in a sparse file.
 
 #### Whole-stripe writes
 
-Before the first write to a stripe lands, the stripe is fetched: its source
-data is read and written to the disk, so the write only replaces the sectors it
-covers. With crash-unsafe optimizations, a stripe that a single write covers
-entirely is instead marked fetched without reading the source or writing the
-disk. This saves a source read and a stripe-sized disk write per stripe.
+A single guest write that covers an entire unfetched stripe can replace its
+contents without copying data from the source. This saves one source read and
+one disk write per stripe. A partial write still needs the source data for the
+sectors it leaves untouched.
 
-The optimization applies only to stripes covered by one request. Linux guests
-send requests of at most `seg_count_max * seg_size_max` bytes (256 KiB with the
-defaults), while the stripe size is set when the metadata is initialized with
-`init-metadata --stripe-sector-count-shift` (1 MiB by default). A guest only
-benefits when its requests can be at least as large as a stripe.
-
-The stripe is marked fetched before the write reaches the disk. After a crash,
-a stripe whose write had not reached the disk, for example because the guest
-had not flushed it, reads back as the disk's old contents (zeroes on a new
-disk) rather than the source data. While ubiblk runs, the guest cannot tell the
-difference: a read of the stripe overlaps the in-flight write, and a failed
-write returns an error, so the guest cannot rely on that range's contents in
-either case.
+Linux guests send requests of at most `seg_count_max * seg_size_max` bytes
+(256 KiB with the defaults). Choose a stripe size that a single guest request
+can cover to benefit from this optimization. The stripe size is set with
+`init-metadata --stripe-sector-count-shift` and defaults to 1 MiB.
 
 ## Example Configs
 

@@ -515,7 +515,7 @@ pub fn build_raw_image_device(config: &v2::Config) -> Result<Option<Box<dyn Bloc
         Ok(Some(create_io_engine_device(
             config.tuning.io_engine.clone(),
             path.to_path_buf(),
-            64,
+            config.tuning.queue_size.max(64),
             readonly,
             true,
             config.tuning.write_through,
@@ -885,6 +885,59 @@ source.inline = "test-credentials"
 
         let result = BackendEnv::build(&config);
         assert!(result.is_ok());
+    }
+
+    /// Issues `reads` concurrent 4 KiB reads (4 KiB-aligned, so 4K-sector
+    /// devices work too) to the raw image device built with `queue_size`.
+    fn concurrent_image_reads(queue_size: usize, reads: usize) -> Vec<(usize, bool)> {
+        let image_file = tempfile::NamedTempFile::new().unwrap();
+        image_file.as_file().set_len(1024 * 1024).unwrap();
+        let mut config = test_config(
+            Path::new("/unused"),
+            None,
+            Some(StripeSourceConfig::Raw {
+                image_path: image_file.path().to_path_buf(),
+                autofetch: false,
+                copy_on_read: false,
+            }),
+        );
+        config.tuning.queue_size = queue_size;
+
+        let image = build_raw_image_device(&config).unwrap().unwrap();
+        let mut chan = image.create_channel().unwrap();
+        const BLOCK_SECTORS: u32 = 8;
+        // Buffers live until every read completes.
+        let bufs: Vec<_> = (0..reads)
+            .map(|_| crate::block_device::shared_buffer(BLOCK_SECTORS as usize * SECTOR_SIZE))
+            .collect();
+        for (id, buf) in bufs.iter().enumerate() {
+            chan.add_read(
+                id as u64 * BLOCK_SECTORS as u64,
+                BLOCK_SECTORS,
+                buf.clone(),
+                id,
+            );
+        }
+        chan.submit().unwrap();
+        let mut results = Vec::new();
+        while results.len() < reads {
+            results.extend(chan.poll());
+        }
+        results
+    }
+
+    #[test]
+    fn raw_image_device_takes_a_full_queue_of_reads() {
+        let results = concurrent_image_reads(256, 256);
+        assert!(results.iter().all(|&(_, ok)| ok));
+    }
+
+    /// The stripe fetcher shares this device and keeps its own reads in
+    /// flight, so a small frontend queue must not shrink it.
+    #[test]
+    fn raw_image_device_keeps_64_entries_for_small_queues() {
+        let results = concurrent_image_reads(1, 64);
+        assert!(results.iter().all(|&(_, ok)| ok));
     }
 
     #[test]

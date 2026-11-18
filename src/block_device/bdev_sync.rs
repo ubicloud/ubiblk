@@ -139,7 +139,7 @@ impl SyncBlockDevice {
     pub fn new(path: PathBuf, readonly: bool, direct_io: bool, sync: bool) -> Result<Box<Self>> {
         match std::fs::metadata(&path) {
             Ok(metadata) => {
-                let size = metadata.len();
+                let size = super::detect_size(&path, &metadata)?;
                 // Only direct I/O is bound to the sector size of the disk.
                 let logical_sector_size = if direct_io {
                     super::detect_sector_size(&path)?

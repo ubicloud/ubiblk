@@ -28,6 +28,7 @@ impl Config {
 
         let mut device: DeviceSection = parse_required_section(&merged, "device")?;
         resolve_device_paths(&mut device, config_dir);
+        device.validate()?;
 
         let tuning: TuningSection = parse_optional_section(&merged, "tuning")?.unwrap_or_default();
         tuning.validate()?;
@@ -351,6 +352,30 @@ mod tests {
         assert!(config.encryption.is_some());
         assert_eq!(config.secrets.len(), 1);
         assert!(config.secrets.contains_key("my_xts_key"));
+    }
+
+    #[test]
+    fn sector_size_defaults_to_512_bytes() {
+        let config = |device: &str| {
+            parse_config(&format!(
+                "[device]\ndata_path = \"/dev/ubiblk0\"\n{device}\n\
+                 [danger_zone]\nenabled = true\nallow_unencrypted_disk = true\n"
+            ))
+        };
+        assert_eq!(config("").unwrap().device.sector_size, 512);
+        assert_eq!(
+            config("sector_size = 4096").unwrap().device.sector_size,
+            4096
+        );
+        for sector_size in [0, 256, 1000, 8192] {
+            let err = config(&format!("sector_size = {sector_size}"))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains(&format!("device.sector_size {sector_size} is not")),
+                "{err}"
+            );
+        }
     }
 
     #[test]

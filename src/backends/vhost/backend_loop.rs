@@ -112,6 +112,7 @@ mod tests {
                 rpc_socket: None,
                 device_id: "test-device".to_string(),
                 track_written: false,
+                sector_size: 512,
             },
             tuning: v2::tuning::TuningSection::default(),
             encryption: None,

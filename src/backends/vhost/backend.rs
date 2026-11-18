@@ -343,6 +343,7 @@ mod tests {
                 rpc_socket: Some("/tmp/rpc.sock".into()),
                 device_id: "ubiblk-test".to_string(),
                 track_written: false,
+                sector_size: 512,
                 metadata_path: None,
             },
             stripe_source: None,

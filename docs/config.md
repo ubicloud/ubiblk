@@ -48,6 +48,7 @@ vhost_socket = "/var/run/ubiblk.sock"    # optional
 rpc_socket = "/var/run/ubiblk-rpc.sock"  # optional
 device_id = "vm123"                      # optional, default: "ubiblk"
 track_written = false                    # optional, default: false
+sector_size = 512                        # optional, default: 512
 ```
 
 | Field | Type | Required | Default | Description |
@@ -58,6 +59,7 @@ track_written = false                    # optional, default: false
 | `rpc_socket` | path | no | — | RPC Unix socket path |
 | `device_id` | string | no | `"ubiblk"` | Identifier returned to the guest |
 | `track_written` | boolean | no | `false` | Track which stripes have been written |
+| `sector_size` | integer | no | `512` | Logical sector size the guest's data is laid out in: 512, 1024, 2048 or 4096. `data_path` must be on a device with this logical sector size, or the volume is refused. A guest's partition table counts in these sectors, so do not change it for an existing volume. |
 
 ## `[tuning]`
 

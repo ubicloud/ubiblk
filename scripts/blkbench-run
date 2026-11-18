@@ -2,8 +2,8 @@
 # Runs blkbench against a fresh 4-queue ubiblk device. Needs sudo to read the
 # open flags of the backend, which is not dumpable.
 #
-# --sector-size SIZE asserts that ubiblk detects SIZE as the logical sector
-# size of the device DIR is on, records it and advertises it.
+# --sector-size SIZE configures the volume for SIZE-byte sectors, which the
+# device DIR is on must have, and asserts that ubiblk records and advertises it.
 
 set -euo pipefail
 
@@ -28,6 +28,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --sector-size)
       sector_size=$2
+      init_args+=("$1" "$2")
       shift 2
       ;;
     *)

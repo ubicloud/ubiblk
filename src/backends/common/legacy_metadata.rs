@@ -3,7 +3,7 @@ use std::{os::unix::fs::MetadataExt, path::Path};
 use log::info;
 use ubiblk_macros::error_context;
 
-use super::{build_block_device, ensure_metadata_file, SECTOR_SIZE};
+use super::{build_block_device, ensure_disk_sector_size, ensure_metadata_file, SECTOR_SIZE};
 use crate::{config::v2, stripe_source::StripeSourceBuilder, Result, ResultExt};
 
 /// Upgrade a v0.2.x volume in place: read its legacy metadata and write the
@@ -26,6 +26,15 @@ pub fn convert_legacy_metadata(config: &v2::Config, legacy_metadata_path: &Path)
 
     let disk_bdev = build_block_device(&config.device.data_path, config, false)
         .context("Failed to build disk block device")?;
+    if config.device.sector_size != SECTOR_SIZE {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: format!(
+                "device.sector_size is {}, but legacy volumes have {SECTOR_SIZE}-byte sectors",
+                config.device.sector_size
+            ),
+        }));
+    }
+    ensure_disk_sector_size(config, disk_bdev.as_ref())?;
     let legacy_bytes = legacy_buf.borrow();
     let legacy = crate::stripe_server::parse_v0_2_metadata(
         legacy_bytes.as_slice(),
@@ -94,7 +103,7 @@ fn ensure_not_an_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::common::tests::test_config;
+    use crate::backends::common::tests::{test_config, LoopDevice};
     use crate::block_device::UbiMetadata;
     use crate::config::v2::stripe_source::StripeSourceConfig;
 
@@ -140,29 +149,6 @@ mod tests {
         );
     }
 
-    struct LoopDevice(std::path::PathBuf);
-
-    impl LoopDevice {
-        fn attach_read_only(file: &Path) -> Self {
-            let output = std::process::Command::new("losetup")
-                .args(["--find", "--show", "--read-only"])
-                .arg(file)
-                .output()
-                .unwrap();
-            assert!(output.status.success(), "{output:?}");
-            Self(String::from_utf8(output.stdout).unwrap().trim().into())
-        }
-    }
-
-    impl Drop for LoopDevice {
-        fn drop(&mut self) {
-            let _ = std::process::Command::new("losetup")
-                .arg("--detach")
-                .arg(&self.0)
-                .status();
-        }
-    }
-
     #[test]
     #[ignore = "attaches a loop device, which needs root"]
     fn convert_legacy_metadata_on_a_block_device() {
@@ -174,7 +160,7 @@ mod tests {
         std::fs::write(dir.path().join("disk"), vec![0; 4 * stripe_size]).unwrap();
         std::fs::write(dir.path().join("image"), vec![0; 5 * stripe_size / 2]).unwrap();
         write_v0_2_metadata(&dir.path().join("legacy"), 4, &[0, 1, 0, 1]);
-        let loop_device = LoopDevice::attach_read_only(&dir.path().join("disk"));
+        let loop_device = LoopDevice::attach(&dir.path().join("disk"), &["--read-only"]);
 
         for engine in [IoEngine::IoUring, IoEngine::Sync] {
             for data_path in [dir.path().join("disk"), loop_device.0.clone()] {
@@ -202,6 +188,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn convert_legacy_metadata_refuses_another_sector_size() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("disk"), vec![0; 8 * 4096]).unwrap();
+        write_v0_2_metadata(&dir.path().join("legacy"), 3, &[1]);
+        let mut config = test_config(
+            &dir.path().join("disk"),
+            Some(&dir.path().join("metadata")),
+            None,
+        );
+        config.device.sector_size = 4096;
+
+        let err = convert_legacy_metadata(&config, &dir.path().join("legacy"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("legacy volumes have 512-byte sectors"),
+            "{err}"
+        );
     }
 
     #[test]

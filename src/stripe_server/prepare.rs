@@ -23,6 +23,7 @@ fn mark_no_source_stripes_written(metadata: &mut UbiMetadata) {
 
 pub fn prepare_stripe_server(config: &v2::Config) -> Result<Arc<StripeServer>> {
     let stripe_device = build_block_device(&config.device.data_path, config, false)?;
+    crate::backends::common::ensure_disk_sector_size(config, stripe_device.as_ref())?;
     let (metadata, source_builder): (Arc<UbiMetadata>, Option<StripeSourceBuilder>) =
         if let Some(metadata_path) = config.device.metadata_path.as_deref() {
             let metadata_device = build_block_device(metadata_path, config, false)?;
@@ -94,6 +95,7 @@ mod tests {
                 rpc_socket: None,
                 device_id: "ubiblk".to_string(),
                 track_written,
+                sector_size: 512,
             },
             tuning: v2::tuning::TuningSection {
                 queue_size: 128,

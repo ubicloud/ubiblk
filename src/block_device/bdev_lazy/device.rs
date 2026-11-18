@@ -100,6 +100,11 @@ impl LazyIoChannel {
         StripesFetchStatus::Complete
     }
 
+    fn request_stripes_all_not_fetched(&self, request: &RWRequest) -> bool {
+        (request.stripe_id_first..=request.stripe_id_last)
+            .all(|stripe_id| self.metadata_state.stripe_fetch_state(stripe_id) == NotFetched)
+    }
+
     fn request_stripes_written(&self, request: &RWRequest) -> bool {
         for stripe_id in request.stripe_id_first..=request.stripe_id_last {
             if !self.metadata_state.stripe_written(stripe_id) {
@@ -245,7 +250,7 @@ impl IoChannel for LazyIoChannel {
             }
         }
 
-        if request.stripe_id_first == request.stripe_id_last {
+        if self.request_stripes_all_not_fetched(&request) {
             if let Some(image) = &mut self.image {
                 // The disk can be larger than the image. What lies past the
                 // image's end reads as zeros, as it does once fetched.

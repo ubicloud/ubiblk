@@ -140,10 +140,33 @@ pub struct DeviceSection {
     pub device_id: String,
     #[serde(default)]
     pub track_written: bool,
+    /// The logical sector size the guest's data is laid out in. A guest's
+    /// partition table counts in these sectors, so a disk with another
+    /// logical sector size is refused.
+    #[serde(default = "default_sector_size")]
+    pub sector_size: usize,
 }
 
 fn default_device_id() -> String {
     "ubiblk".to_string()
+}
+
+fn default_sector_size() -> usize {
+    512
+}
+
+impl DeviceSection {
+    pub fn validate(&self) -> crate::Result<()> {
+        if !self.sector_size.is_power_of_two() || !(512..=4096).contains(&self.sector_size) {
+            return Err(crate::ubiblk_error!(InvalidParameter {
+                description: format!(
+                    "device.sector_size {} is not 512, 1024, 2048 or 4096",
+                    self.sector_size
+                ),
+            }));
+        }
+        Ok(())
+    }
 }
 
 /// Encryption settings. The `xts_key` field uses a `ref` sub-key

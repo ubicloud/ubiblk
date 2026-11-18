@@ -323,6 +323,7 @@ pub fn load_legacy_config(config_path: &Path, kek_path: Option<&Path>) -> Result
             rpc_socket: None,
             device_id: "ubiblk".to_string(),
             track_written: options.track_written,
+            sector_size: 512,
         },
         tuning: v2::tuning::TuningSection {
             queue_size: 128,

@@ -299,6 +299,7 @@ mod tests {
                 rpc_socket: None,
                 device_id: "ubiblk".to_string(),
                 track_written: false,
+                sector_size: 512,
             },
             tuning: v2::tuning::TuningSection {
                 queue_size: 64,

@@ -59,6 +59,7 @@ impl BackendEnv {
 
         let disk_device = build_block_device(&config.device.data_path, config, false)
             .context("Failed to build disk device")?;
+        ensure_disk_sector_size(config, disk_device.as_ref())?;
         let metadata_device = config
             .device
             .metadata_path
@@ -387,6 +388,23 @@ pub(crate) fn ensure_source_sector_size(
     }
 }
 
+/// Fail unless the disk has the logical sector size the guest's data is
+/// laid out in.
+#[error_context("Disk does not have the configured sector size")]
+pub(crate) fn ensure_disk_sector_size(config: &v2::Config, disk: &dyn BlockDevice) -> Result<()> {
+    let disk_sector_size = disk.logical_sector_size();
+    if disk_sector_size != config.device.sector_size {
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: format!(
+                "device.sector_size is {}, but {} has {disk_sector_size}-byte sectors",
+                config.device.sector_size,
+                config.device.data_path.display()
+            ),
+        }));
+    }
+    Ok(())
+}
+
 pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Result<()> {
     let metadata_path = config.device.metadata_path.as_ref().ok_or_else(|| {
         crate::ubiblk_error!(InvalidParameter {
@@ -396,6 +414,7 @@ pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Resu
 
     let disk_bdev = build_block_device(&config.device.data_path, config, false)
         .context("Failed to build disk block device")?;
+    ensure_disk_sector_size(config, disk_bdev.as_ref())?;
     let stripe_sector_count = 1u64 << stripe_sector_count_shift;
     let base_stripe_count = disk_bdev.stripe_count(stripe_sector_count);
 
@@ -598,6 +617,31 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    pub(super) struct LoopDevice(pub PathBuf);
+
+    impl LoopDevice {
+        /// Needs root.
+        pub(super) fn attach(file: &Path, args: &[&str]) -> Self {
+            let output = std::process::Command::new("losetup")
+                .args(["--find", "--show"])
+                .args(args)
+                .arg(file)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            Self(String::from_utf8(output.stdout).unwrap().trim().into())
+        }
+    }
+
+    impl Drop for LoopDevice {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("losetup")
+                .arg("--detach")
+                .arg(&self.0)
+                .status();
+        }
+    }
+
     pub(super) fn test_config(
         data_path: &Path,
         metadata_path: Option<&Path>,
@@ -611,6 +655,9 @@ mod tests {
                 rpc_socket: None,
                 device_id: "ubiblk".to_string(),
                 track_written: false,
+                sector_size: block_device::detect_sector_size(data_path)
+                    .or_else(|_| block_device::detect_sector_size(Path::new(".")))
+                    .unwrap(),
             },
             tuning: v2::tuning::TuningSection {
                 queue_size: 128,
@@ -1264,6 +1311,76 @@ source.inline = "test-credentials"
         check(Some(4096), 4096).unwrap();
         check(Some(512), 512).unwrap();
         check(None, 4096).unwrap();
+    }
+
+    #[test]
+    fn the_disk_must_have_the_configured_sector_size() {
+        let check = |configured: Option<usize>, disk: usize| {
+            let mut config = test_config(Path::new("disk"), None, None);
+            config.device.sector_size = configured.unwrap_or(512);
+            ensure_disk_sector_size(
+                &config,
+                &TestBlockDevice::new(8192).with_logical_sector_size(disk),
+            )
+        };
+
+        // A v0.6.0 volume on 4 KiB storage, with the default.
+        let err = check(None, 4096).unwrap_err().to_string();
+        assert!(
+            err.contains("device.sector_size is 512, but disk has 4096-byte sectors"),
+            "{err}"
+        );
+        check(None, 512).unwrap();
+        check(Some(4096), 4096).unwrap();
+        let err = check(Some(4096), 512).unwrap_err().to_string();
+        assert!(
+            err.contains("device.sector_size is 4096, but disk has 512-byte sectors"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    #[ignore = "attaches a loop device, which needs root"]
+    fn a_512_byte_sector_image_is_refused_on_4096_byte_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("image");
+        // A v0.6.0 disk: an MBR whose partition starts at LBA 2048, which is
+        // byte 1 MiB in 512-byte sectors and byte 8 MiB in 4096-byte ones.
+        let mut bytes = vec![0u8; 16 * 1024 * 1024];
+        bytes[446 + 4] = 0x83;
+        bytes[446 + 8..446 + 12].copy_from_slice(&2048u32.to_le_bytes());
+        bytes[446 + 12..446 + 16].copy_from_slice(&4096u32.to_le_bytes());
+        bytes[510..512].copy_from_slice(&[0x55, 0xaa]);
+        bytes[1024 * 1024..1024 * 1024 + 4].copy_from_slice(b"PART");
+        std::fs::write(&image, &bytes).unwrap();
+        let disk = LoopDevice::attach(&image, &["--sector-size", "4096"]);
+        assert_eq!(block_device::detect_sector_size(&disk.0).unwrap(), 4096);
+
+        let mut config = test_config(&disk.0, None, None);
+        config.device.sector_size = 512;
+        for frontend in ["vhost-user-blk", "ublk"] {
+            let mut served = false;
+            let err = run_backend_loop(&config, frontend, false, |_| {
+                served = true;
+                Ok(())
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(
+                err.contains("device.sector_size is 512, but") && err.contains("4096-byte sectors"),
+                "{err}"
+            );
+            assert!(!served);
+        }
+        drop(disk);
+        assert!(std::fs::read(&image).unwrap() == bytes);
+
+        // Accepted once the configuration says the guest expects 4 KiB.
+        let disk = LoopDevice::attach(&image, &["--sector-size", "4096"]);
+        config.device.data_path = disk.0.clone();
+        config.device.sector_size = 4096;
+        let env = BackendEnv::build(&config).unwrap();
+        assert_eq!(env.bdev().logical_sector_size(), 4096);
     }
 
     #[test]

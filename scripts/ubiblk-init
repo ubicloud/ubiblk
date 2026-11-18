@@ -153,7 +153,8 @@ def parse_size(s):
 
 # --- Config generation ---
 
-def make_config(*, use_kek, tuning, encrypted_xts_b64=None, base_image=None):
+def make_config(*, use_kek, tuning, encrypted_xts_b64=None, base_image=None,
+                sector_size=None):
     c = f"""\
 # WARNING: This configuration is for DEVELOPMENT use only.
 # All secrets are stored as local plaintext files.
@@ -167,7 +168,7 @@ def make_config(*, use_kek, tuning, encrypted_xts_b64=None, base_image=None):
 data_path = "disk.raw"
 metadata_path = "metadata"
 vhost_socket = "vhost.sock"
-
+{f"sector_size = {sector_size}{chr(10)}" if sector_size else ""}
 [encryption]
 xts_key.ref = "xts_key"
 """
@@ -221,7 +222,8 @@ image_path = "{base_image}"
 # --- Core init ---
 
 def run_init(*, size_str, size_bytes, target_dir,
-             stripe_shift, use_kek, tuning, base_image=None, force=False):
+             stripe_shift, use_kek, tuning, base_image=None, force=False,
+             sector_size=None):
     target_dir = os.path.abspath(target_dir)
     os.makedirs(target_dir, exist_ok=True)
 
@@ -275,7 +277,8 @@ def run_init(*, size_str, size_bytes, target_dir,
     atomic_write(config_path, make_config(
         use_kek=use_kek,
         tuning=tuning,
-        encrypted_xts_b64=encrypted_xts_b64, base_image=base_image))
+        encrypted_xts_b64=encrypted_xts_b64, base_image=base_image,
+        sector_size=sector_size))
     info("config.toml")
 
     # 4. Metadata
@@ -399,6 +402,8 @@ def main():
     p.add_argument("--write-through", action="store_true",
                     default=DEFAULT_TUNING["write_through"],
                     help="enable write-through mode")
+    p.add_argument("--sector-size", type=int, choices=[512, 1024, 2048, 4096],
+                    help="logical sector size of the guest (default: 512)")
     p.add_argument("--force", action="store_true")
     args = p.parse_args()
 
@@ -429,7 +434,8 @@ def main():
         run_init(size_str=size_str, size_bytes=size_bytes, target_dir=args.dir,
                  stripe_shift=STRIPE_CHOICES[args.stripe_size],
                  use_kek=args.kek, tuning=tuning,
-                 base_image=args.base, force=args.force)
+                 base_image=args.base, force=args.force,
+                 sector_size=args.sector_size)
 
 
 if __name__ == "__main__":

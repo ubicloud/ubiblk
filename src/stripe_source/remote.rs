@@ -198,6 +198,15 @@ impl RemoteStripeSource {
 
         let connection_count = clients.len();
         let expected_fingerprint = MetadataFingerprint::of(metadata);
+        // Each client fetched its metadata on its own connection, which may
+        // have reached another server.
+        if clients.iter().any(|client| {
+            client.get_metadata().map(MetadataFingerprint::of) != Some(expected_fingerprint)
+        }) {
+            return Err(crate::ubiblk_error!(MetadataError {
+                description: "stripe server metadata differs across connections".to_string(),
+            }));
+        }
         let (request_tx, request_rx) = unbounded::<usize>();
         let (result_tx, result_rx) = unbounded::<FetchOutcome>();
 
@@ -452,6 +461,35 @@ mod tests {
             vec![Box::new(MockRemoteStripeProvider::new_with_bad_metadata())];
         let result = RemoteStripeSource::new(clients, mock_connect(), STRIPE_SECTORS as u64);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn every_connection_must_serve_the_same_geometry() {
+        let other_sector_size = || {
+            let mut provider = MockRemoteStripeProvider::new();
+            provider.metadata = provider.metadata.with_sector_size(4096).unwrap();
+            provider
+        };
+        let other_stripe_count = || MockRemoteStripeProvider {
+            metadata: UbiMetadata::new(STRIPE_SECTOR_COUNT_SHIFT, TOTAL_STRIPES + 1, 0),
+        };
+        for second in [other_sector_size(), other_stripe_count()] {
+            let clients: Vec<Box<dyn RemoteStripeProvider + Send>> =
+                vec![Box::new(MockRemoteStripeProvider::new()), Box::new(second)];
+            let err = RemoteStripeSource::new(clients, mock_connect(), STRIPE_SECTORS as u64)
+                .err()
+                .unwrap();
+            assert!(
+                err.to_string().contains("differs across connections"),
+                "{err}"
+            );
+        }
+
+        let clients: Vec<Box<dyn RemoteStripeProvider + Send>> = vec![
+            Box::new(MockRemoteStripeProvider::new()),
+            Box::new(MockRemoteStripeProvider::new()),
+        ];
+        RemoteStripeSource::new(clients, mock_connect(), STRIPE_SECTORS as u64).unwrap();
     }
 
     #[test]

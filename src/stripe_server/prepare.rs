@@ -60,7 +60,8 @@ pub fn prepare_stripe_server(config: &v2::Config) -> Result<Arc<StripeServer>> {
             let stripe_sector_count = 1u64 << stripe_sector_count_shift;
             let stripe_count = stripe_device.stripe_count(stripe_sector_count);
             let mut metadata =
-                UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count);
+                UbiMetadata::new(stripe_sector_count_shift, stripe_count, stripe_count)
+                    .with_sector_size(stripe_device.logical_sector_size())?;
             for stripe_header in metadata.stripe_headers.iter_mut() {
                 *stripe_header |= metadata_flags::WRITTEN | metadata_flags::FETCHED;
             }
@@ -134,6 +135,25 @@ mod tests {
             assert_eq!(*header & metadata_flags::WRITTEN, metadata_flags::WRITTEN);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_made_up_for_a_disk_records_its_sector_size() -> Result<()> {
+        let storage_file = NamedTempFile::new()?;
+        storage_file.as_file().set_len(4 * STRIPE_SIZE)?;
+        let config = config(
+            storage_file.path().to_str().unwrap().to_string(),
+            None,
+            false,
+        );
+
+        let server = prepare_stripe_server(&config)?;
+
+        assert_eq!(
+            server.metadata.sector_size(),
+            crate::block_device::detect_sector_size(storage_file.path())?
+        );
         Ok(())
     }
 

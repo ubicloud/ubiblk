@@ -17,7 +17,7 @@ use crate::{
         StatusReporter, SyncBlockDevice, UbiMetadata, UringBlockDevice,
     },
     config::v2,
-    stripe_source::StripeSourceBuilder,
+    stripe_source::{StripeSource, StripeSourceBuilder},
     utils::aligned_buffer::BUFFER_ALIGNMENT,
     Result, ResultExt,
 };
@@ -301,6 +301,7 @@ impl BackendEnv {
                 return Err(e);
             }
         };
+        ensure_source_sector_size(stripe_source.as_ref(), target_dev.as_ref())?;
 
         let lazy = LazyTask::new(
             stripe_source,
@@ -365,6 +366,27 @@ where
     Ok(())
 }
 
+/// Fail unless a stripe source that records a sector size has the disk's.
+/// Unlike a raw image, whose bytes stay where they are, a remote volume's
+/// partition offsets are counted in the source's sectors.
+pub(crate) fn ensure_source_sector_size(
+    source: &dyn StripeSource,
+    disk: &dyn BlockDevice,
+) -> Result<()> {
+    match source.sector_size() {
+        Some(source_sector_size) if source_sector_size != disk.logical_sector_size() => {
+            Err(crate::ubiblk_error!(MetadataError {
+                description: format!(
+                    "Stripe source has {source_sector_size}-byte sectors, but the disk has {}-byte \
+                     sectors",
+                    disk.logical_sector_size()
+                ),
+            }))
+        }
+        _ => Ok(()),
+    }
+}
+
 pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Result<()> {
     let metadata_path = config.device.metadata_path.as_ref().ok_or_else(|| {
         crate::ubiblk_error!(InvalidParameter {
@@ -383,6 +405,7 @@ pub fn init_metadata(config: &v2::Config, stripe_sector_count_shift: u8) -> Resu
     } else {
         let stripe_source =
             StripeSourceBuilder::new(config.clone(), stripe_sector_count, false).build()?;
+        ensure_source_sector_size(stripe_source.as_ref(), disk_bdev.as_ref())?;
         UbiMetadata::new_from_stripe_source(
             stripe_sector_count_shift,
             base_stripe_count,
@@ -1130,6 +1153,117 @@ source.inline = "test-credentials"
             err.contains("Metadata was initialized for 512-byte sectors"),
             "unexpected error: {err}"
         );
+    }
+
+    /// Serve `metadata`, recording `sector_size`, on a local port.
+    fn serve_remote_metadata(sector_size: usize) -> String {
+        use crate::stripe_server::StripeServer;
+
+        let metadata = UbiMetadata::new(11, 4, 4)
+            .with_sector_size(sector_size)
+            .unwrap();
+        let device = Arc::new(TestBlockDevice::new(4 * 1024 * 1024));
+        let server = Arc::new(StripeServer::new(device, Arc::from(metadata), None));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let server = Arc::clone(&server);
+                std::thread::spawn(move || {
+                    let stream: crate::stripe_server::DynStream = Box::new(stream.unwrap());
+                    server.start_session(stream).unwrap().handle_requests();
+                });
+            }
+        });
+        address
+    }
+
+    fn remote_config(disk: &Path, metadata: &Path, address: String) -> v2::Config {
+        test_config(
+            disk,
+            Some(metadata),
+            Some(StripeSourceConfig::Remote(
+                v2::stripe_source::RemoteStripeConfig {
+                    address,
+                    psk: None,
+                    autofetch: false,
+                    connect_timeout_ms: 5_000,
+                    operation_attempt_timeout_ms: 5_000,
+                    connections: 1,
+                },
+            )),
+        )
+    }
+
+    #[test]
+    fn init_metadata_refuses_a_remote_source_with_other_sectors() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = dir.path().join("disk");
+        std::fs::write(&disk, vec![0; 4 * 1024 * 1024]).unwrap();
+        let disk_sector_size = block_device::detect_sector_size(&disk).unwrap();
+        let other_sector_size = if disk_sector_size == 512 { 4096 } else { 512 };
+
+        let config = remote_config(
+            &disk,
+            &dir.path().join("metadata"),
+            serve_remote_metadata(other_sector_size),
+        );
+        let err = init_metadata(&config, 11).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!(
+                "Stripe source has {other_sector_size}-byte sectors"
+            )),
+            "unexpected error: {err}"
+        );
+
+        let config = remote_config(
+            &disk,
+            &dir.path().join("metadata"),
+            serve_remote_metadata(disk_sector_size),
+        );
+        init_metadata(&config, 11).unwrap();
+        let stored =
+            UbiMetadata::from_bytes(&std::fs::read(dir.path().join("metadata")).unwrap()).unwrap();
+        assert_eq!(stored.sector_size(), disk_sector_size);
+    }
+
+    #[test]
+    fn a_stripe_source_must_have_the_sectors_of_the_disk() {
+        struct Source(Option<usize>);
+        impl StripeSource for Source {
+            fn request(&mut self, _: usize, _: block_device::SharedBuffer) -> Result<()> {
+                Ok(())
+            }
+            fn poll(&mut self) -> Vec<(usize, bool)> {
+                Vec::new()
+            }
+            fn busy(&self) -> bool {
+                false
+            }
+            fn sector_count(&self) -> u64 {
+                0
+            }
+            fn has_stripe(&self, _: usize) -> bool {
+                false
+            }
+            fn sector_size(&self) -> Option<usize> {
+                self.0
+            }
+        }
+        let check = |source: Option<usize>, disk: usize| {
+            ensure_source_sector_size(
+                &Source(source),
+                &TestBlockDevice::new(8192).with_logical_sector_size(disk),
+            )
+        };
+
+        let err = check(Some(4096), 512).unwrap_err().to_string();
+        assert!(err.contains("Stripe source has 4096-byte sectors, but the disk has 512-byte"));
+        let err = check(Some(512), 4096).unwrap_err().to_string();
+        assert!(err.contains("Stripe source has 512-byte sectors, but the disk has 4096-byte"));
+        check(Some(4096), 4096).unwrap();
+        check(Some(512), 512).unwrap();
+        check(None, 4096).unwrap();
     }
 
     #[test]

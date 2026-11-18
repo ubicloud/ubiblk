@@ -53,6 +53,7 @@ pub struct UbiBlkBackendThread {
     request_slots: Vec<RequestSlot>,
     device_id: String,
     sector_count: u64,
+    logical_sector_size: usize,
     alignment: usize,
     pin_attempted: bool,
     ios_pending_signal: bool,
@@ -74,6 +75,7 @@ impl UbiBlkBackendThread {
         mem: GuestMemoryAtomic<GuestMemoryMmap>,
         io_channel: Box<dyn IoChannel>,
         sector_count: u64,
+        logical_sector_size: usize,
         config: &v2::Config,
         alignment: usize,
         io_tracker: IoTracker,
@@ -111,6 +113,7 @@ impl UbiBlkBackendThread {
             request_slots,
             device_id: config.device.device_id.clone(),
             sector_count,
+            logical_sector_size,
             alignment,
             pin_attempted: false,
             ios_pending_signal: false,
@@ -254,14 +257,23 @@ impl UbiBlkBackendThread {
 
     /// Returns the data length of a read or write request, or None if the
     /// request is malformed or reaches beyond the end of the device.
+    ///
+    /// The guest is told the logical sector size, but virtio only calls it
+    /// the optimal block size, so a driver may still send smaller requests.
+    /// The disk cannot take those with direct I/O.
     pub(crate) fn validate_rw_request(&self, request: &Request) -> Option<usize> {
         let len = request.total_data_len();
-        if len == 0 || !len.is_multiple_of(SECTOR_SIZE as u64) {
-            error!("request length is zero or not a multiple of sector size: {len}");
+        let sector_size = self.logical_sector_size as u64;
+        if len == 0 || !len.is_multiple_of(sector_size) {
+            error!("request length is zero or not a multiple of {sector_size}-byte sectors: {len}");
             return None;
         }
 
         let sector = request.sector();
+        if !sector.is_multiple_of(sector_size / SECTOR_SIZE as u64) {
+            error!("request at sector {sector} is not aligned to {sector_size}-byte sectors");
+            return None;
+        }
         let in_range = sector
             .checked_add(len / SECTOR_SIZE as u64)
             .is_some_and(|end| end <= self.sector_count);

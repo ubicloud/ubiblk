@@ -81,6 +81,7 @@ impl UbiBlkBackend {
                     mem.clone(),
                     io_channel,
                     nsectors,
+                    block_device.logical_sector_size(),
                     config,
                     alignment,
                     io_tracker,

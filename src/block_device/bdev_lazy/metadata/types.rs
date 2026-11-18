@@ -10,6 +10,10 @@ pub const UBI_MAGIC_SIZE: usize = 9;
 pub const UBI_MAGIC: &[u8] = b"BDEV_UBI\0"; // 9 bytes
 pub const METADATA_VERSION_MAJOR: u16 = 2;
 pub const METADATA_VERSION_MINOR: u16 = 0;
+/// The version of metadata for sectors other than 512 bytes. Readers before
+/// the sector size was recorded accept only 2.0, and would give the guest
+/// 512-byte sectors.
+pub const METADATA_VERSION_MINOR_SECTOR_SIZE: u16 = 1;
 
 pub const CRC32_SIZE: usize = 4;
 pub const STRIPE_HEADERS_PER_SECTOR: usize = SECTOR_SIZE - CRC32_SIZE; // 508
@@ -61,7 +65,7 @@ fn compute_sector_crc32(data: &[u8]) -> [u8; CRC32_SIZE] {
 
 /// Write a single metadata sector into `sector_buf`. `contents` is the data
 /// without the CRC32 and must be at most 508 bytes.
-fn write_sector_with_crc32(sector_buf: &mut [u8], contents: &[u8]) {
+pub(crate) fn write_sector_with_crc32(sector_buf: &mut [u8], contents: &[u8]) {
     debug_assert!(sector_buf.len().is_multiple_of(SECTOR_SIZE));
     debug_assert!(contents.len() <= SECTOR_SIZE - CRC32_SIZE);
 
@@ -129,6 +133,14 @@ impl UbiMetadata {
         }
     }
 
+    fn format_version_minor(&self) -> u16 {
+        if self.sector_size() == SECTOR_SIZE {
+            METADATA_VERSION_MINOR
+        } else {
+            METADATA_VERSION_MINOR_SECTOR_SIZE
+        }
+    }
+
     /// Record the sector size of the data device.
     pub fn with_sector_size(mut self: Box<Self>, sector_size: usize) -> Result<Box<Self>> {
         let shift = sector_size.trailing_zeros() as u8;
@@ -146,6 +158,7 @@ impl UbiMetadata {
             }));
         }
         self.sector_size_shift = shift;
+        self.version_minor = self.format_version_minor().to_le_bytes();
         Ok(self)
     }
 
@@ -265,13 +278,14 @@ impl UbiMetadata {
         let mut version_minor = [0u8; 2];
         version_minor.copy_from_slice(&buf[UBI_MAGIC_SIZE + 2..UBI_MAGIC_SIZE + 4]);
         if version_major != METADATA_VERSION_MAJOR.to_le_bytes()
-            || version_minor != METADATA_VERSION_MINOR.to_le_bytes()
+            || !(METADATA_VERSION_MINOR..=METADATA_VERSION_MINOR_SECTOR_SIZE)
+                .contains(&u16::from_le_bytes(version_minor))
         {
             return Err(crate::ubiblk_error!(MetadataError {
                 description: format!(
                     "Metadata version mismatch! Expected: {}.{}, Found: {}.{}",
                     METADATA_VERSION_MAJOR,
-                    METADATA_VERSION_MINOR,
+                    METADATA_VERSION_MINOR_SECTOR_SIZE,
                     u16::from_le_bytes(version_major),
                     u16::from_le_bytes(version_minor)
                 ),
@@ -375,7 +389,8 @@ impl UbiMetadata {
         let mut header = [0u8; Self::HEADER_SIZE];
         header[..UBI_MAGIC_SIZE].copy_from_slice(&self.magic);
         header[UBI_MAGIC_SIZE..UBI_MAGIC_SIZE + 2].copy_from_slice(&self.version_major);
-        header[UBI_MAGIC_SIZE + 2..UBI_MAGIC_SIZE + 4].copy_from_slice(&self.version_minor);
+        header[UBI_MAGIC_SIZE + 2..UBI_MAGIC_SIZE + 4]
+            .copy_from_slice(&self.format_version_minor().to_le_bytes());
         header[UBI_MAGIC_SIZE + 4] = self.stripe_sector_count_shift;
 
         let stripe_count = self.stripe_headers.len();
@@ -469,6 +484,39 @@ mod tests {
             assert_eq!(loaded.sector_size_shift, shift);
             assert_eq!(loaded.sector_size(), sector_size);
         }
+    }
+
+    /// v0.6.0 gives every volume 512-byte sectors, and reads only version 2.0.
+    fn v0_6_0_accepts(buf: &[u8]) -> bool {
+        buf[UBI_MAGIC_SIZE..UBI_MAGIC_SIZE + 4] == [2, 0, 0, 0]
+    }
+
+    #[test]
+    fn only_512_byte_sector_metadata_is_readable_by_v0_6_0() {
+        for (sector_size, readable) in [(None, true), (Some(512), true), (Some(4096), false)] {
+            let mut metadata = UbiMetadata::new(11, 4, 0);
+            if let Some(sector_size) = sector_size {
+                metadata = metadata.with_sector_size(sector_size).unwrap();
+            }
+            let buf = serialize(&metadata);
+            assert_eq!(v0_6_0_accepts(&buf), readable, "{sector_size:?}");
+            let loaded = UbiMetadata::from_bytes(&buf).unwrap();
+            assert_eq!(loaded.sector_size(), sector_size.unwrap_or(512));
+        }
+    }
+
+    /// Builds before version 2.1 wrote 4096-byte sector metadata as 2.0.
+    #[test]
+    fn version_2_0_metadata_with_4096_byte_sectors_is_rewritten_as_2_1() {
+        let mut buf = serialize(&UbiMetadata::new(11, 4, 0).with_sector_size(4096).unwrap());
+        let mut header = buf[..UbiMetadata::HEADER_SIZE].to_vec();
+        header[UBI_MAGIC_SIZE + 2..UBI_MAGIC_SIZE + 4].copy_from_slice(&[0, 0]);
+        write_sector_with_crc32(&mut buf[..SECTOR_SIZE], &header);
+        assert!(v0_6_0_accepts(&buf));
+
+        let loaded = UbiMetadata::from_bytes(&buf).unwrap();
+        assert_eq!(loaded.sector_size(), 4096);
+        assert!(!v0_6_0_accepts(&serialize(&loaded)));
     }
 
     /// Metadata written before the sector size was recorded has zero padding

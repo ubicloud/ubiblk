@@ -37,7 +37,10 @@ impl UbiMetadata {
 #[cfg(test)]
 mod tests {
     use crate::block_device::{
-        bdev_lazy::metadata::types::METADATA_VERSION_MINOR, bdev_test::TestBlockDevice,
+        bdev_lazy::metadata::types::{
+            write_sector_with_crc32, METADATA_VERSION_MINOR_SECTOR_SIZE, UBI_MAGIC_SIZE,
+        },
+        bdev_test::TestBlockDevice,
     };
 
     use super::*;
@@ -86,9 +89,16 @@ mod tests {
     #[test]
     fn test_invalid_version() {
         let device = TestBlockDevice::new(1024 * 1024);
-        let mut metadata = UbiMetadata::new(11, 16, 16);
-        metadata.version_minor = (METADATA_VERSION_MINOR + 1).to_le_bytes();
+        let metadata = UbiMetadata::new(11, 16, 16);
         metadata.save_to_bdev(&device).expect("save metadata");
+        let mut header = [0u8; UbiMetadata::HEADER_SIZE];
+        let mut sector = [0u8; SECTOR_SIZE];
+        metadata.write_header_sector(&mut sector).unwrap();
+        header.copy_from_slice(&sector[..UbiMetadata::HEADER_SIZE]);
+        header[UBI_MAGIC_SIZE + 2..UBI_MAGIC_SIZE + 4]
+            .copy_from_slice(&(METADATA_VERSION_MINOR_SECTOR_SIZE + 1).to_le_bytes());
+        write_sector_with_crc32(&mut sector, &header);
+        device.write(0, &sector, SECTOR_SIZE);
 
         let result = UbiMetadata::load_from_bdev(&device);
         assert!(

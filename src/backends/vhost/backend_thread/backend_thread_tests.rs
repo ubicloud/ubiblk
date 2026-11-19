@@ -22,7 +22,7 @@ mod tests {
     use crate::{
         backends::{
             common::io_tracking::{IoKind, IoTracker},
-            vhost::backend_thread::UbiBlkBackendThread,
+            vhost::backend_thread::{UbiBlkBackendThread, MAX_WRITE_ZEROES_SECTORS},
             vhost::request::{Request, RequestType},
             SECTOR_SIZE,
         },
@@ -1137,6 +1137,11 @@ mod tests {
                 VIRTIO_BLK_S_IOERR as u8
             );
         }
+        thread.sector_count = u64::MAX;
+        assert_eq!(
+            write_zeroes_status(&mut thread, &mem, 0, MAX_WRITE_ZEROES_SECTORS + 1, 0),
+            VIRTIO_BLK_S_IOERR as u8
+        );
         assert_eq!(base.metrics.read().unwrap().writes, 0);
     }
 

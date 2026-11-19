@@ -8,7 +8,7 @@ use crate::{
     Result,
 };
 
-use super::backend_thread::UbiBlkBackendThread;
+use super::backend_thread::{UbiBlkBackendThread, MAX_WRITE_ZEROES_SECTORS};
 use log::{debug, error, info, warn};
 use vhost::vhost_user::message::*;
 use vhost_user_backend::{bitmap::BitmapMmapRegion, VhostUserBackend, VringRwLock, VringT};
@@ -25,9 +25,6 @@ use vmm_sys_util::{
 };
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
-
-/// 1 GiB, in 512-byte sectors.
-const MAX_WRITE_ZEROES_SECTORS: u32 = 1 << 21;
 
 pub struct UbiBlkBackend {
     threads: Vec<Mutex<UbiBlkBackendThread>>,

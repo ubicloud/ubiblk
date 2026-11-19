@@ -31,6 +31,9 @@ type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
 type Vring<'a> = RwLockWriteGuard<'a, VringState<GuestMemoryAtomic<GuestMemoryMmap>>>;
 type DescChain = DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>;
 
+/// 1 GiB, in 512-byte sectors.
+pub(crate) const MAX_WRITE_ZEROES_SECTORS: u32 = 1 << 21;
+
 #[derive(Debug, Clone)]
 struct RequestSlot {
     used: bool,
@@ -410,7 +413,9 @@ impl UbiBlkBackendThread {
             self.complete_io(vring, desc_chain, status_addr, VIRTIO_BLK_S_UNSUPP as u8);
             return;
         }
-        if !self.validate_range(sector, num_sectors as u64 * SECTOR_SIZE as u64) {
+        if num_sectors > MAX_WRITE_ZEROES_SECTORS
+            || !self.validate_range(sector, num_sectors as u64 * SECTOR_SIZE as u64)
+        {
             self.complete_io(vring, desc_chain, status_addr, VIRTIO_BLK_S_IOERR as u8);
             return;
         }

@@ -125,9 +125,11 @@ impl StripeFetcher {
             return;
         }
 
-        // A stripe zeroed after it was fetched is fetched again, from zeros.
+        // A stripe zeroed after its fetch was published is fetched again, from
+        // zeros. A fetch not yet published is still current.
         if self.shared_metadata_state.stripe_fetch_state(stripe_id) == super::metadata::Zeroed
             && self.stripe_states.get(&stripe_id) == Some(&FetchState::Fetched)
+            && !self.finished_fetches.contains(&(stripe_id, true))
         {
             self.stripe_states.remove(&stripe_id);
         }
@@ -471,6 +473,19 @@ mod tests {
         let mut out = vec![0xff; stripe_len];
         state.target_dev.read(0, &mut out, stripe_len);
         assert!(out.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn an_unpublished_fetch_of_a_zeroed_stripe_is_not_redone() {
+        let mut state = prep(false);
+        let shared = state.fetcher.shared_metadata_state.clone();
+        shared.set_stripe_header(0, metadata_flags::FETCHED);
+        assert!(shared.set_stripe_zeroed(0));
+
+        state.fetcher.handle_fetch_request(0, true);
+        state.fetcher.handle_fetch_request(0, false);
+        assert!(state.fetcher.fetch_queue.is_empty());
+        assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
     }
 
     #[test]

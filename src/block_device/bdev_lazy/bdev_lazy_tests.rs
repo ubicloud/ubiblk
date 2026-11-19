@@ -1,10 +1,11 @@
 #[cfg(test)]
 mod tests {
     use crate::backends::SECTOR_SIZE;
+    use crate::block_device::bdev_lazy::metadata::Zeroed;
     use crate::block_device::{
         bdev_lazy::{LazyBlockDevice, LazyTask, SharedMetadataState, UbiMetadata},
         bdev_test::{TestBlockDevice, TestDeviceMetrics},
-        metadata_flags, BgWorker, BlockDevice, IoChannel,
+        metadata_flags, BgWorker, BlockDevice, CryptBlockDevice, IoChannel, UringBlockDevice,
     };
     use crate::block_device::{shared_buffer, SharedBuffer};
     use std::cell::RefCell;
@@ -29,6 +30,7 @@ mod tests {
         stripe_sectors: u64,
         target_mem: Arc<RwLock<Vec<u8>>>,
         target_metrics: Arc<RwLock<TestDeviceMetrics>>,
+        target_fail_next: Arc<AtomicBool>,
         metadata_fail_next: Arc<AtomicBool>,
         image_metrics: Option<Arc<RwLock<TestDeviceMetrics>>>,
     }
@@ -47,6 +49,7 @@ mod tests {
         let target_dev = TestBlockDevice::new(size);
         let target_mem = target_dev.mem.clone();
         let target_metrics = target_dev.metrics.clone();
+        let target_fail_next = target_dev.fail_next.clone();
 
         let metadata_dev = TestBlockDevice::new(METADATA_SIZE);
         let metadata_fail_next = metadata_dev.fail_next.clone();
@@ -85,7 +88,7 @@ mod tests {
                 &metadata_dev,
                 SECTOR_SIZE,
                 false,
-                false,
+                skip_whole_stripe_fetch,
                 metadata_state.clone(),
             )
             .unwrap();
@@ -107,6 +110,7 @@ mod tests {
                 stripe_sectors: STRIPE_SECTORS,
                 target_mem,
                 target_metrics,
+                target_fail_next,
                 metadata_fail_next,
                 image_metrics: Some(image_metrics),
             }
@@ -130,7 +134,7 @@ mod tests {
                 &metadata_dev,
                 SECTOR_SIZE,
                 false,
-                false,
+                skip_whole_stripe_fetch,
                 metadata_state.clone(),
             )
             .unwrap();
@@ -152,6 +156,7 @@ mod tests {
                 stripe_sectors: STRIPE_SECTORS,
                 target_mem,
                 target_metrics,
+                target_fail_next,
                 metadata_fail_next,
                 image_metrics: None,
             }
@@ -679,5 +684,241 @@ mod tests {
         assert_eq!(chan.poll(), vec![(2, true)]);
         assert_eq!(buf.borrow().as_slice(), &[0; 4096]);
         assert_eq!(image_metrics.read().unwrap().reads, 1);
+    }
+
+    fn sector_bytes(env: &TestEnv, sector: u64, sectors: u64) -> Vec<u8> {
+        let start = sector as usize * SECTOR_SIZE;
+        env.target_mem.read().unwrap()[start..start + sectors as usize * SECTOR_SIZE].to_vec()
+    }
+
+    fn target_writes(env: &TestEnv) -> usize {
+        env.target_metrics.read().unwrap().writes
+    }
+
+    /// Returns an environment whose first two stripes hold 0x5a and whose
+    /// first `zeroed` stripes were then zeroed.
+    fn setup_zeroed(zeroed: u64) -> (TestEnv, Box<dyn IoChannel>) {
+        let env = setup_env_with(false, false, true, b"", DEV_SIZE);
+        let mut chan = env.lazy.create_channel().unwrap();
+        write_pattern(&mut chan, 0, 2 * STRIPE_SECTORS, 1);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert!(chan.add_write_zeroes(0, (zeroed * STRIPE_SECTORS) as u32, 2));
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(2, true)]);
+        (env, chan)
+    }
+
+    #[test]
+    fn write_zeroes_needs_disposable_volume_optimizations() {
+        let env = setup_env(false, false, b"");
+        let mut chan = env.lazy.create_channel().unwrap();
+        assert!(!env.lazy.supports_write_zeroes());
+        assert!(!chan.add_write_zeroes(0, STRIPE_SECTORS as u32, 1));
+    }
+
+    #[test]
+    fn write_zeroes_marks_whole_fetched_stripes_without_io() {
+        let env = setup_env_with(false, false, true, b"", DEV_SIZE);
+        assert!(env.lazy.supports_write_zeroes());
+        let mut chan = env.lazy.create_channel().unwrap();
+        write_pattern(&mut chan, 0, 2 * STRIPE_SECTORS, 1);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        let (writes, reads) = (
+            target_writes(&env),
+            env.target_metrics.read().unwrap().reads,
+        );
+
+        assert!(chan.add_write_zeroes(0, 2 * STRIPE_SECTORS as u32, 2));
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(2, true)]);
+        assert_eq!(target_writes(&env), writes);
+        assert!(sector_bytes(&env, 0, 2 * STRIPE_SECTORS)
+            .iter()
+            .all(|&b| b == 0x5a));
+
+        let buf = shared_buffer(2 * SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice().fill(0xff);
+        chan.add_read(STRIPE_SECTORS - 1, 2, buf.clone(), 3);
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(3, true)]);
+        assert!(buf.borrow().as_slice().iter().all(|&b| b == 0));
+        assert_eq!(env.target_metrics.read().unwrap().reads, reads);
+    }
+
+    #[test]
+    fn writes_to_zeroed_stripes() {
+        let (env, mut chan) = setup_zeroed(2);
+        let writes = target_writes(&env);
+
+        // A partial write first writes the rest of the stripe's zeros.
+        write_pattern(&mut chan, 1, 1, 3);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(3, true)]);
+        assert_eq!(target_writes(&env), writes + 2);
+        assert!(env.metadata_state.stripe_fetched(0));
+        let stripe = sector_bytes(&env, 0, STRIPE_SECTORS);
+        assert!(stripe[..SECTOR_SIZE].iter().all(|&b| b == 0));
+        assert!(stripe[SECTOR_SIZE..2 * SECTOR_SIZE]
+            .iter()
+            .all(|&b| b == 0x5a));
+        assert!(stripe[2 * SECTOR_SIZE..].iter().all(|&b| b == 0));
+
+        // A whole-stripe write needs no zeros.
+        write_pattern(&mut chan, STRIPE_SECTORS, STRIPE_SECTORS, 4);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(4, true)]);
+        assert_eq!(target_writes(&env), writes + 3);
+        assert!(env.metadata_state.stripe_fetched(1));
+    }
+
+    #[test]
+    fn reads_over_zeroed_and_fetched_stripes_write_the_zeros() {
+        let (env, mut chan) = setup_zeroed(1);
+        let buf = shared_buffer(2 * SECTOR_SIZE);
+        chan.add_read(STRIPE_SECTORS - 1, 2, buf.clone(), 3);
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(3, true)]);
+        let buf = buf.borrow();
+        assert!(buf.as_slice()[..SECTOR_SIZE].iter().all(|&b| b == 0));
+        assert!(buf.as_slice()[SECTOR_SIZE..].iter().all(|&b| b == 0x5a));
+        assert!(env.metadata_state.stripe_fetched(0));
+        assert!(sector_bytes(&env, 0, STRIPE_SECTORS)
+            .iter()
+            .all(|&b| b == 0));
+    }
+
+    #[test]
+    fn write_zeroes_writes_only_partial_stripes() {
+        let env = setup_env_with(false, false, true, b"old", DEV_SIZE);
+        env.target_mem.write().unwrap().fill(0xff);
+        let mut chan = env.lazy.create_channel().unwrap();
+        // Covers the end of stripe 0, all of stripe 1 and the start of stripe 2.
+        let sectors = 3 * STRIPE_SECTORS - 2;
+        assert!(chan.add_write_zeroes(1, sectors as u32, 1));
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert_eq!(target_writes(&env), 4);
+        assert_eq!(env.metadata_state.stripe_fetch_state(1), Zeroed);
+        assert!(sector_bytes(&env, STRIPE_SECTORS, STRIPE_SECTORS)
+            .iter()
+            .all(|&b| b == 0xff));
+
+        let len = 4 * STRIPE_SECTORS as usize * SECTOR_SIZE;
+        let buf = shared_buffer(len);
+        chan.add_read(0, 4 * STRIPE_SECTORS as u32, buf.clone(), 2);
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(2, true)]);
+        let buf = buf.borrow();
+        assert_eq!(&buf.as_slice()[..3], b"old");
+        let zeroed_end = 3 * STRIPE_SECTORS as usize * SECTOR_SIZE - SECTOR_SIZE;
+        assert!(buf.as_slice()[SECTOR_SIZE..zeroed_end]
+            .iter()
+            .all(|&b| b == 0));
+    }
+
+    #[test]
+    fn write_zeroes_over_an_unaligned_range_on_crypt_and_io_uring() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        file.as_file().set_len(64 * SECTOR_SIZE as u64).unwrap();
+        let uring = UringBlockDevice::new(file.path().to_owned(), 8, false, false, false).unwrap();
+        let base = CryptBlockDevice::new(uring, vec![1; 32], vec![2; 32]).unwrap();
+        let metadata = UbiMetadata::new(3, 8, 0);
+        let (bgworker_ch, _bgworker_rx) = channel();
+        let lazy = LazyBlockDevice::new(
+            base,
+            None,
+            bgworker_ch,
+            SharedMetadataState::new(&metadata),
+            false,
+            true,
+        )
+        .unwrap();
+        let mut chan = lazy.create_channel().unwrap();
+        let mut run = |op: &dyn Fn(&mut Box<dyn IoChannel>)| {
+            op(&mut chan);
+            chan.submit().unwrap();
+            let mut results = Vec::new();
+            for _ in 0..1000 {
+                results.extend(chan.poll());
+                if !chan.busy() {
+                    break;
+                }
+                sleep(Duration::from_millis(1));
+            }
+            results
+        };
+
+        let buf = shared_buffer(64 * SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice().fill(0xa5);
+        assert_eq!(
+            run(&|chan| chan.add_write(0, 64, buf.clone(), 1)),
+            vec![(1, true)]
+        );
+
+        // Partial stripes at both ends, both in flight at once, and two
+        // whole stripes.
+        assert_eq!(
+            run(&|chan| assert!(chan.add_write_zeroes(1, 29, 2))),
+            vec![(2, true)]
+        );
+
+        // Reads within stripes 0 and 3 or within the zeroed stripes 1 and 2
+        // need no bgworker.
+        for (sector, sectors, zeros) in [(0, 8, 1..8), (8, 16, 0..16), (24, 8, 0..6)] {
+            let buf = shared_buffer(sectors * SECTOR_SIZE);
+            assert_eq!(
+                run(&|chan| chan.add_read(sector, sectors as u32, buf.clone(), 3)),
+                vec![(3, true)]
+            );
+            for (i, data) in buf.borrow().as_slice().chunks(SECTOR_SIZE).enumerate() {
+                let expected = if zeros.contains(&i) { 0 } else { 0xa5 };
+                assert!(
+                    data.iter().all(|&b| b == expected),
+                    "sector {}",
+                    sector as usize + i
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn write_zeroes_marks_whole_stripes_written() {
+        let env = setup_env_with(true, true, true, b"old", DEV_SIZE);
+        let mut chan = env.lazy.create_channel().unwrap();
+        assert!(chan.add_write_zeroes(0, STRIPE_SECTORS as u32, 1));
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        assert_eq!(env.metadata_state.stripe_fetch_state(0), Zeroed);
+        assert!(env.metadata_state.stripe_written(0));
+        assert_eq!(image_reads(&env), 0);
+        assert_eq!(target_writes(&env), 0);
+    }
+
+    #[test]
+    fn a_queued_read_waits_for_a_stripe_zeroed_meanwhile() {
+        let env = setup_env_with(false, false, true, b"", DEV_SIZE);
+        let mut reader = env.lazy.create_channel().unwrap();
+        let mut writer = env.lazy.create_channel().unwrap();
+        write_pattern(&mut writer, 0, STRIPE_SECTORS, 1);
+        assert_eq!(drive(&env.bgworker, &mut writer), vec![(1, true)]);
+
+        // Waits for stripe 1 to be fetched.
+        let buf = shared_buffer(2 * SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice().fill(0xff);
+        reader.add_read(STRIPE_SECTORS - 1, 2, buf.clone(), 2);
+        reader.submit().unwrap();
+        assert!(writer.add_write_zeroes(0, STRIPE_SECTORS as u32, 3));
+        assert_eq!(writer.poll(), vec![(3, true)]);
+
+        assert_eq!(drive(&env.bgworker, &mut reader), vec![(2, true)]);
+        assert!(buf.borrow().as_slice().iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn write_zeroes_fails_if_a_write_fails() {
+        let env = setup_env_with(false, false, true, b"", DEV_SIZE);
+        let mut chan = env.lazy.create_channel().unwrap();
+        write_pattern(&mut chan, 0, 2 * STRIPE_SECTORS, 1);
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(1, true)]);
+        env.target_fail_next.store(true, Ordering::SeqCst);
+        assert!(chan.add_write_zeroes(0, STRIPE_SECTORS as u32 + 1, 2));
+        chan.submit().unwrap();
+        assert_eq!(drive(&env.bgworker, &mut chan), vec![(2, false)]);
     }
 }

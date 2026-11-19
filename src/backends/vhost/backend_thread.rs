@@ -31,6 +31,9 @@ type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
 type Vring<'a> = RwLockWriteGuard<'a, VringState<GuestMemoryAtomic<GuestMemoryMmap>>>;
 type DescChain = DescriptorChain<GuestMemoryLoadGuard<GuestMemoryMmap>>;
 
+/// 1 GiB, in 512-byte sectors.
+pub(crate) const MAX_WRITE_ZEROES_SECTORS: u32 = 1 << 21;
+
 #[derive(Debug, Clone)]
 struct RequestSlot {
     used: bool,
@@ -263,16 +266,20 @@ impl UbiBlkBackendThread {
     /// The disk cannot take those with direct I/O.
     pub(crate) fn validate_rw_request(&self, request: &Request) -> Option<usize> {
         let len = request.total_data_len();
+        self.validate_range(request.sector(), len)
+            .then_some(len as usize)
+    }
+
+    fn validate_range(&self, sector: u64, len: u64) -> bool {
         let sector_size = self.logical_sector_size as u64;
         if len == 0 || !len.is_multiple_of(sector_size) {
             error!("request length is zero or not a multiple of {sector_size}-byte sectors: {len}");
-            return None;
+            return false;
         }
 
-        let sector = request.sector();
         if !sector.is_multiple_of(sector_size / SECTOR_SIZE as u64) {
             error!("request at sector {sector} is not aligned to {sector_size}-byte sectors");
-            return None;
+            return false;
         }
         let in_range = sector
             .checked_add(len / SECTOR_SIZE as u64)
@@ -282,10 +289,10 @@ impl UbiBlkBackendThread {
                 "request of {len} bytes at sector {sector} is beyond the device end at sector {}",
                 self.sector_count
             );
-            return None;
+            return false;
         }
 
-        Some(len as usize)
+        true
     }
 
     fn process_read(&mut self, request: &Request, desc_chain: &DescChain, vring: &mut Vring<'_>) {
@@ -373,6 +380,57 @@ impl UbiBlkBackendThread {
         self.io_tracker.add_flush(id);
     }
 
+    /// Serves a write zeroes request with a single range, as the device
+    /// advertises a max_write_zeroes_seg of 1. The range may be split across
+    /// descriptors.
+    pub(crate) fn process_write_zeroes(
+        &mut self,
+        request: &Request,
+        desc_chain: &DescChain,
+        vring: &mut Vring<'_>,
+    ) {
+        let status_addr = request.status_addr();
+        let mut range = [0u8; 16];
+        let mut pos = 0;
+        let read = request.total_data_len() == range.len() as u64
+            && request.data().iter().all(|(addr, len)| {
+                let dst = &mut range[pos..pos + *len as usize];
+                pos += *len as usize;
+                desc_chain.memory().read_slice(dst, *addr).is_ok()
+            });
+        let range = read.then(|| {
+            (
+                u64::from_le_bytes(range[0..8].try_into().unwrap()),
+                u32::from_le_bytes(range[8..12].try_into().unwrap()),
+                u32::from_le_bytes(range[12..16].try_into().unwrap()),
+            )
+        });
+        let Some((sector, num_sectors, flags)) = range else {
+            error!("malformed write zeroes request");
+            self.complete_io(vring, desc_chain, status_addr, VIRTIO_BLK_S_IOERR as u8);
+            return;
+        };
+        if flags & !VIRTIO_BLK_WRITE_ZEROES_FLAG_UNMAP != 0 {
+            error!("write zeroes request with unknown flags 0x{flags:x}");
+            self.complete_io(vring, desc_chain, status_addr, VIRTIO_BLK_S_UNSUPP as u8);
+            return;
+        }
+        if num_sectors > MAX_WRITE_ZEROES_SECTORS
+            || !self.validate_range(sector, num_sectors as u64 * SECTOR_SIZE as u64)
+        {
+            self.complete_io(vring, desc_chain, status_addr, VIRTIO_BLK_S_IOERR as u8);
+            return;
+        }
+
+        let id = self.get_request_slot(0, request, desc_chain);
+        if !self.io_channel.add_write_zeroes(sector, num_sectors, id) {
+            self.complete_io(vring, desc_chain, status_addr, VIRTIO_BLK_S_UNSUPP as u8);
+            self.put_request_slot(id);
+            return;
+        }
+        self.io_tracker.add_write(id, sector, num_sectors as u64);
+    }
+
     pub(crate) fn process_get_device_id(
         &mut self,
         request: &Request,
@@ -424,6 +482,9 @@ impl UbiBlkBackendThread {
                     RequestType::In => self.process_read(&request, &desc_chain, vring),
                     RequestType::Out => self.process_write(&request, &desc_chain, vring),
                     RequestType::Flush => self.process_flush(&request, &desc_chain, vring),
+                    RequestType::WriteZeroes => {
+                        self.process_write_zeroes(&request, &desc_chain, vring)
+                    }
                     RequestType::GetDeviceID => {
                         self.process_get_device_id(&request, desc_chain, vring)
                     }

@@ -17,6 +17,11 @@ pub trait IoChannel: Send {
     fn add_read(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);
     fn add_write(&mut self, sector_offset: u64, sector_count: u32, buf: SharedBuffer, id: usize);
     fn add_flush(&mut self, id: usize);
+    /// Returns false, without queueing anything, if the channel does not
+    /// support write zeroes.
+    fn add_write_zeroes(&mut self, _sector_offset: u64, _sector_count: u32, _id: usize) -> bool {
+        false
+    }
     fn submit(&mut self) -> Result<()>;
 
     fn poll(&mut self) -> Vec<(usize, bool)>;
@@ -33,6 +38,10 @@ pub trait BlockDevice: Send + Sync {
     /// aligned to it.
     fn logical_sector_size(&self) -> usize {
         crate::backends::SECTOR_SIZE
+    }
+
+    fn supports_write_zeroes(&self) -> bool {
+        false
     }
 
     fn stripe_count(&self, stripe_sector_count: u64) -> usize {

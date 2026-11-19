@@ -17,6 +17,9 @@ pub const NotFetched: u8 = 0;
 pub const Fetched: u8 = 1;
 pub const Failed: u8 = 2;
 pub const NoSource: u8 = 3;
+/// Reads as zeros without the zeros being on the disk. Only used when the
+/// stripe map is not persisted.
+pub const Zeroed: u8 = 4;
 
 pub const NotWritten: u8 = 0;
 pub const Written: u8 = 1;
@@ -81,13 +84,24 @@ impl SharedMetadataState {
     pub fn set_stripe_header(&self, stripe_id: usize, header: u8) {
         if header & metadata_flags::FETCHED != 0 {
             let prev = self.stripe_fetch_states[stripe_id].swap(Fetched, Ordering::AcqRel);
-            if prev != Fetched && prev != NoSource {
+            if prev != Fetched && prev != NoSource && prev != Zeroed {
                 self.fetched_stripes_count.fetch_add(1, Ordering::AcqRel);
             }
         }
         if header & metadata_flags::WRITTEN != 0 {
             self.stripe_write_states[stripe_id].store(Written, Ordering::Release)
         }
+    }
+
+    /// Marks a stripe that needs no source data as zeroed. Returns false for
+    /// a stripe that still needs its source data or has failed.
+    pub fn set_stripe_zeroed(&self, stripe_id: usize) -> bool {
+        let state = &self.stripe_fetch_states[stripe_id];
+        [Zeroed, Fetched, NoSource].into_iter().any(|from| {
+            state
+                .compare_exchange(from, Zeroed, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        })
     }
 
     pub fn set_stripe_failed(&self, stripe_id: usize) {
@@ -181,6 +195,29 @@ mod tests {
         assert!(state.stripe_fetched_if_needed(0));
         assert!(!state.stripe_fetched_if_needed(1));
         assert!(state.stripe_fetched_if_needed(5));
+    }
+
+    #[test]
+    fn zeroed_stripes() {
+        let mut metadata = UbiMetadata::new(0, 4, 3);
+        metadata.set_stripe_header(0, metadata_flags::FETCHED | metadata_flags::HAS_SOURCE);
+        let state = SharedMetadataState::new(&metadata);
+        state.set_stripe_failed(2);
+
+        assert!(state.set_stripe_zeroed(0));
+        assert!(state.set_stripe_zeroed(0));
+        assert!(!state.set_stripe_zeroed(1));
+        assert!(!state.set_stripe_zeroed(2));
+        assert!(state.set_stripe_zeroed(3));
+        assert_eq!(state.stripe_fetch_state(0), Zeroed);
+        assert_eq!(state.stripe_fetch_state(1), NotFetched);
+        assert_eq!(state.stripe_fetch_state(3), Zeroed);
+        assert!(!state.stripe_fetched_if_needed(0));
+
+        // Writing the zeros out does not fetch the stripe a second time.
+        state.set_stripe_header(0, metadata_flags::FETCHED);
+        state.set_stripe_header(3, metadata_flags::FETCHED);
+        assert_eq!(state.fetched_stripes(), 1);
     }
 
     #[test]

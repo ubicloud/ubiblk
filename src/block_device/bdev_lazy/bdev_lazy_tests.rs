@@ -891,6 +891,26 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_read_waits_for_a_stripe_zeroed_meanwhile() {
+        let env = setup_env_with(false, false, true, b"", DEV_SIZE);
+        let mut reader = env.lazy.create_channel().unwrap();
+        let mut writer = env.lazy.create_channel().unwrap();
+        write_pattern(&mut writer, 0, STRIPE_SECTORS, 1);
+        assert_eq!(drive(&env.bgworker, &mut writer), vec![(1, true)]);
+
+        // Waits for stripe 1 to be fetched.
+        let buf = shared_buffer(2 * SECTOR_SIZE);
+        buf.borrow_mut().as_mut_slice().fill(0xff);
+        reader.add_read(STRIPE_SECTORS - 1, 2, buf.clone(), 2);
+        reader.submit().unwrap();
+        assert!(writer.add_write_zeroes(0, STRIPE_SECTORS as u32, 3));
+        assert_eq!(writer.poll(), vec![(3, true)]);
+
+        assert_eq!(drive(&env.bgworker, &mut reader), vec![(2, true)]);
+        assert!(buf.borrow().as_slice().iter().all(|&b| b == 0));
+    }
+
+    #[test]
     fn write_zeroes_fails_if_a_write_fails() {
         let env = setup_env_with(false, false, true, b"", DEV_SIZE);
         let mut chan = env.lazy.create_channel().unwrap();

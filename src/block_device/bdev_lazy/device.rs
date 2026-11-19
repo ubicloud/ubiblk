@@ -268,7 +268,16 @@ impl LazyIoChannel {
         while let Some(front) = self.queued_rw_requests.front() {
             match self.request_stripes_fetch_status(front) {
                 StripesFetchStatus::Complete => {}
-                StripesFetchStatus::Pending => break,
+                StripesFetchStatus::Pending if front.kind == RequestType::Zero => break,
+                StripesFetchStatus::Pending => {
+                    // Asks for any stripe zeroed since the request was queued.
+                    let front = self.queued_rw_requests.pop_front().expect("front exists");
+                    if let Err(e) = self.start_stripe_fetches(&front) {
+                        error!("Failed to send fetch request for request {}: {e}", front.id);
+                    }
+                    self.queued_rw_requests.push_front(front);
+                    break;
+                }
                 StripesFetchStatus::Failed { stripe_id } => {
                     let front = self.queued_rw_requests.pop_front().expect("front exists");
                     self.finished_requests.push((front.id, false));

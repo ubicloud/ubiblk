@@ -1158,4 +1158,38 @@ mod tests {
             VIRTIO_BLK_S_IOERR as u8
         );
     }
+
+    #[test]
+    fn write_zeroes_reads_a_range_split_across_descriptors() {
+        let (mut thread, mem, base) = create_lazy_thread_with(true);
+        base.write(0, &[0xa5; SECTOR_SIZE], SECTOR_SIZE);
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let (hdr, data, status) = (GuestAddress(0x1000), 0x2000, GuestAddress(0x3000));
+        mem.write_obj::<u32>(VIRTIO_BLK_T_WRITE_ZEROES, hdr)
+            .unwrap();
+        mem.write_obj::<u64>(0, GuestAddress(data)).unwrap();
+        mem.write_obj::<u32>(1, GuestAddress(data + 0x100)).unwrap();
+        mem.write_obj::<u32>(0, GuestAddress(data + 0x104)).unwrap();
+        let next = VRING_DESC_F_NEXT as u16;
+        let descs = [
+            RawDescriptor::from(SplitDescriptor::new(hdr.0, 16, next, 1)),
+            RawDescriptor::from(SplitDescriptor::new(data, 8, next, 2)),
+            RawDescriptor::from(SplitDescriptor::new(data + 0x100, 8, next, 3)),
+            RawDescriptor::from(SplitDescriptor::new(
+                status.0,
+                1,
+                VRING_DESC_F_WRITE as u16,
+                0,
+            )),
+        ];
+        queue.add_desc_chains(&descs, 0).unwrap();
+
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+        assert_eq!(mem.read_obj::<u8>(status).unwrap(), VIRTIO_BLK_S_OK as u8);
+        let mut out = vec![0xff; SECTOR_SIZE];
+        base.read(0, &mut out, SECTOR_SIZE);
+        assert!(out.iter().all(|&b| b == 0));
+    }
 }

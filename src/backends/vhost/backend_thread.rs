@@ -381,7 +381,8 @@ impl UbiBlkBackendThread {
     }
 
     /// Serves a write zeroes request with a single range, as the device
-    /// advertises a max_write_zeroes_seg of 1.
+    /// advertises a max_write_zeroes_seg of 1. The range may be split across
+    /// descriptors.
     pub(crate) fn process_write_zeroes(
         &mut self,
         request: &Request,
@@ -389,20 +390,21 @@ impl UbiBlkBackendThread {
         vring: &mut Vring<'_>,
     ) {
         let status_addr = request.status_addr();
-        let range = match request.data() {
-            [(addr, 16)] => desc_chain
-                .memory()
-                .read_obj::<[u8; 16]>(*addr)
-                .ok()
-                .map(|b| {
-                    (
-                        u64::from_le_bytes(b[0..8].try_into().unwrap()),
-                        u32::from_le_bytes(b[8..12].try_into().unwrap()),
-                        u32::from_le_bytes(b[12..16].try_into().unwrap()),
-                    )
-                }),
-            _ => None,
-        };
+        let mut range = [0u8; 16];
+        let mut pos = 0;
+        let read = request.total_data_len() == range.len() as u64
+            && request.data().iter().all(|(addr, len)| {
+                let dst = &mut range[pos..pos + *len as usize];
+                pos += *len as usize;
+                desc_chain.memory().read_slice(dst, *addr).is_ok()
+            });
+        let range = read.then(|| {
+            (
+                u64::from_le_bytes(range[0..8].try_into().unwrap()),
+                u32::from_le_bytes(range[8..12].try_into().unwrap()),
+                u32::from_le_bytes(range[12..16].try_into().unwrap()),
+            )
+        });
         let Some((sector, num_sectors, flags)) = range else {
             error!("malformed write zeroes request");
             self.complete_io(vring, desc_chain, status_addr, VIRTIO_BLK_S_IOERR as u8);

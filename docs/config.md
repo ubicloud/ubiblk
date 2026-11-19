@@ -388,6 +388,17 @@ Linux guests send requests of at most `seg_count_max * seg_size_max` bytes
 can cover to benefit from this optimization. The stripe size is set with
 `init-metadata --stripe-sector-count-shift` and defaults to 1 MiB.
 
+#### Write zeroes
+
+A disposable volume with a metadata device advertises `VIRTIO_BLK_F_WRITE_ZEROES`.
+Each whole stripe that a write zeroes request covers is marked zeroed in the
+in-memory map, without disk I/O and without fetching its source data. Reads
+of a zeroed stripe return zeros. The zeros reach the disk only when a partial
+write or a read that also covers other stripes needs them there. The backend
+writes zeros over the partial stripes at the ends of the range. Guests such
+as Linux's `ext4lazyinit` zero large ranges this way, so most of their
+zeroing costs no disk writes.
+
 ## Example Configs
 
 ### Development (plaintext, no encryption)

@@ -6,7 +6,8 @@ mod tests {
     use virtio_bindings::bindings::virtio_ring::{VRING_DESC_F_NEXT, VRING_DESC_F_WRITE};
     use virtio_bindings::virtio_blk::{
         VIRTIO_BLK_ID_BYTES, VIRTIO_BLK_S_IOERR, VIRTIO_BLK_S_OK, VIRTIO_BLK_S_UNSUPP,
-        VIRTIO_BLK_T_GET_ID, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT,
+        VIRTIO_BLK_T_GET_ID, VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT, VIRTIO_BLK_T_WRITE_ZEROES,
+        VIRTIO_BLK_WRITE_ZEROES_FLAG_UNMAP,
     };
     use virtio_queue::{
         desc::{split::Descriptor as SplitDescriptor, RawDescriptor},
@@ -205,6 +206,13 @@ mod tests {
     /// Creates a thread over a lazy device with no stripe source, as used for
     /// image-backed and track_written volumes in production.
     fn create_lazy_thread() -> (UbiBlkBackendThread, GuestMemory) {
+        let (thread, mem, _base) = create_lazy_thread_with(false);
+        (thread, mem)
+    }
+
+    fn create_lazy_thread_with(
+        disposable: bool,
+    ) -> (UbiBlkBackendThread, GuestMemory, TestBlockDevice) {
         let (gm, mem) = setup_mem();
         let config = default_config("img");
         let base = TestBlockDevice::new(SECTOR_SIZE as u64 * 8);
@@ -212,12 +220,12 @@ mod tests {
         let metadata_state = SharedMetadataState::new(&metadata);
         let (bgworker_ch, _bgworker_rx) = std::sync::mpsc::channel();
         let lazy = LazyBlockDevice::new(
-            Box::new(base),
+            BlockDevice::clone(&base),
             None,
             bgworker_ch,
             metadata_state,
             false,
-            false,
+            disposable,
         )
         .unwrap();
         let io_channel = lazy.create_channel().unwrap();
@@ -231,7 +239,7 @@ mod tests {
             IoTracker::new(64),
         )
         .unwrap();
-        (thread, mem)
+        (thread, mem, base)
     }
 
     #[test]
@@ -1061,5 +1069,88 @@ mod tests {
         assert!(stored[BLOCK..2 * BLOCK].iter().all(|&b| b == 0xee));
         assert!(stored[..BLOCK] == pattern[..BLOCK]);
         assert!(stored[2 * BLOCK..] == pattern[2 * BLOCK..]);
+    }
+
+    fn write_zeroes_status(
+        thread: &mut UbiBlkBackendThread,
+        mem: &GuestMemory,
+        sector: u64,
+        num_sectors: u32,
+        flags: u32,
+    ) -> u8 {
+        let queue = MockSplitQueue::new(mem, 16);
+        let vring = setup_vring_with_queue(mem, 16, &queue);
+        let addrs = setup_queue_request(mem, &queue, 0x1000, VIRTIO_BLK_T_WRITE_ZEROES, 0, 16, 0);
+        mem.write_obj::<u64>(sector.to_le(), addrs.data).unwrap();
+        mem.write_obj::<u32>(num_sectors.to_le(), addrs.data.unchecked_add(8))
+            .unwrap();
+        mem.write_obj::<u32>(flags.to_le(), addrs.data.unchecked_add(12))
+            .unwrap();
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+        mem.read_obj::<u8>(addrs.status).unwrap()
+    }
+
+    #[test]
+    fn write_zeroes_over_a_whole_stripe_does_not_write() {
+        let (mut thread, mem, base) = create_lazy_thread_with(true);
+        base.write(0, &[0xa5; SECTOR_SIZE], SECTOR_SIZE);
+        let status =
+            write_zeroes_status(&mut thread, &mem, 0, 8, VIRTIO_BLK_WRITE_ZEROES_FLAG_UNMAP);
+        assert_eq!(status, VIRTIO_BLK_S_OK as u8);
+        assert_eq!(base.metrics.read().unwrap().writes, 0);
+    }
+
+    #[test]
+    fn write_zeroes_within_a_stripe_writes_zeros() {
+        let (mut thread, mem, base) = create_lazy_thread_with(true);
+        base.write(0, &[0xa5; 2 * SECTOR_SIZE], 2 * SECTOR_SIZE);
+        assert_eq!(
+            write_zeroes_status(&mut thread, &mem, 1, 1, 0),
+            VIRTIO_BLK_S_OK as u8
+        );
+        let mut out = vec![0u8; 2 * SECTOR_SIZE];
+        base.read(0, &mut out, 2 * SECTOR_SIZE);
+        assert!(out[..SECTOR_SIZE].iter().all(|&b| b == 0xa5));
+        assert!(out[SECTOR_SIZE..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn write_zeroes_is_unsupported_without_disposable_volume_optimizations() {
+        let (mut thread, mem) = create_lazy_thread();
+        assert_eq!(
+            write_zeroes_status(&mut thread, &mem, 0, 8, 0),
+            VIRTIO_BLK_S_UNSUPP as u8
+        );
+    }
+
+    #[test]
+    fn write_zeroes_rejects_bad_requests() {
+        let (mut thread, mem, base) = create_lazy_thread_with(true);
+        assert_eq!(
+            write_zeroes_status(&mut thread, &mem, 0, 8, 2),
+            VIRTIO_BLK_S_UNSUPP as u8
+        );
+        for (sector, num_sectors) in [(0, 0), (8, 1), (u64::MAX, 1)] {
+            assert_eq!(
+                write_zeroes_status(&mut thread, &mem, sector, num_sectors, 0),
+                VIRTIO_BLK_S_IOERR as u8
+            );
+        }
+        assert_eq!(base.metrics.read().unwrap().writes, 0);
+    }
+
+    #[test]
+    fn write_zeroes_rejects_a_malformed_range() {
+        let (mut thread, mem, _base) = create_lazy_thread_with(true);
+        let queue = MockSplitQueue::new(&mem, 16);
+        let vring = setup_vring_with_queue(&mem, 16, &queue);
+        let addrs = setup_queue_request(&mem, &queue, 0x1000, VIRTIO_BLK_T_WRITE_ZEROES, 0, 8, 0);
+        let mut vring_guard = vring.get_mut();
+        assert!(thread.process_queue(&mut vring_guard));
+        assert_eq!(
+            mem.read_obj::<u8>(addrs.status).unwrap(),
+            VIRTIO_BLK_S_IOERR as u8
+        );
     }
 }

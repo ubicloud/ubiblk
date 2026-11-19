@@ -125,6 +125,13 @@ impl StripeFetcher {
             return;
         }
 
+        // A stripe zeroed after it was fetched is fetched again, from zeros.
+        if self.shared_metadata_state.stripe_fetch_state(stripe_id) == super::metadata::Zeroed
+            && self.stripe_states.get(&stripe_id) == Some(&FetchState::Fetched)
+        {
+            self.stripe_states.remove(&stripe_id);
+        }
+
         match self.stripe_states.entry(stripe_id) {
             Entry::Occupied(_) => {
                 debug!("Stripe {stripe_id} has already been requested");
@@ -191,7 +198,11 @@ impl StripeFetcher {
     pub fn update_autofetch(&mut self) {
         if self.autofetch && self.fetch_queue.is_empty() {
             if let Some(stripe_id) = self.autofetch_queue.pop_front() {
-                self.handle_fetch_request(stripe_id, false);
+                if self.shared_metadata_state.stripe_fetch_state(stripe_id)
+                    != super::metadata::Zeroed
+                {
+                    self.handle_fetch_request(stripe_id, false);
+                }
             }
         }
     }
@@ -206,6 +217,14 @@ impl StripeFetcher {
 
             let buf = self.buffer_pool.get_buffer().unwrap();
             self.allocated_buffers.insert(stripe_id, buf.clone());
+            if self.shared_metadata_state.stripe_fetch_state(stripe_id) == super::metadata::Zeroed {
+                buf.borrow_mut().as_mut_slice().fill(0);
+                self.stripe_states.insert(stripe_id, FetchState::Fetching);
+                if !self.start_write(buf, stripe_id) {
+                    self.fetch_completed(stripe_id, false);
+                }
+                continue;
+            }
             if let Err(e) = self.stripe_source.request(stripe_id, buf.clone()) {
                 error!("Failed to request stripe {stripe_id} from source: {e:?}");
                 self.fetch_completed(stripe_id, false);
@@ -428,6 +447,40 @@ mod tests {
         assert_eq!(target_metrics.flushes, 0);
         let mem = state.target_dev.mem.read().unwrap();
         assert_eq!(&mem[..STRIPE_SECTOR_SIZE], &[0xAAu8; STRIPE_SECTOR_SIZE]);
+    }
+
+    #[test]
+    fn zeroed_stripes_are_fetched_from_zeros() {
+        let mut state = prep(false);
+        let shared = state.fetcher.shared_metadata_state.clone();
+        state.fetcher.handle_fetch_request(0, true);
+        state.fetcher.take_finished_fetches();
+        shared.set_stripe_header(0, metadata_flags::FETCHED);
+        let stripe_len = 8 * STRIPE_SECTOR_SIZE;
+        state
+            .target_dev
+            .write(0, &vec![0xa5; stripe_len], stripe_len);
+        assert!(shared.set_stripe_zeroed(0));
+
+        state.fetcher.handle_fetch_request(0, false);
+        for _ in 0..10 {
+            state.fetcher.update();
+        }
+        assert_eq!(state.fetcher.take_finished_fetches(), vec![(0, true)]);
+        assert_eq!(state.source_dev.metrics.read().unwrap().reads, 0);
+        let mut out = vec![0xff; stripe_len];
+        state.target_dev.read(0, &mut out, stripe_len);
+        assert!(out.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn autofetch_skips_zeroed_stripes() {
+        let mut state = prep(true);
+        let shared = state.fetcher.shared_metadata_state.clone();
+        shared.set_stripe_header(0, metadata_flags::FETCHED);
+        assert!(shared.set_stripe_zeroed(0));
+        state.fetcher.update_autofetch();
+        assert!(state.fetcher.fetch_queue.is_empty());
     }
 
     #[test]

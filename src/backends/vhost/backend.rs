@@ -26,12 +26,16 @@ use vmm_sys_util::{
 
 type GuestMemoryMmap = vm_memory::GuestMemoryMmap<BitmapMmapRegion>;
 
+/// 1 GiB, in 512-byte sectors.
+const MAX_WRITE_ZEROES_SECTORS: u32 = 1 << 21;
+
 pub struct UbiBlkBackend {
     threads: Vec<Mutex<UbiBlkBackendThread>>,
     config: VirtioBlockConfig,
     queues_per_thread: Vec<u64>,
     mem: GuestMemoryAtomic<GuestMemoryMmap>,
     backend_config: v2::Config,
+    write_zeroes: bool,
 }
 
 impl UbiBlkBackend {
@@ -55,6 +59,7 @@ impl UbiBlkBackend {
         // blocks, and no part of it can be smaller than one.
         let blk_size = block_device.logical_sector_size() as u32;
         let in_blocks = |size: u32| size.max(blk_size) / blk_size;
+        let write_zeroes = block_device.supports_write_zeroes();
         let virtio_config = VirtioBlockConfig {
             capacity: nsectors, /* The capacity (in SECTOR_SIZE-byte sectors). */
             blk_size,           /* block size of device (if VIRTIO_BLK_F_BLK_SIZE) */
@@ -65,6 +70,12 @@ impl UbiBlkBackend {
             opt_io_size: in_blocks(config.tuning.opt_io_size),
             num_queues: config.tuning.num_queues as u16,
             writeback,
+            max_write_zeroes_sectors: if write_zeroes {
+                MAX_WRITE_ZEROES_SECTORS
+            } else {
+                0
+            },
+            max_write_zeroes_seg: write_zeroes as u32,
             ..Default::default()
         };
 
@@ -100,6 +111,7 @@ impl UbiBlkBackend {
             queues_per_thread,
             mem,
             backend_config: config.clone(),
+            write_zeroes,
         })
     }
 
@@ -142,7 +154,13 @@ impl VhostUserBackend for UbiBlkBackend {
     }
 
     fn features(&self) -> u64 {
-        (1 << VIRTIO_BLK_F_SEG_MAX)
+        let write_zeroes = if self.write_zeroes {
+            1 << VIRTIO_BLK_F_WRITE_ZEROES
+        } else {
+            0
+        };
+        write_zeroes
+            | (1 << VIRTIO_BLK_F_SEG_MAX)
             | (1 << VIRTIO_BLK_F_BLK_SIZE)
             | (1 << VIRTIO_BLK_F_SIZE_MAX)
             | (1 << VIRTIO_BLK_F_FLUSH)
@@ -390,6 +408,35 @@ mod tests {
         assert!(features & (1 << VIRTIO_BLK_F_FLUSH) != 0);
         let protocol = backend.protocol_features();
         assert!(protocol.contains(VhostUserProtocolFeatures::CONFIG));
+    }
+
+    #[test]
+    fn write_zeroes_is_advertised_only_if_the_device_supports_it() {
+        let backend = default_backend();
+        assert_eq!(backend.features() & (1 << VIRTIO_BLK_F_WRITE_ZEROES), 0);
+
+        let config = default_config("img".to_string());
+        let metadata = crate::block_device::UbiMetadata::new(3, 1, 0);
+        let (bgworker_ch, _bgworker_rx) = std::sync::mpsc::channel();
+        let lazy = crate::block_device::LazyBlockDevice::new(
+            Box::new(TestBlockDevice::new(SECTOR_SIZE as u64 * 8)),
+            None,
+            bgworker_ch,
+            crate::block_device::SharedMetadataState::new(&metadata),
+            false,
+            true,
+        )
+        .unwrap();
+        let mem = GuestMemoryAtomic::new(GuestMemoryMmap::new());
+        let backend = UbiBlkBackend::new(&config, mem, lazy, BUFFER_ALIGNMENT, vec![]).unwrap();
+        assert_ne!(backend.features() & (1 << VIRTIO_BLK_F_WRITE_ZEROES), 0);
+        let bytes = backend.get_config(0, std::mem::size_of::<VirtioBlockConfig>() as u32);
+        let virtio_config = VirtioBlockConfig::from_slice(&bytes).unwrap();
+        let (max_sectors, max_seg) = (
+            virtio_config.max_write_zeroes_sectors,
+            virtio_config.max_write_zeroes_seg,
+        );
+        assert_eq!((max_sectors, max_seg), (MAX_WRITE_ZEROES_SECTORS, 1));
     }
 
     /// Updating event index should propagate to all worker threads.

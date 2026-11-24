@@ -581,7 +581,7 @@ pub fn build_block_device(
         PathBuf::from(path),
         config.tuning.queue_size,
         readonly,
-        true,
+        config.tuning.direct_io,
         sync_io(config),
     )?;
 
@@ -1575,6 +1575,9 @@ source.inline = "test-credentials"
         let flags = open_flags(&config);
         assert_eq!(flags & libc::O_SYNC, 0);
         assert_ne!(flags & libc::O_DIRECT, 0);
+
+        config.tuning.direct_io = false;
+        assert_eq!(open_flags(&config) & libc::O_DIRECT, 0);
     }
 
     #[test]

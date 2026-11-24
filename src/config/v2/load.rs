@@ -42,6 +42,12 @@ impl Config {
             stripe_source.validate(&common.danger_zone, &common.secrets)?;
         }
 
+        if !tuning.direct_io && !common.danger_zone.disposable_volume_optimizations() {
+            return Err(ubiblk_error!(InvalidParameter {
+                description: "tuning.direct_io = false requires danger_zone.allow_disposable_volume_optimizations".to_string(),
+            }));
+        }
+
         if let Some(encryption) = &encryption {
             encryption.validate_secrets(&common.secrets)?;
         } else if !(common.danger_zone.enabled && common.danger_zone.allow_unencrypted_disk) {
@@ -376,6 +382,24 @@ mod tests {
                 "{err}"
             );
         }
+    }
+
+    #[test]
+    fn direct_io_off_needs_disposable_volume_optimizations() {
+        let config = |tuning: &str, disposable: bool| {
+            parse_config(&format!(
+                "[device]\ndata_path = \"/dev/ubiblk0\"\n[tuning]\n{tuning}\n\
+                 [danger_zone]\nenabled = true\nallow_unencrypted_disk = true\n\
+                 allow_disposable_volume_optimizations = {disposable}\n"
+            ))
+        };
+        assert!(config("", false).unwrap().tuning.direct_io);
+        assert!(!config("direct_io = false", true).unwrap().tuning.direct_io);
+        let err = config("direct_io = false", false).unwrap_err().to_string();
+        assert!(
+            err.contains("requires danger_zone.allow_disposable_volume_optimizations"),
+            "{err}"
+        );
     }
 
     #[test]

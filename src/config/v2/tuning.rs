@@ -40,6 +40,11 @@ pub struct TuningSection {
     pub io_engine: IoEngine,
     #[serde(default)]
     pub write_through: bool,
+    /// Open the data file with O_DIRECT. Turning it off serves the volume
+    /// through the host page cache, which is only allowed for disposable
+    /// volumes.
+    #[serde(default = "default_direct_io")]
+    pub direct_io: bool,
 }
 
 impl Default for TuningSection {
@@ -56,6 +61,7 @@ impl Default for TuningSection {
             cpus: None,
             io_engine: IoEngine::default(),
             write_through: false,
+            direct_io: default_direct_io(),
         }
     }
 }
@@ -164,6 +170,10 @@ fn default_seg_count_max() -> u32 {
 
 fn default_io_size() -> u32 {
     4096
+}
+
+fn default_direct_io() -> bool {
+    true
 }
 
 fn default_poll_timeout_us() -> u64 {

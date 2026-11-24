@@ -78,6 +78,7 @@ poll_timeout_us = 1000
 cpus = [0, 1, 2, 3]
 io_engine = "io_uring"
 write_through = false
+direct_io = true
 ```
 
 | Field | Type | Default | Valid range | Description |
@@ -93,6 +94,7 @@ write_through = false
 | `cpus` | list of integers | none | — | CPU pinning (length must match `num_queues`) |
 | `io_engine` | string | `"io_uring"` | `"io_uring"`, `"sync"` | I/O engine |
 | `write_through` | boolean | false | — | Enable write-through mode. Writes are durable when they complete, unless [disposable volume optimizations](#disposable-volume-optimizations) are enabled |
+| `direct_io` | boolean | true | — | Open the data file with `O_DIRECT`. `false` requires [disposable volume optimizations](#disposable-volume-optimizations); see [Host page cache](#host-page-cache) |
 
 The I/O topology settings apply to both the vhost-user and ublk backends.
 The 4 KiB defaults suit backing devices with 4 KiB physical sectors, including
@@ -375,6 +377,16 @@ With `tuning.write_through`, the guest sees a disk with no volatile write
 cache. On a disposable volume, ubiblk opens the disk and metadata files without
 `O_SYNC`. Writes still use direct I/O, while the host filesystem can defer
 journal commits for operations such as allocating blocks in a sparse file.
+
+#### Host page cache
+
+With `tuning.direct_io = false`, the data file is opened without `O_DIRECT`,
+so reads and writes go through the host page cache. Guest reads of recently
+written or read blocks are served from host memory, and writes complete once
+they reach it. A host crash can lose writes the guest saw complete, which is
+only acceptable for a disposable volume. The cache holds ciphertext when the
+disk is encrypted. The host needs memory outside its VM reservations for the
+cache to help.
 
 #### Whole-stripe writes
 

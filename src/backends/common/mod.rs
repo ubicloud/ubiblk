@@ -536,13 +536,14 @@ fn create_io_engine_device(
             readonly,
             direct_io,
             write_through,
-        )?),
-        v2::tuning::IoEngine::Sync => Ok(SyncBlockDevice::new(
-            path.to_path_buf(),
-            readonly,
-            direct_io,
-            write_through,
-        )?),
+        )?
+        .with_disk_sector_size()?),
+        v2::tuning::IoEngine::Sync => {
+            Ok(
+                SyncBlockDevice::new(path.to_path_buf(), readonly, direct_io, write_through)?
+                    .with_disk_sector_size()?,
+            )
+        }
     }
 }
 
@@ -1578,6 +1579,23 @@ source.inline = "test-credentials"
 
         config.tuning.direct_io = false;
         assert_eq!(open_flags(&config) & libc::O_DIRECT, 0);
+    }
+
+    #[test]
+    fn buffered_disks_report_the_sector_size_of_the_device_under_them() {
+        let disk_file = tempfile::NamedTempFile::new().unwrap();
+        disk_file.as_file().set_len(10 * 1024 * 1024).unwrap();
+        let disk_path = disk_file.path().canonicalize().unwrap();
+        let expected = crate::block_device::detect_sector_size(&disk_path).unwrap();
+
+        for io_engine in [v2::tuning::IoEngine::IoUring, v2::tuning::IoEngine::Sync] {
+            let mut config = test_config(&disk_path, None, None);
+            config.danger_zone.allow_disposable_volume_optimizations = true;
+            config.tuning.direct_io = false;
+            config.tuning.io_engine = io_engine;
+            let device = build_block_device(&disk_path, &config, false).unwrap();
+            assert_eq!(device.logical_sector_size(), expected);
+        }
     }
 
     #[test]

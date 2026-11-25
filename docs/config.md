@@ -387,6 +387,8 @@ they reach it. A host crash can lose writes the guest saw complete, which is
 only acceptable for a disposable volume. The cache holds ciphertext when the
 disk is encrypted. The host needs memory outside its VM reservations for the
 cache to help.
+The guest is still shown the logical sector size of the device under the data
+file, so `device.sector_size` does not change with this option.
 
 #### Whole-stripe writes
 

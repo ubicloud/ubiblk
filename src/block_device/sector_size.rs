@@ -7,12 +7,35 @@ use std::{
     path::Path,
 };
 
+use log::error;
+
 use crate::{backends::SECTOR_SIZE, utils::aligned_buffer::BUFFER_ALIGNMENT, Result};
 
 /// The logical sector size direct I/O on `path` has to be aligned to: that of
 /// a block device, or of the device under a regular file.
 pub fn detect_sector_size(path: &Path) -> Result<usize> {
     sector_size_of(&std::fs::metadata(path)?)
+}
+
+/// The logical sector size a device on `path` of `size` bytes reports: that
+/// of the disk under it when `disk_sectors` is set, or 512. The file has to be
+/// a whole number of these sectors.
+pub(crate) fn checked_sector_size(path: &Path, size: u64, disk_sectors: bool) -> Result<usize> {
+    let sector_size = if disk_sectors {
+        detect_sector_size(path)?
+    } else {
+        SECTOR_SIZE
+    };
+    if !size.is_multiple_of(sector_size as u64) {
+        error!(
+            "File {} size {size} is not a multiple of sector size {sector_size}",
+            path.display()
+        );
+        return Err(crate::ubiblk_error!(InvalidParameter {
+            description: format!("File size {size} is not a multiple of sector size {sector_size}"),
+        }));
+    }
+    Ok(sector_size)
 }
 
 nix::ioctl_read!(blkgetsize64, 0x12, 114, u64);

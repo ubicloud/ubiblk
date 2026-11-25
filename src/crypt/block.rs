@@ -1,13 +1,24 @@
 use crate::{
-    backends::SECTOR_SIZE, crypt::KeyEncryptionCipher, Result, XTS_AES_256_dec, XTS_AES_256_enc,
+    aes_keyexp_256, backends::SECTOR_SIZE, crypt::KeyEncryptionCipher, Result,
+    XTS_AES_256_dec_expanded_key, XTS_AES_256_enc_expanded_key,
 };
 
 use openssl::rand::rand_bytes;
+
+/// An AES-256 key schedule, 15 round keys of 16 bytes.
+type ExpandedKey = [u8; 240];
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct XtsBlockCipher {
     key1: [u8; 32],
     key2: [u8; 32],
+    // Expanding the keys takes about a tenth of the time it takes to
+    // encrypt a 512-byte sector, so the schedules are expanded once here
+    // rather than on every call.
+    key1_enc: ExpandedKey,
+    key1_dec: ExpandedKey,
+    // The tweak is only ever encrypted.
+    key2_enc: ExpandedKey,
 }
 
 impl std::fmt::Debug for XtsBlockCipher {
@@ -24,10 +35,27 @@ impl XtsBlockCipher {
         let dec_key1 = ensure_32_bytes(key1)?;
         let dec_key2 = ensure_32_bytes(key2)?;
 
-        Ok(XtsBlockCipher {
-            key1: dec_key1,
-            key2: dec_key2,
-        })
+        Ok(Self::from_keys(dec_key1, dec_key2))
+    }
+
+    fn from_keys(key1: [u8; 32], key2: [u8; 32]) -> Self {
+        let expand = |key: &[u8; 32]| {
+            let mut enc = [0u8; 240];
+            let mut dec = [0u8; 240];
+            // SAFETY: key is 32 bytes and enc and dec are 240 bytes, the
+            // sizes aes_keyexp_256 reads and writes.
+            unsafe { aes_keyexp_256(key.as_ptr(), enc.as_mut_ptr(), dec.as_mut_ptr()) };
+            (enc, dec)
+        };
+        let (key1_enc, key1_dec) = expand(&key1);
+        let (key2_enc, _) = expand(&key2);
+        XtsBlockCipher {
+            key1,
+            key2,
+            key1_enc,
+            key1_dec,
+            key2_enc,
+        }
     }
 
     pub fn from_encrypted(
@@ -37,10 +65,7 @@ impl XtsBlockCipher {
     ) -> Result<Self> {
         let (dec_key1, dec_key2) = kek.decrypt_xts_keys(encrypted_key1, encrypted_key2)?;
 
-        Ok(XtsBlockCipher {
-            key1: dec_key1,
-            key2: dec_key2,
-        })
+        Ok(Self::from_keys(dec_key1, dec_key2))
     }
 
     pub fn from_encrypted_key(encrypted_key: Vec<u8>, kek: &KeyEncryptionCipher) -> Result<Self> {
@@ -61,7 +86,7 @@ impl XtsBlockCipher {
         let mut key2 = [0u8; 32];
         Self::rand_bytes(&mut key1)?;
         Self::rand_bytes(&mut key2)?;
-        Ok(XtsBlockCipher { key1, key2 })
+        Ok(Self::from_keys(key1, key2))
     }
 
     pub fn encrypted_keys(&self, kek: &KeyEncryptionCipher) -> Result<(Vec<u8>, Vec<u8>)> {
@@ -96,7 +121,7 @@ impl XtsBlockCipher {
                 description: "Internal error: failed to split combined key".to_string(),
             })
         })?;
-        Ok(Self { key1, key2 })
+        Ok(Self::from_keys(key1, key2))
     }
 
     fn get_initial_tweak(&self, sector: u64) -> [u8; 16] {
@@ -130,9 +155,9 @@ impl XtsBlockCipher {
             let mut tweak = self.get_initial_tweak(sector);
             let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
             unsafe {
-                XTS_AES_256_dec(
-                    self.key2.as_mut_ptr(),
-                    self.key1.as_mut_ptr(),
+                XTS_AES_256_dec_expanded_key(
+                    self.key2_enc.as_mut_ptr(),
+                    self.key1_dec.as_mut_ptr(),
                     tweak.as_mut_ptr(),
                     SECTOR_SIZE as u64,
                     sector_data.as_ptr(),
@@ -148,9 +173,9 @@ impl XtsBlockCipher {
             let mut tweak = self.get_initial_tweak(sector);
             let sector_data = &mut buf[i * SECTOR_SIZE..(i + 1) * SECTOR_SIZE];
             unsafe {
-                XTS_AES_256_enc(
-                    self.key2.as_mut_ptr(),
-                    self.key1.as_mut_ptr(),
+                XTS_AES_256_enc_expanded_key(
+                    self.key2_enc.as_mut_ptr(),
+                    self.key1_enc.as_mut_ptr(),
                     tweak.as_mut_ptr(),
                     SECTOR_SIZE as u64,
                     sector_data.as_ptr(),
@@ -184,6 +209,37 @@ mod tests {
 
         assert_eq!(&tweak[0..8], &[0u8; 8]);
         assert_eq!(&tweak[8..16], &sector.to_le_bytes());
+    }
+
+    #[test]
+    fn expanded_keys_give_the_same_ciphertext_as_raw_keys() {
+        let (mut key1, mut key2) = ([7u8; 32], [9u8; 32]);
+        let mut cipher = XtsBlockCipher::new(key1.to_vec(), key2.to_vec()).unwrap();
+        let plaintext: Vec<u8> = (0..4 * SECTOR_SIZE).map(|i| (i * 31 % 251) as u8).collect();
+        let sector_start = 0x1_0000_0001u64;
+
+        // Each sector encrypted on its own with the raw keys, as before keys
+        // were expanded up front.
+        let mut expected = plaintext.clone();
+        for (i, sector) in expected.chunks_mut(SECTOR_SIZE).enumerate() {
+            let mut tweak = cipher.get_initial_tweak(sector_start + i as u64);
+            unsafe {
+                crate::XTS_AES_256_enc(
+                    key2.as_mut_ptr(),
+                    key1.as_mut_ptr(),
+                    tweak.as_mut_ptr(),
+                    SECTOR_SIZE as u64,
+                    sector.as_ptr(),
+                    sector.as_mut_ptr(),
+                );
+            }
+        }
+
+        let mut buf = plaintext.clone();
+        cipher.encrypt(&mut buf, sector_start, 4);
+        assert_eq!(buf, expected);
+        cipher.decrypt(&mut buf, sector_start, 4);
+        assert_eq!(buf, plaintext);
     }
 
     #[test]

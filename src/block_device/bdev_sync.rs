@@ -140,23 +140,10 @@ impl SyncBlockDevice {
         match std::fs::metadata(&path) {
             Ok(metadata) => {
                 let size = super::detect_size(&path, &metadata)?;
-                // Only direct I/O is bound to the sector size of the disk.
-                let logical_sector_size = if direct_io {
-                    super::detect_sector_size(&path)?
-                } else {
-                    SECTOR_SIZE
-                };
-                if size % logical_sector_size as u64 != 0 {
-                    error!(
-                        "File {} size {size} is not a multiple of sector size {logical_sector_size}",
-                        path.display()
-                    );
-                    return Err(crate::ubiblk_error!(InvalidParameter {
-                        description: format!(
-                            "File size {size} is not a multiple of sector size {logical_sector_size}"
-                        ),
-                    }));
-                }
+                // Only direct I/O is bound to the sector size of the disk. A
+                // device shown to a guest reports it anyway; see
+                // `with_disk_sector_size`.
+                let logical_sector_size = super::checked_sector_size(&path, size, direct_io)?;
                 let sector_count = size / SECTOR_SIZE as u64;
                 Ok(Box::new(SyncBlockDevice {
                     path,
@@ -172,6 +159,17 @@ impl SyncBlockDevice {
                 Err(crate::ubiblk_error!(IoError { source: e }))
             }
         }
+    }
+
+    /// Reports the sector size of the disk under the file even without direct
+    /// I/O. A guest is shown this size and lays out its partition table in it,
+    /// so it must not depend on how the file is opened.
+    pub fn with_disk_sector_size(mut self: Box<Self>) -> Result<Box<Self>> {
+        if !self.direct_io {
+            let size = self.sector_count * SECTOR_SIZE as u64;
+            self.logical_sector_size = super::checked_sector_size(&self.path, size, true)?;
+        }
+        Ok(self)
     }
 }
 
